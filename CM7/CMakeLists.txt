@@ -63,6 +63,8 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Src/FillStation.c
     Core/Src/Ethernet.c
     Core/Src/Ethernet_it.c
+    Core/Src/SDCard.c
+    Core/Src/CRC.c
 )
 
 # Link directories setup

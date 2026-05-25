@@ -3,6 +3,7 @@
 #include "sirius-headers-common/FillingStation/FillingStationState.h"
 #include "sirius-headers-common/FillingStation/FillingStationErrorStatus.h"
 #include "Ethernet.h"
+#include "SDCard.h"
 
 #define RX_WATCHDOG 500
 
@@ -13,11 +14,12 @@ typedef struct {
     uint32_t lastEthernetMessageRx_MS;
     FillingStationErrorStatus errors;
     NetAddr gsAddr;
+    SDCard sd;
 } FillStation;
 
 
 
-extern void FILL_init();
+extern void FILL_init(SD_HandleTypeDef* sdHandler);
 
 extern void FILL_tick(uint32_t tick);
 
