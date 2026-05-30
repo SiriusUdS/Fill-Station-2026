@@ -5,7 +5,7 @@ set(MX_Defines_Syms
 	CORE_CM7 
 	USE_HAL_DRIVER 
 	STM32H747xx 
-	USE_PWR_DIRECT_SMPS_SUPPLY
+	USE_PWR_LDO_SUPPLY
     $<$<CONFIG:Debug>:DEBUG>
 )
 # STM32CubeMX generated include paths

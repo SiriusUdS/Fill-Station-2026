@@ -40,7 +40,11 @@ MEMORY
 {
 FLASH (rx)      : ORIGIN = 0x08100000, LENGTH = 1024K
 RAM (xrw)      : ORIGIN = 0x10000000, LENGTH = 288K
+RAM_D3 (xrw)    : ORIGIN = 0x38000000, LENGTH = 64K
 }
+
+
+
 /* Highest address of the user mode stack */
 _estack = 0x10048000;    /* end of RAM */
 /* Generate a link error if heap and stack don't fit into RAM */
@@ -208,7 +212,13 @@ SECTIONS
     . = ALIGN(8);
   } >RAM
 
-  
+  /* SRAM4 for BDMA (D3 domain) */
+  .sram4 (NOLOAD) :
+  {
+    . = ALIGN(4);
+    *(.SRAM4)
+    . = ALIGN(4);
+  } >RAM_D3
 
   /* Remove information from the standard libraries */
   /DISCARD/ :
