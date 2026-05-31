@@ -58,6 +58,8 @@ SPI_HandleTypeDef hspi4;
 SPI_HandleTypeDef hspi6;
 DMA_HandleTypeDef hdma_spi4_rx;
 DMA_HandleTypeDef hdma_spi4_tx;
+DMA_HandleTypeDef hdma_spi6_rx;
+DMA_HandleTypeDef hdma_spi6_tx;
 
 /* USER CODE BEGIN PV */
 
@@ -66,8 +68,9 @@ DMA_HandleTypeDef hdma_spi4_tx;
 /* Private function prototypes -----------------------------------------------*/
 static void MX_GPIO_Init(void);
 static void MX_DMA_Init(void);
-static void MX_SPI4_Init(void);
+static void MX_BDMA_Init(void);
 static void MX_SPI6_Init(void);
+static void MX_SPI4_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -121,8 +124,9 @@ __HAL_RCC_SPI6_CLK_ENABLE();
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_DMA_Init();
-  MX_SPI4_Init();
+  MX_BDMA_Init();
   MX_SPI6_Init();
+  MX_SPI4_Init();
   /* USER CODE BEGIN 2 */
   init_SPI(&hspi6);
   /* USER CODE END 2 */
@@ -237,7 +241,7 @@ static void MX_SPI6_Init(void)
   hspi6.Init.CLKPolarity = SPI_POLARITY_LOW;
   hspi6.Init.CLKPhase = SPI_PHASE_2EDGE;
   hspi6.Init.NSS = SPI_NSS_SOFT;
-  hspi6.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_2;
+  hspi6.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_8;
   hspi6.Init.FirstBit = SPI_FIRSTBIT_MSB;
   hspi6.Init.TIMode = SPI_TIMODE_DISABLE;
   hspi6.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
@@ -257,9 +261,28 @@ static void MX_SPI6_Init(void)
     Error_Handler();
   }
   /* USER CODE BEGIN SPI6_Init 2 */
-  HAL_NVIC_SetPriority(SPI6_IRQn, 0, 0);
+  HAL_NVIC_SetPriority(SPI6_IRQn, 3, 0);
   HAL_NVIC_EnableIRQ(SPI6_IRQn);
   /* USER CODE END SPI6_Init 2 */
+
+}
+
+/**
+  * Enable DMA controller clock
+  */
+static void MX_BDMA_Init(void)
+{
+
+  /* DMA controller clock enable */
+  __HAL_RCC_BDMA_CLK_ENABLE();
+
+  /* DMA interrupt init */
+  /* BDMA_Channel0_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(BDMA_Channel0_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(BDMA_Channel0_IRQn);
+  /* BDMA_Channel1_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(BDMA_Channel1_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(BDMA_Channel1_IRQn);
 
 }
 
@@ -289,16 +312,27 @@ static void MX_DMA_Init(void)
   */
 static void MX_GPIO_Init(void)
 {
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
   /* USER CODE BEGIN MX_GPIO_Init_1 */
-
+  
   /* USER CODE END MX_GPIO_Init_1 */
 
   /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOE_CLK_ENABLE();
   __HAL_RCC_GPIOG_CLK_ENABLE();
 
-  /* USER CODE BEGIN MX_GPIO_Init_2 */
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOG, GPIO_PIN_11, GPIO_PIN_RESET);
 
+  /*Configure GPIO pin : PG11 */
+  GPIO_InitStruct.Pin = GPIO_PIN_11;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOG, &GPIO_InitStruct);
+
+  /* USER CODE BEGIN MX_GPIO_Init_2 */
+  
   /* USER CODE END MX_GPIO_Init_2 */
 }
 

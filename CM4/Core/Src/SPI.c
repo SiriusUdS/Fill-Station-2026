@@ -6,10 +6,8 @@
 
 union	SPI_Flags SPI;
 
-//__attribute__((section(".SRAM4"))) 
-uint8_t txBuff_SPI4[LENGTH_MESSAGE_SPI4] = {0};
-//__attribute__((section(".SRAM4"))) 
-uint8_t rxBuff_SPI4[LENGTH_MESSAGE_SPI4] = {0};
+__attribute__((section(".SRAM4"))) uint8_t txBuff_SPI4[LENGTH_MESSAGE_SPI4];
+__attribute__((section(".SRAM4"))) uint8_t rxBuff_SPI4[LENGTH_MESSAGE_SPI4];
 long unsigned int val[10];
 
 
@@ -74,8 +72,8 @@ void spi_write_read(uint8_t command[6], SPI_HandleTypeDef *hspi){
 
 				SPI.flags.SPI4_Done = 0;
 		        enable_slave();
-				HAL_SPI_TransmitReceive_IT(hspi,txBuff_SPI4, rxBuff_SPI4, LENGTH_MESSAGE_SPI4);
-		        //HAL_SPI_TransmitReceive_DMA(hspi, txBuff_SPI4, rxBuff_SPI4, LENGTH_MESSAGE_SPI4); //HAL_SPI_TransmitReceive_DMA(&hspi1, txBuffer, rxBuffer, dataSize);
+				//HAL_SPI_TransmitReceive_IT(hspi,txBuff_SPI4, rxBuff_SPI4, LENGTH_MESSAGE_SPI4);
+		        HAL_SPI_TransmitReceive_DMA(hspi, txBuff_SPI4, rxBuff_SPI4, LENGTH_MESSAGE_SPI4); //HAL_SPI_TransmitReceive_DMA(&hspi1, txBuffer, rxBuffer, dataSize);
 		    }
 
 	break;
@@ -110,4 +108,19 @@ void HAL_SPI_TxRxCpltCallback(SPI_HandleTypeDef *hspi)
     }
 
 
+}
+
+uint32_t last_spi_error = 0;
+uint32_t spi_sr_register = 0;
+
+void HAL_SPI_ErrorCallback(SPI_HandleTypeDef *hspi) {
+    if(hspi->Instance == SPI6)
+    {
+        last_spi_error = HAL_SPI_GetError(hspi);
+        spi_sr_register = SPI6->SR; // capture status register raw
+        
+        // Re-arm after error
+        __HAL_SPI_CLEAR_OVRFLAG(hspi);
+        SPI.flags.SPI4_Done = 1; // allow next transaction to proceed
+    }
 }
