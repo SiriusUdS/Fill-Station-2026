@@ -44,16 +44,37 @@ void ADS131M04_write_register(uint8_t address, uint16_t value, SPI_HandleTypeDef
 
 void ADS131M04_get_data(SPI_HandleTypeDef *hspi){ //Sending the dummy command NULL (0b00000000) to read back the adc channels value
 
-	uint8_t command[6] = {0}; //Zero padding since it'S on 6 byte
+	uint8_t command[6] = {NULL_CMD}; //Zero padding since it's on 6 byte
 
 	spi_write_read(command,hspi);
 
 
 }
 
-void ADS131M04_init(){
+void ADS131M04_init(SPI_HandleTypeDef *hspi){
 
+  init_SPI();
 
+  REG_CLOCK_t CLOCK_REG;
+  CLOCK_REG.all = 0xFF0E;
+  CLOCK_REG.bits.OSR = 0b100; //osr 2048 = 2kSPS
+  ADS131M04_write_register(REG_ADDR_CLOCK, CLOCK_REG.all, hspi);
+
+  REG_GAIN_t GAIN_REG;
+  GAIN_REG.all = 0;
+  GAIN_REG.bits.PGAGAIN0 = 	0b101; //101 = 32 gain
+  GAIN_REG.bits.PGAGAIN1 = 	0b101;
+  GAIN_REG.bits.PGAGAIN2 = 	0b101;
+  GAIN_REG.bits.PGAGAIN3 = 	0b101;
+  ADS131M04_write_register(REG_ADDR_GAIN, CLOCK_REG.all, hspi);
+
+  REG_GAIN2_t GAIN_REG2;
+  GAIN_REG2.all = 0;
+  GAIN_REG2.bits.PGAGAIN4 = 0b101;
+  GAIN_REG2.bits.PGAGAIN5 = 0b101;
+  GAIN_REG2.bits.PGAGAIN6 = 0b101;
+  GAIN_REG2.bits.PGAGAIN7 = 0b101;
+  ADS131M04_write_register(REG_ADDR_GAIN, CLOCK_REG.all, hspi);
 
 
 }

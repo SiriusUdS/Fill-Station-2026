@@ -1,33 +1,48 @@
 #include "SPI.h"
-#include "main.h"  // For CS pin definitions
+#include "main.h"  
 #include "stdio.h"
 #include "string.h"
 
-
+//Variables
 union	SPI_Flags SPI;
 
 __attribute__((section(".SRAM4"))) uint8_t txBuff_SPI4[LENGTH_MESSAGE_SPI4];
 __attribute__((section(".SRAM4"))) uint8_t rxBuff_SPI4[LENGTH_MESSAGE_SPI4];
+
+__attribute__((section(".SRAM4"))) uint8_t txBuff_SPI6[LENGTH_MESSAGE_SPI6];
+__attribute__((section(".SRAM4"))) uint8_t rxBuff_SPI6[LENGTH_MESSAGE_SPI6];
+
 long unsigned int val[10];
 
+GPIO_TypeDef *SPI4_CS_GPIO_TYPE = GPIOE;
+uint16_t SPI4_CS_GPIO_NUMBER[4] = {GPIO_PIN_15,GPIO_PIN_2,GPIO_PIN_3,GPIO_PIN_4};
+
+GPIO_TypeDef *SPI6_CS_GPIO_TYPE = GPIOG;
+uint16_t SPI6_CS_GPIO_NUMBER = GPIO_PIN_11;
 
 
-
-void disable_slave(){
-	HAL_GPIO_WritePin(GPIOG, GPIO_PIN_11, GPIO_PIN_SET);
+void disable_slave(GPIO_TypeDef *GPIO, uint16_t GPIO_PIN){
+	HAL_GPIO_WritePin(GPIO, GPIO_PIN, GPIO_PIN_SET);
 }
 
-void enable_slave(){
+void enable_slave(GPIO_TypeDef *GPIO, uint16_t GPIO_PIN){
 
-	HAL_GPIO_WritePin(GPIOG, GPIO_PIN_11, GPIO_PIN_RESET);
+	HAL_GPIO_WritePin(GPIO, GPIO_PIN, GPIO_PIN_RESET);
 
 }
 
-void init_SPI(SPI_HandleTypeDef *hspi){
+void init_SPI(){
 
-SPI.byte = 0b11111111;
-memset(txBuff_SPI4, 0, LENGTH_MESSAGE_SPI4);
-memset(rxBuff_SPI4, 0, LENGTH_MESSAGE_SPI4);
+//Flags init
+SPI.byte = 0b11110011;
+
+//SPI4 Init
+memset(txBuff_SPI6, 0, LENGTH_MESSAGE_SPI6);
+memset(rxBuff_SPI6, 0, LENGTH_MESSAGE_SPI6);
+
+//SP6 Init
+memset(txBuff_SPI6, 0, LENGTH_MESSAGE_SPI6);
+memset(rxBuff_SPI6, 0, LENGTH_MESSAGE_SPI6);
 
 }
 
@@ -37,28 +52,28 @@ void spi_write_read(uint8_t command[6], SPI_HandleTypeDef *hspi){
 
 	switch ((uintptr_t)hspi->Instance) {
 
-	case (uintptr_t)SPI1:
+	case (uintptr_t)SPI4:
 
-	break;
+        		if (SPI.flags.SPI4_Done == 1)
+		    {
 
-	case (uintptr_t)SPI2:
-
-	break;
-
-	case (uintptr_t)SPI3:
+				SPI.flags.SPI4_Done = 0;
+		        enable_slave(SPI4_CS_GPIO_TYPE,SPI4_CS_GPIO_NUMBER[SPI.flags.SPI4_Counter]);
+		        HAL_SPI_TransmitReceive_DMA(hspi, txBuff_SPI6, rxBuff_SPI6, LENGTH_MESSAGE_SPI4); //HAL_SPI_TransmitReceive_DMA(&hspi1, txBuffer, rxBuffer, dataSize);
+		    }
 
 	break;
 
 	case (uintptr_t)SPI6:
 
-		txBuff_SPI4[0] = command[0];
-		txBuff_SPI4[1] = command[1];
-		txBuff_SPI4[2] = command[2];
-		txBuff_SPI4[3] = command[3];
-		txBuff_SPI4[4] = command[4];
-		txBuff_SPI4[5] = command[5];
+		txBuff_SPI6[0] = command[0];
+		txBuff_SPI6[1] = command[1];
+		txBuff_SPI6[2] = command[2];
+		txBuff_SPI6[3] = command[3];
+		txBuff_SPI6[4] = command[4];
+		txBuff_SPI6[5] = command[5];
 
-		if (SPI.flags.SPI4_Done == 1)
+		if (SPI.flags.SPI6_Done == 1)
 		    {
 				/*
 				char buf[128];
@@ -70,10 +85,9 @@ void spi_write_read(uint8_t command[6], SPI_HandleTypeDef *hspi){
 				HAL_Delay(10);  // or use a timer-based approach
 				*/
 
-				SPI.flags.SPI4_Done = 0;
-		        enable_slave();
-				//HAL_SPI_TransmitReceive_IT(hspi,txBuff_SPI4, rxBuff_SPI4, LENGTH_MESSAGE_SPI4);
-		        HAL_SPI_TransmitReceive_DMA(hspi, txBuff_SPI4, rxBuff_SPI4, LENGTH_MESSAGE_SPI4); //HAL_SPI_TransmitReceive_DMA(&hspi1, txBuffer, rxBuffer, dataSize);
+				SPI.flags.SPI6_Done = 0;
+		        enable_slave(SPI6_CS_GPIO_TYPE,SPI6_CS_GPIO_NUMBER);
+		        HAL_SPI_TransmitReceive_DMA(hspi, txBuff_SPI6, rxBuff_SPI6, LENGTH_MESSAGE_SPI4); //HAL_SPI_TransmitReceive_DMA(&hspi1, txBuffer, rxBuffer, dataSize);
 		    }
 
 	break;
@@ -89,23 +103,22 @@ void spi_write_read(uint8_t command[6], SPI_HandleTypeDef *hspi){
 
 void HAL_SPI_TxRxCpltCallback(SPI_HandleTypeDef *hspi)
 {
+    if (hspi->Instance == SPI4){
 
+        SPI.flags.SPI4_Done = 1;
+        disable_slave(SPI4_CS_GPIO_TYPE,SPI4_CS_GPIO_NUMBER[SPI.flags.SPI4_Counter]);
+        SPI.flags.SPI4_Counter = (SPI.flags.SPI4_Counter + 1)%4;
+
+    }
 
     if (hspi->Instance == SPI6)
     {
-    	SPI.flags.SPI4_Done = 1;
-        disable_slave();
-
-
-
-            for (int i = 0; i < 10; i++) {
-                val[i] = ((uint32_t)rxBuff_SPI4[i*3]     << 16) |
-                         ((uint32_t)rxBuff_SPI4[i*3 + 1] << 8)  |
-                          (uint32_t)rxBuff_SPI4[i*3 + 2];
+    	SPI.flags.SPI6_Done = 1;
+        disable_slave(SPI6_CS_GPIO_TYPE,SPI6_CS_GPIO_NUMBER);
 
 
         }
-    }
+    
 
 
 }

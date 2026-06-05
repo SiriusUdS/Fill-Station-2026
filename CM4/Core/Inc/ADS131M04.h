@@ -34,7 +34,7 @@
 
 void ADS131M04_write_register(uint8_t address, uint16_t value, SPI_HandleTypeDef *hspi);
 void ADS131M04_get_data(SPI_HandleTypeDef *hspi);
-
+void ADS131M04_init(SPI_HandleTypeDef *hspi);
 
 // ---------------------------
 // ADS131M04 Register Addresses

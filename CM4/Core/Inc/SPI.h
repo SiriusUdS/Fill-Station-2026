@@ -28,10 +28,10 @@
 #include "stm32h7xx_hal_spi.h"
 
 //Constants
-#define LENGTH_MESSAGE_SPI1 0
-#define LENGTH_MESSAGE_SPI2 0
-#define LENGTH_MESSAGE_SPI3 0
-#define LENGTH_MESSAGE_SPI4 30
+#define LENGTH_MESSAGE_SPI4 0
+#define LENGTH_MESSAGE_SPI6 30
+
+
 
 
 
@@ -44,20 +44,16 @@ union SPI_Flags {
         uint8_t SPI2_Done : 1;
         uint8_t SPI3_Done : 1;
         uint8_t SPI4_Done : 1;
-        uint8_t b4 : 1;
-        uint8_t b5 : 1;
-        uint8_t b6 : 1;
-        uint8_t b7 : 1;
+        uint8_t SPI4_Counter : 2;
+        uint8_t SPI5_Done : 1;
+        uint8_t SPI6_Done : 1;
     } flags;
 };
-
-//Variables
 
 
 //Fonctions
 
-
-void init_SPI(SPI_HandleTypeDef *hspi);
+void init_SPI();
 void spi_write_read(uint8_t command[6], SPI_HandleTypeDef *hspi);
 
 #endif /* __MAIN_H */
