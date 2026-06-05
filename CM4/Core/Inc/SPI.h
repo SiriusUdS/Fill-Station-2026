@@ -31,10 +31,14 @@
 #define LENGTH_MESSAGE_SPI4 0
 #define LENGTH_MESSAGE_SPI6 30
 
-
-
-
-
+#define IDCH0 0
+#define IDCH1 1
+#define IDCH2 2
+#define IDCH3 3
+#define IDCH4 4
+#define IDCH5 5
+#define IDCH6 6
+#define IDCH7 7
 //Unions
 
 union SPI_Flags {
@@ -49,6 +53,8 @@ union SPI_Flags {
         uint8_t SPI6_Done : 1;
     } flags;
 };
+
+
 
 
 //Fonctions

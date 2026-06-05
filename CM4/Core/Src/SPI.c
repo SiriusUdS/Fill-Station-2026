@@ -1,6 +1,7 @@
-#include "SPI.h"
+#include "spi.h"
 #include "main.h"  
 #include "stdio.h"
+#include "stm32h7xx_hal_gpio.h"
 #include "string.h"
 
 //Variables
@@ -37,8 +38,8 @@ void init_SPI(){
 SPI.byte = 0b11110011;
 
 //SPI4 Init
-memset(txBuff_SPI6, 0, LENGTH_MESSAGE_SPI6);
-memset(rxBuff_SPI6, 0, LENGTH_MESSAGE_SPI6);
+memset(txBuff_SPI6, 0, LENGTH_MESSAGE_SPI4);
+memset(rxBuff_SPI6, 0, LENGTH_MESSAGE_SPI4);
 
 //SP6 Init
 memset(txBuff_SPI6, 0, LENGTH_MESSAGE_SPI6);
@@ -59,7 +60,7 @@ void spi_write_read(uint8_t command[6], SPI_HandleTypeDef *hspi){
 
 				SPI.flags.SPI4_Done = 0;
 		        enable_slave(SPI4_CS_GPIO_TYPE,SPI4_CS_GPIO_NUMBER[SPI.flags.SPI4_Counter]);
-		        HAL_SPI_TransmitReceive_DMA(hspi, txBuff_SPI6, rxBuff_SPI6, LENGTH_MESSAGE_SPI4); //HAL_SPI_TransmitReceive_DMA(&hspi1, txBuffer, rxBuffer, dataSize);
+		        HAL_SPI_TransmitReceive_DMA(hspi, txBuff_SPI4, rxBuff_SPI4, LENGTH_MESSAGE_SPI4); //HAL_SPI_TransmitReceive_DMA(&hspi1, txBuffer, rxBuffer, dataSize);
 		    }
 
 	break;
@@ -73,7 +74,7 @@ void spi_write_read(uint8_t command[6], SPI_HandleTypeDef *hspi){
 		txBuff_SPI6[4] = command[4];
 		txBuff_SPI6[5] = command[5];
 
-		if (SPI.flags.SPI6_Done == 1)
+		if (SPI.flags.SPI6_Done == 1 && HAL_GPIO_ReadPin(GPIOE,GPIO_PIN_5) == 0) //&& HAL_GPIO_ReadPin == 1 pour data ready
 		    {
 				/*
 				char buf[128];
@@ -87,7 +88,7 @@ void spi_write_read(uint8_t command[6], SPI_HandleTypeDef *hspi){
 
 				SPI.flags.SPI6_Done = 0;
 		        enable_slave(SPI6_CS_GPIO_TYPE,SPI6_CS_GPIO_NUMBER);
-		        HAL_SPI_TransmitReceive_DMA(hspi, txBuff_SPI6, rxBuff_SPI6, LENGTH_MESSAGE_SPI4); //HAL_SPI_TransmitReceive_DMA(&hspi1, txBuffer, rxBuffer, dataSize);
+		        HAL_SPI_TransmitReceive_DMA(hspi, txBuff_SPI6, rxBuff_SPI6, LENGTH_MESSAGE_SPI6); //HAL_SPI_TransmitReceive_DMA(&hspi1, txBuffer, rxBuffer, dataSize);
 		    }
 
 	break;
@@ -99,7 +100,8 @@ void spi_write_read(uint8_t command[6], SPI_HandleTypeDef *hspi){
 
 
 
-
+uint64_t timestamp_SPI4 = 0;
+uint64_t timestamp_SPI6 = 0;
 
 void HAL_SPI_TxRxCpltCallback(SPI_HandleTypeDef *hspi)
 {
@@ -109,6 +111,8 @@ void HAL_SPI_TxRxCpltCallback(SPI_HandleTypeDef *hspi)
         disable_slave(SPI4_CS_GPIO_TYPE,SPI4_CS_GPIO_NUMBER[SPI.flags.SPI4_Counter]);
         SPI.flags.SPI4_Counter = (SPI.flags.SPI4_Counter + 1)%4;
 
+		timestamp_SPI4 = HAL_GetTick();
+
     }
 
     if (hspi->Instance == SPI6)
@@ -116,9 +120,11 @@ void HAL_SPI_TxRxCpltCallback(SPI_HandleTypeDef *hspi)
     	SPI.flags.SPI6_Done = 1;
         disable_slave(SPI6_CS_GPIO_TYPE,SPI6_CS_GPIO_NUMBER);
 
-
+		//Need to add packet
+		timestamp_SPI6 = HAL_GetTick();
+		
         }
-    
+     
 
 
 }

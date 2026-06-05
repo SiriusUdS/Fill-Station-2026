@@ -19,8 +19,8 @@
 /* USER CODE END Header */
 
 /* Define to prevent recursive inclusion -------------------------------------*/
-#ifndef __ADS131M04_H
-#define __ADS131M04_H
+#ifndef __ADS131M08_H
+#define __ADS131M08_H
 
 #include "stm32h7xx_hal.h"
 #include <stdint.h>
@@ -32,9 +32,9 @@
 #define RREG_CMD 0b101
 #define NULL_CMD 0
 
-void ADS131M04_write_register(uint8_t address, uint16_t value, SPI_HandleTypeDef *hspi);
-void ADS131M04_get_data(SPI_HandleTypeDef *hspi);
-void ADS131M04_init(SPI_HandleTypeDef *hspi);
+void ADS131M08_write_register(uint8_t address, uint16_t value, SPI_HandleTypeDef *hspi);
+void ADS131M08_get_data(SPI_HandleTypeDef *hspi);
+void ADS131M08_init(SPI_HandleTypeDef *hspi);
 
 // ---------------------------
 // ADS131M04 Register Addresses
