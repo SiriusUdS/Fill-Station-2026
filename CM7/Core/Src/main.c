@@ -90,6 +90,7 @@ void PeriphCommonClock_Config(void);
 static void MPU_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_DMA_Init(void);
+static void MX_BDMA_Init(void);
 static void MX_ETH_Init(void);
 static void MX_SDMMC1_SD_Init(void);
 static void MX_SDMMC2_SD_Init(void);
@@ -127,8 +128,8 @@ int main(void)
 
 /* USER CODE BEGIN Boot_Mode_Sequence_1 */
 #if defined(DUAL_CORE_BOOT_SYNC_SEQUENCE)
-  /* Wait until CPU2 boots and enters in stop mode or timeout*/
-  timeout = 0xFFFF;
+  // Wait until CPU2 boots and enters in stop mode or timeout
+  timeout = 0xFFFFFF;
   while((__HAL_RCC_GET_FLAG(RCC_FLAG_D2CKRDY) != RESET) && (timeout-- > 0));
   if ( timeout < 0 )
   {
@@ -161,7 +162,7 @@ HAL_HSEM_FastTake(HSEM_ID_0);
 /*Release HSEM in order to notify the CPU2(CM4)*/
 HAL_HSEM_Release(HSEM_ID_0,0);
 /* wait until CPU2 wakes up from stop mode */
-timeout = 0xFFFF;
+timeout = 0xFFFFFF;
 while((__HAL_RCC_GET_FLAG(RCC_FLAG_D2CKRDY) == RESET) && (timeout-- > 0));
 if ( timeout < 0 )
 {
@@ -177,10 +178,11 @@ Error_Handler();
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_DMA_Init();
+  MX_BDMA_Init();
   MX_ETH_Init();
   MX_SDMMC1_SD_Init();
-  MX_FATFS_Init();
   MX_SDMMC2_SD_Init();
+  MX_FATFS_Init();
   /* USER CODE BEGIN 2 */
   ethNetAddr.mac[0] = 0x04;
   ethNetAddr.mac[1] = 0x7C;
@@ -243,7 +245,7 @@ void SystemClock_Config(void)
   RCC_OscInitStruct.PLL.PLLM = 2;
   RCC_OscInitStruct.PLL.PLLN = 16;
   RCC_OscInitStruct.PLL.PLLP = 2;
-  RCC_OscInitStruct.PLL.PLLQ = 2;
+  RCC_OscInitStruct.PLL.PLLQ = 4;
   RCC_OscInitStruct.PLL.PLLR = 2;
   RCC_OscInitStruct.PLL.PLLRGE = RCC_PLL1VCIRANGE_3;
   RCC_OscInitStruct.PLL.PLLVCOSEL = RCC_PLL1VCOWIDE;
@@ -282,16 +284,27 @@ void PeriphCommonClock_Config(void)
 
   /** Initializes the peripherals clock
   */
-  PeriphClkInitStruct.PeriphClockSelection = RCC_PERIPHCLK_SPI4|RCC_PERIPHCLK_SPI5;
+  PeriphClkInitStruct.PeriphClockSelection = RCC_PERIPHCLK_SPI6|RCC_PERIPHCLK_SDMMC
+                              |RCC_PERIPHCLK_SPI4;
   PeriphClkInitStruct.PLL2.PLL2M = 25;
-  PeriphClkInitStruct.PLL2.PLL2N = 256;
+  PeriphClkInitStruct.PLL2.PLL2N = 300;
   PeriphClkInitStruct.PLL2.PLL2P = 2;
   PeriphClkInitStruct.PLL2.PLL2Q = 16;
-  PeriphClkInitStruct.PLL2.PLL2R = 2;
+  PeriphClkInitStruct.PLL2.PLL2R = 3;
   PeriphClkInitStruct.PLL2.PLL2RGE = RCC_PLL2VCIRANGE_0;
   PeriphClkInitStruct.PLL2.PLL2VCOSEL = RCC_PLL2VCOWIDE;
   PeriphClkInitStruct.PLL2.PLL2FRACN = 0;
-  PeriphClkInitStruct.Spi45ClockSelection = RCC_SPI45CLKSOURCE_PLL2;
+  PeriphClkInitStruct.PLL3.PLL3M = 25;
+  PeriphClkInitStruct.PLL3.PLL3N = 192;
+  PeriphClkInitStruct.PLL3.PLL3P = 2;
+  PeriphClkInitStruct.PLL3.PLL3Q = 12;
+  PeriphClkInitStruct.PLL3.PLL3R = 2;
+  PeriphClkInitStruct.PLL3.PLL3RGE = RCC_PLL3VCIRANGE_0;
+  PeriphClkInitStruct.PLL3.PLL3VCOSEL = RCC_PLL3VCOWIDE;
+  PeriphClkInitStruct.PLL3.PLL3FRACN = 0;
+  PeriphClkInitStruct.SdmmcClockSelection = RCC_SDMMCCLKSOURCE_PLL2;
+  PeriphClkInitStruct.Spi45ClockSelection = RCC_SPI45CLKSOURCE_PLL3;
+  PeriphClkInitStruct.Spi6ClockSelection = RCC_SPI6CLKSOURCE_PLL3;
   if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInitStruct) != HAL_OK)
   {
     Error_Handler();
@@ -406,6 +419,17 @@ static void MX_SDMMC2_SD_Init(void)
   /* USER CODE BEGIN SDMMC2_Init 2 */
 
   /* USER CODE END SDMMC2_Init 2 */
+
+}
+
+/**
+  * Enable DMA controller clock
+  */
+static void MX_BDMA_Init(void)
+{
+
+  /* DMA controller clock enable */
+  __HAL_RCC_BDMA_CLK_ENABLE();
 
 }
 

@@ -26,10 +26,10 @@ set(MX_Application_Src
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/stm32h7xx_hal_msp.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/sysmem.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/syscalls.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/FATFS/App/fatfs.c
     ${CMAKE_CURRENT_SOURCE_DIR}/FATFS/Target/bsp_driver_sd.c
     ${CMAKE_CURRENT_SOURCE_DIR}/FATFS/Target/sd_diskio.c
     ${CMAKE_CURRENT_SOURCE_DIR}/FATFS/Target/fatfs_platform.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/FATFS/App/fatfs.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Startup/startup_stm32h747xx_CM7.s
 )
 

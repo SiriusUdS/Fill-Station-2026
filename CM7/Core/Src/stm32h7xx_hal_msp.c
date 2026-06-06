@@ -193,22 +193,11 @@ void HAL_ETH_MspDeInit(ETH_HandleTypeDef* heth)
 void HAL_SD_MspInit(SD_HandleTypeDef* hsd)
 {
   GPIO_InitTypeDef GPIO_InitStruct = {0};
-  RCC_PeriphCLKInitTypeDef PeriphClkInitStruct = {0};
   if(hsd->Instance==SDMMC1)
   {
     /* USER CODE BEGIN SDMMC1_MspInit 0 */
 
     /* USER CODE END SDMMC1_MspInit 0 */
-
-  /** Initializes the peripherals clock
-  */
-    PeriphClkInitStruct.PeriphClockSelection = RCC_PERIPHCLK_SDMMC;
-    PeriphClkInitStruct.SdmmcClockSelection = RCC_SDMMCCLKSOURCE_PLL;
-    if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInitStruct) != HAL_OK)
-    {
-      Error_Handler();
-    }
-
     /* Peripheral clock enable */
     __HAL_RCC_SDMMC1_CLK_ENABLE();
 
@@ -246,16 +235,6 @@ void HAL_SD_MspInit(SD_HandleTypeDef* hsd)
     /* USER CODE BEGIN SDMMC2_MspInit 0 */
 
     /* USER CODE END SDMMC2_MspInit 0 */
-
-  /** Initializes the peripherals clock
-  */
-    PeriphClkInitStruct.PeriphClockSelection = RCC_PERIPHCLK_SDMMC;
-    PeriphClkInitStruct.SdmmcClockSelection = RCC_SDMMCCLKSOURCE_PLL;
-    if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInitStruct) != HAL_OK)
-    {
-      Error_Handler();
-    }
-
     /* Peripheral clock enable */
     __HAL_RCC_SDMMC2_CLK_ENABLE();
 

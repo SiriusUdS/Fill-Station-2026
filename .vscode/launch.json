@@ -5,9 +5,10 @@
             "type": "stlinkgdbtarget",
             "request": "launch",
             "serverShared": true, // Allows sharing the debug server with other sessions (needed for multi-core)
-            "serverHaltAllCores": true, // Halts all cores when starting the debug session
+            "serverHaltAllCores": false, // Leave the M4 free-running so it can execute its STOP/HSEM boot handshake; halting it would hang the M7 at the D2CKRDY wait (Error_Handler)
+            "serverReset": "Connect under reset", // Asserts NRST on connect -> resets the WHOLE device (M7 + M4) so both cores restart the boot handshake from a clean state
             "cwd": "${workspaceFolder}",
-            "preBuild": "${command:st-stm32-ide-debug-launch.build}",
+            "preLaunchTask": "Build CM7", // Use the explicit tasks.json build (separate build dir) instead of the ST build command, which races itself when the compound launches both configs
             "runEntry": "main",
             "imagesAndSymbols": [
                 {
@@ -24,15 +25,18 @@
             "type": "stlinkgdbtarget",
             "request": "launch",
             "cwd": "${workspaceFolder}",
-            "preBuild": "${command:st-stm32-ide-debug-launch.build}",
-            "runEntry": "main",
+            "preLaunchTask": "Build CM4",
+            // No runEntry here: this is an attach (serverReset:None) to the already-running M4. "Run to main" can never complete because by attach time the M4 is past main (released by M7) or still parked in STOP -> that wait is what timed out.
             "serverShared": true,
             "serverApID": "3", // Specifies the Access Port ID for the CM4 core (core selection)
             "serverPort": "61239", // Port for the GDB server to connect (must be unique if running multiple sessions)
             "serverReset": "None", // No reset when starting this debug session
             "imagesAndSymbols": [
                 {
-                    "imageFileName": "${workspaceFolder}/CM4/build/FillStation_CM4.elf"
+                    // symbolFileName (not imageFileName) = load symbols ONLY, do NOT download/flash the M4.
+                    // Flashing the M4 resets the whole device and crashes the running M7 debug session.
+                    // The M4 must already be programmed: launching M7 flashes both elfs, or run the "Flash both cores" task first.
+                    "symbolFileName": "${workspaceFolder}/CM4/build/FillStation_CM4.elf"
                 }
             ],
             "verbose": false
