@@ -24,6 +24,7 @@
 #include "ads131m08.h"
 #include "spi.h"
 #include "dil/can.h"
+#include "ValveCmdPacket.h"
 #include <string.h>
 /* USER CODE END Includes */
 
@@ -53,17 +54,10 @@
 #define CAN_RX_TEST
 #define CAN_ID_DEBUG 0x7F   /* message id carried by the BONJOUR test frame      */
 
-/* CAN_TX_TEST: single-board self-test. When defined, FDCAN runs in INTERNAL     */
-/* LOOPBACK and self-sends a BONJOUR frame every period (no transceiver/second   */
-/* node needed). Leave commented out to receive from the other board in NORMAL   */
-/* mode over a real bus.                                                         */
-//#define CAN_TX_TEST
+/* CAN_TX_TEST: periodically command the other board (Engine) to open valve 1    */
+/* over the bus, in FDCAN normal mode. Comment out to disable.                    */
+#define CAN_TX_TEST
 #define CAN_TX_TEST_PERIOD_MS 1000
-
-/* Loopback self-test cannot work without the receive path. */
-#if defined(CAN_TX_TEST) && !defined(CAN_RX_TEST)
-#define CAN_RX_TEST
-#endif
 
 /* USER CODE END PD */
 
@@ -181,19 +175,15 @@ __HAL_RCC_SPI6_CLK_ENABLE();
     //ADS131M08_get_data(&hspi6);
 
 #if defined(CAN_TX_TEST)
-    /* Loopback self-test only: self-send a BONJOUR frame every period.
-       Self-addressed (targetID == this node) so it passes our RX filter. */
+    /* Command the other board (Engine) to open valve 1 every period. */
     static uint32_t lastTxTick = 0;
     if ((HAL_GetTick() - lastTxTick) >= CAN_TX_TEST_PERIOD_MS)
     {
       lastTxTick = HAL_GetTick();
 
-      CANHeader txHeader = {0};
-      txHeader.frame.senderID  = CAN_NODE_FILL_F412;
-      txHeader.frame.targetID  = CAN_NODE_FILL_F412;
-      txHeader.frame.messageID = CAN_ID_DEBUG;
-
-      CAN_Send(txHeader.code, CAN_TEST_BONJOUR);
+      ValveCmdPacket packet;
+      valveCmdPacketMake(CAN_VALVE_1, CAN_CMD_OPEN, &packet);  /* target = Engine */
+      CAN_Send(packet.header.code, packet.payload.data);
     }
 #endif /* CAN_TX_TEST */
 
@@ -268,11 +258,7 @@ static void MX_FDCAN1_Init(void)
   /* USER CODE END FDCAN1_Init 1 */
   hfdcan1.Instance = FDCAN1;
   hfdcan1.Init.FrameFormat = FDCAN_FRAME_CLASSIC;
-#if defined(CAN_TX_TEST)
-  hfdcan1.Init.Mode = FDCAN_MODE_INTERNAL_LOOPBACK;
-#else
   hfdcan1.Init.Mode = FDCAN_MODE_NORMAL;
-#endif
   hfdcan1.Init.AutoRetransmission = ENABLE;
   hfdcan1.Init.TransmitPause = DISABLE;
   hfdcan1.Init.ProtocolException = DISABLE;
