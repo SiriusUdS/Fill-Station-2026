@@ -1,8 +1,8 @@
 /* USER CODE BEGIN Header */
 /**
   ******************************************************************************
-  * @file           : spi.h
-  * @brief          : Header for spi.c file.
+  * @file           : main.h
+  * @brief          : Header for main.c file.
   *                   This file contains the common defines of the application.
   ******************************************************************************
   * @attention
@@ -105,4 +105,4 @@ extern union  SPI_Flags    spi_flags;
 void init_SPI();
 void spi_write_read(SPI_HandleTypeDef *hspi);
 
-#endif 
+#endif /* __MAIN_H */

@@ -8,7 +8,10 @@ struct SPI4_HANDLE  spi4_handle  = {0};
 struct SPI6_HANDLE  spi6_handle  = {0};
 struct SPI4_CONFIG  spi4_config  = {0};
 struct SPI6_CONFIG  spi6_config  = {0};
-union  SPI_Flags    spi_flags    = { .byte = 0b00111111 };
+union  SPI_Flags    spi_flags    = { .byte = 0xFC };
+
+uint8_t counter_spi4 = 0;
+uint8_t counter_spi6 = 0;
 
 void disable_slave(GPIO_TypeDef *GPIO, uint16_t GPIO_PIN){
     HAL_GPIO_WritePin(GPIO, GPIO_PIN, GPIO_PIN_SET);
@@ -44,7 +47,7 @@ void spi_write_read(SPI_HandleTypeDef *hspi){
     break;
 
     case (uintptr_t)SPI6:
-        if (spi_flags.flags.SPI6_Done == 1 && HAL_GPIO_ReadPin(GPIOE, GPIO_PIN_5) == 0)
+        if (spi_flags.flags.SPI6_Done == 1)
         {
             spi_flags.flags.SPI6_Done = 0;
             //enable_slave(spi6_config.spi6_cs_gpio_type[0], spi6_config.spi6_cs_gpio_number[0]);
@@ -55,8 +58,6 @@ void spi_write_read(SPI_HandleTypeDef *hspi){
     }
 }
 
-uint64_t timestamp_SPI4 = 0;
-uint64_t timestamp_SPI6 = 0;
 
 void HAL_SPI_TxRxCpltCallback(SPI_HandleTypeDef *hspi)
 {
@@ -64,14 +65,16 @@ void HAL_SPI_TxRxCpltCallback(SPI_HandleTypeDef *hspi)
     {
         spi_flags.flags.SPI4_Done = 1;
         //disable_slave(spi4_config.spi4_cs_gpio_type[0], spi4_config.spi4_cs_gpio_number[0]);
-        timestamp_SPI4 = HAL_GetTick();
+		counter_spi4 = (counter_spi4++)%spi4_config.spi4_cs_num;
+        spi4_handle.last_timestamp = HAL_GetTick();
     }
 
     if (hspi->Instance == SPI6)
     {
         spi_flags.flags.SPI6_Done = 1;
-        //disable_slave(spi6_config.spi6_cs_gpio_type[0], spi6_config.spi6_cs_gpio_number[0]);
-        timestamp_SPI6 = HAL_GetTick();
+        disable_slave(spi6_config.spi6_cs_gpio_type[0], spi6_config.spi6_cs_gpio_number[0]);
+		counter_spi6 = (counter_spi6++)%spi6_config.spi6_cs_num;
+        spi6_handle.last_timestamp = HAL_GetTick();
     }
 }
 

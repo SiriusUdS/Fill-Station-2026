@@ -126,8 +126,8 @@ static void CAN_PingTest(void)
     h.frame.targetID  = CAN_NODE_ECU;
     h.frame.messageID = CAN_ID_COMM_PING;
 
-    uint8_t d[8] = { 'P', 'I', 'N', 'G', 0, 0, 0, 0 };
-    d[4] = (uint8_t)canPingTxCount;            /* sequence number */
+    uint8_t d[8] = { 'B', 'O', 'N', 'J', 'O', 'U', 'R', 'O' };
+    //d[4] = (uint8_t)canPingTxCount;            /* sequence number */
     if (CanBus_Send(h.code, d)) { canPingTxCount++; }
 }
 /* ---- end TEMP CAN ping sender -------------------------------------------- */
