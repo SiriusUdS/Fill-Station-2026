@@ -154,7 +154,7 @@ __HAL_RCC_SPI6_CLK_ENABLE();
   MX_FDCAN1_Init();
   /* USER CODE BEGIN 2 */
   HAL_GPIO_WritePin(GPIOF, GPIO_PIN_1, GPIO_PIN_SET);
-  //ADS131M08_init(&hspi6);
+  ADS131M08_init(&hspi6);
 
 #if defined(CAN_RX_TEST)
   /* Bring up CAN with this node's RX filter so only frames addressed to us pass. */
@@ -172,7 +172,7 @@ __HAL_RCC_SPI6_CLK_ENABLE();
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    //ADS131M08_get_data(&hspi6);
+    ADS131M08_get_data(&hspi6);
 
 #if defined(CAN_TX_TEST)
     /* Command the other board (Engine) to open valve 1 every period. */

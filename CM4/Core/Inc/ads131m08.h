@@ -28,13 +28,16 @@
 #define MSB_uint16_mask 0xFF00
 #define LSB_uint16_mask 0xFF
 
+#define message_length 30
+
 #define WREG_CMD 0b011
 #define RREG_CMD 0b101
 #define NULL_CMD 0
 
 void ADS131M08_write_register(uint8_t address, uint16_t value, SPI_HandleTypeDef *hspi);
 void ADS131M08_get_data(SPI_HandleTypeDef *hspi);
-void ADS131M08_init(SPI_HandleTypeDef *hspi);
+void ADS131M08_init(SPI_HandleTypeDef *hspi, GPIO_TypeDef *csPort[], uint16_t csPin[],uint16_t cs_num);
+
 
 // ---------------------------
 // ADS131M04 Register Addresses
