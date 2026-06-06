@@ -217,6 +217,16 @@ SECTIONS
     . = ALIGN(8);
   } >RAM
 
+  
+    /* D1 SRAM — accessible by DMA1/DMA2 (for SPI4) */
+  .sram_d1 (NOLOAD) :
+  {
+    . = ALIGN(4);
+    *(.SRAM_D1)
+    *(.SRAM_D1.*)
+    . = ALIGN(4);
+  } >RAM
+
   /* SRAM4 for BDMA (D3 domain) - SPI6 BDMA buffers must live here */
   .sram4 (NOLOAD) :
   {

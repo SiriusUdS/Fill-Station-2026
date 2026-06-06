@@ -26,19 +26,10 @@
 
 #include "stm32h7xx_hal.h"
 #include "stm32h7xx_hal_spi.h"
+#include <stdint.h>
 
-//Constants
-#define LENGTH_MESSAGE_SPI4 0
-#define LENGTH_MESSAGE_SPI6 30
+#define max_cs 5
 
-#define IDCH0 0
-#define IDCH1 1
-#define IDCH2 2
-#define IDCH3 3
-#define IDCH4 4
-#define IDCH5 5
-#define IDCH6 6
-#define IDCH7 7
 //Unions
 
 union SPI_Flags {
@@ -48,18 +39,59 @@ union SPI_Flags {
         uint8_t SPI2_Done : 1;
         uint8_t SPI3_Done : 1;
         uint8_t SPI4_Done : 1;
-        uint8_t SPI4_Counter : 2;
         uint8_t SPI5_Done : 1;
         uint8_t SPI6_Done : 1;
+        uint8_t PADDING : 2;
+        
     } flags;
 };
 
+struct SPI4_HANDLE {
 
+  uint8_t *txBuff_SPI4;
+  uint8_t *rxBuff_SPI4;
+  uint8_t length_spi4;
 
+};
+
+struct SPI6_HANDLE {
+
+  // __attribute__((section(".SRAM4"))) uint8_t txBuff_SPI6[LENGTH_MESSAGE_SPI6];
+  // __attribute__((section(".SRAM4"))) uint8_t rxBuff_SPI6[LENGTH_MESSAGE_SPI6];
+
+  uint8_t *txBuff_SPI6;
+  uint8_t *rxBuff_SPI6;
+  uint8_t length_spi6;
+
+};
+
+struct SPI4_CONFIG {
+  
+  GPIO_TypeDef **spi4_cs_gpio_type;
+  uint16_t *spi4_cs_gpio_number;
+  uint16_t spi4_cs_num;
+  
+
+};
+
+struct SPI6_CONFIG {
+
+  GPIO_TypeDef **spi6_cs_gpio_type;
+  uint16_t *spi6_cs_gpio_number;
+  uint16_t spi6_cs_num;
+
+};
+
+//Extern declaration
+extern struct SPI4_HANDLE  spi4_handle;
+extern struct SPI6_HANDLE  spi6_handle;
+extern struct SPI4_CONFIG  spi4_config;
+extern struct SPI6_CONFIG  spi6_config;
+extern union  SPI_Flags    spi_flags;
 
 //Fonctions
 
 void init_SPI();
-void spi_write_read(uint8_t command[6], SPI_HandleTypeDef *hspi);
+void spi_write_read(SPI_HandleTypeDef *hspi);
 
 #endif /* __MAIN_H */
