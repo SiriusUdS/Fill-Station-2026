@@ -23,6 +23,8 @@
 /* USER CODE BEGIN Includes */
 #include "ads131m08.h"
 #include "spi.h"
+#include "dil/can.h"
+#include <string.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -45,6 +47,24 @@
 #endif
 #endif /* DUAL_CORE_BOOT_SYNC_SEQUENCE */
 
+/* CAN_RX_TEST: receive "BONJOUR" debug frames addressed to this node over the  */
+/* bus and count how many pass validation. Leave enabled to receive from the    */
+/* other board. Comment out to disable the CAN test entirely.                   */
+#define CAN_RX_TEST
+#define CAN_ID_DEBUG 0x7F   /* message id carried by the BONJOUR test frame      */
+
+/* CAN_TX_TEST: single-board self-test. When defined, FDCAN runs in INTERNAL     */
+/* LOOPBACK and self-sends a BONJOUR frame every period (no transceiver/second   */
+/* node needed). Leave commented out to receive from the other board in NORMAL   */
+/* mode over a real bus.                                                         */
+//#define CAN_TX_TEST
+#define CAN_TX_TEST_PERIOD_MS 1000
+
+/* Loopback self-test cannot work without the receive path. */
+#if defined(CAN_TX_TEST) && !defined(CAN_RX_TEST)
+#define CAN_RX_TEST
+#endif
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -64,7 +84,15 @@ DMA_HandleTypeDef hdma_spi6_rx;
 DMA_HandleTypeDef hdma_spi6_tx;
 
 /* USER CODE BEGIN PV */
+#if defined(CAN_RX_TEST)
+/* Observe these in the debugger to confirm BONJOUR frames are received. */
+volatile uint32_t canTestRxValidCount   = 0;  /* frames whose payload was "BONJOUR" */
+volatile uint32_t canTestRxInvalidCount = 0;  /* matching frames that failed validation */
+volatile uint8_t  canTestRxLast[8]      = {0}; /* last received payload, for inspection */
 
+/* "BONJOUR" (7 chars) padded to the 8-byte classic CAN payload */
+static const uint8_t CAN_TEST_BONJOUR[8] = { 'B', 'O', 'N', 'J', 'O', 'U', 'R', 0 };
+#endif
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -132,8 +160,15 @@ __HAL_RCC_SPI6_CLK_ENABLE();
   MX_SPI4_Init();
   MX_FDCAN1_Init();
   /* USER CODE BEGIN 2 */
-  HAL_GPIO_WritePin(GPIOF, GPIO_PIN_1, GPIO_PIN_SET); 
-  ADS131M08_init(&hspi6);
+  HAL_GPIO_WritePin(GPIOF, GPIO_PIN_1, GPIO_PIN_SET);
+  //ADS131M08_init(&hspi6);
+
+#if defined(CAN_RX_TEST)
+  /* Bring up CAN with this node's RX filter so only frames addressed to us pass. */
+  if (!CAN_Init(&hfdcan1, CAN_NODE_FILL_F412)) {
+    Error_Handler();
+  }
+#endif
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -143,7 +178,48 @@ __HAL_RCC_SPI6_CLK_ENABLE();
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    ADS131M08_get_data(&hspi6);
+    //ADS131M08_get_data(&hspi6);
+
+#if defined(CAN_TX_TEST)
+    /* Loopback self-test only: self-send a BONJOUR frame every period.
+       Self-addressed (targetID == this node) so it passes our RX filter. */
+    static uint32_t lastTxTick = 0;
+    if ((HAL_GetTick() - lastTxTick) >= CAN_TX_TEST_PERIOD_MS)
+    {
+      lastTxTick = HAL_GetTick();
+
+      CANHeader txHeader = {0};
+      txHeader.frame.senderID  = CAN_NODE_FILL_F412;
+      txHeader.frame.targetID  = CAN_NODE_FILL_F412;
+      txHeader.frame.messageID = CAN_ID_DEBUG;
+
+      CAN_Send(txHeader.code, CAN_TEST_BONJOUR);
+    }
+#endif /* CAN_TX_TEST */
+
+#if defined(CAN_RX_TEST)
+    /* Drain any received frames and validate the BONJOUR test payload. */
+    CANHeader rxHeader;
+    uint8_t   rxData[8];
+
+    while (CAN_Receive(&rxHeader, rxData))
+    {
+      /* Only the debug test frames addressed to this node are validated. */
+      if (rxHeader.frame.targetID  == CAN_NODE_FILL_F412 &&
+          rxHeader.frame.messageID == CAN_ID_DEBUG)
+      {
+        for (int i = 0; i < 8; i++) {
+          canTestRxLast[i] = rxData[i];
+        }
+
+        if (memcmp(rxData, CAN_TEST_BONJOUR, sizeof(CAN_TEST_BONJOUR)) == 0) {
+          canTestRxValidCount++;    /* good "BONJOUR" frame */
+        } else {
+          canTestRxInvalidCount++;  /* right id, wrong payload */
+        }
+      }
+    }
+#endif /* CAN_RX_TEST */
   }
   /* USER CODE END 3 */
 }
@@ -192,7 +268,11 @@ static void MX_FDCAN1_Init(void)
   /* USER CODE END FDCAN1_Init 1 */
   hfdcan1.Instance = FDCAN1;
   hfdcan1.Init.FrameFormat = FDCAN_FRAME_CLASSIC;
+#if defined(CAN_TX_TEST)
+  hfdcan1.Init.Mode = FDCAN_MODE_INTERNAL_LOOPBACK;
+#else
   hfdcan1.Init.Mode = FDCAN_MODE_NORMAL;
+#endif
   hfdcan1.Init.AutoRetransmission = ENABLE;
   hfdcan1.Init.TransmitPause = DISABLE;
   hfdcan1.Init.ProtocolException = DISABLE;
@@ -378,8 +458,8 @@ static void MX_GPIO_Init(void)
   /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOE_CLK_ENABLE();
   __HAL_RCC_GPIOF_CLK_ENABLE();
-  __HAL_RCC_GPIOD_CLK_ENABLE();
   __HAL_RCC_GPIOG_CLK_ENABLE();
+  __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOF, GPIO_PIN_1, GPIO_PIN_RESET);

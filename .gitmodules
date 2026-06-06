@@ -1,3 +1,6 @@
 [submodule "CM7/Core/Inc/sirius-headers-common"]
 	path = CM7/Core/Inc/sirius-headers-common
 	url = https://github.com/SiriusUdS/sirius-headers-common.git
+[submodule "stm-2026-common"]
+	path = stm-2026-common
+	url = https://github.com/SiriusUdS/stm-2026-common.git

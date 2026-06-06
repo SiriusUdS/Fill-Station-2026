@@ -54,8 +54,8 @@ enable_language(C ASM)
 # Add include paths
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined include paths
-    Core/Inc/ads131m08.h
-    Core/Inc/spi.h
+    Core/Inc
+    ../stm-2026-common/Inc
 )
 
 # Add sources to executable
@@ -63,6 +63,8 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user sources here
     Core/Src/ads131m08.c
     Core/Src/spi.c
+    Core/Src/dil/can_port_stm32h7.c
+    ../stm-2026-common/Src/dil/can.c
 )
 
 # Link directories setup
