@@ -60,7 +60,7 @@ struct SPI4_HANDLE {
 
   uint8_t *txBuff_SPI4;
   uint8_t *rxBuff_SPI4;
-  uint8_t length_spi4;
+  uint16_t length_spi4;
   uint32_t last_timestamp;
 };
 
@@ -71,7 +71,7 @@ struct SPI6_HANDLE {
 
   uint8_t *txBuff_SPI6;
   uint8_t *rxBuff_SPI6;
-  uint8_t length_spi6;
+  uint16_t length_spi6;
   uint32_t last_timestamp;
 
 };
@@ -102,7 +102,8 @@ extern union  SPI_Flags    spi_flags;
 
 //Fonctions
 
-void init_SPI();
-void spi_write_read(SPI_HandleTypeDef *hspi);
 
+void spi_write_read(SPI_HandleTypeDef *hspi);
+void init_SPI4();
+void init_SPI6();
 #endif 

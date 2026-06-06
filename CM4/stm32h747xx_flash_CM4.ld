@@ -45,7 +45,6 @@ FLASH (rx)      : ORIGIN = 0x08100000, LENGTH = 1024K
 RAM (xrw)       : ORIGIN = 0x24000000, LENGTH = 256K
 RAM_D3 (xrw)    : ORIGIN = 0x38000000, LENGTH = 64K
 /* Shared SHARED + SD_RAM regions, common to every board (see stm-2026-common/ld). */
-INCLUDE stm32h747_ipc_regions.ld
 }
 
 
@@ -217,26 +216,8 @@ SECTIONS
     . = ALIGN(8);
   } >RAM
 
-  
-    /* D1 SRAM — accessible by DMA1/DMA2 (for SPI4) */
-  .sram_d1 (NOLOAD) :
-  {
-    . = ALIGN(4);
-    *(.SRAM_D1)
-    *(.SRAM_D1.*)
-    . = ALIGN(4);
-  } >RAM
-
-  /* SRAM4 for BDMA (D3 domain) - SPI6 BDMA buffers must live here */
-  .sram4 (NOLOAD) :
-  {
-    . = ALIGN(4);
-    *(.SRAM4)
-    . = ALIGN(4);
-  } >RAM_D3
 
   /* Shared .shared_ram + .sd_ram output sections, common to every board. */
-  INCLUDE stm32h747_ipc_sections.ld
 
   /* Remove information from the standard libraries */
   /DISCARD/ :

@@ -51,6 +51,7 @@ void ADS131M08_init(SPI_HandleTypeDef *hspi, GPIO_TypeDef *csPort[], uint16_t cs
 #define REG_ADDR_MODE           0x02
 #define REG_ADDR_CLOCK          0x03
 #define REG_ADDR_GAIN           0x04
+#define REG_ADDR_GAIN2          0x05
 //0x05 is reserved
 #define REG_ADDR_CFG            0x06
 #define REG_ADDR_THRSHLD_MSB    0x07

@@ -43,6 +43,7 @@ RAM (xrw)      : ORIGIN = 0x20000000, LENGTH = 128K     /* DTCM, M7 .data/.bss/h
 ITCMRAM (xrw)      : ORIGIN = 0x00000000, LENGTH = 64K
 RAM_D1 (xrw)    : ORIGIN = 0x24000000, LENGTH = 512K  /* D1 AXI-SRAM, all M7 (no M4, no shared region) */
 RAM_D2 (xrw)    : ORIGIN = 0x30000000, LENGTH = 288K  /* D2 SRAM1+2+3, reserved entirely for Ethernet DMA */
+RAM_D3 (xrw)    : ORIGIN = 0x38000000, LENGTH = 64K
 }
 /* Highest address of the user mode stack */
 _estack = 0x20020000;    /* end of RAM */
@@ -258,6 +259,13 @@ SECTIONS
     *(.axisram*)
     . = ALIGN(4);
   } >RAM_D1
+
+  .d3ram (NOLOAD) :
+  {
+  . = ALIGN(4);
+  *(.d3ram*)
+  . = ALIGN(4);
+  } >RAM_D3
 
   /* Remove information from the standard libraries */
   /DISCARD/ :
