@@ -25,6 +25,7 @@
 #include "spi.h"
 #include "dil/can.h"
 #include "ValveCmdPacket.h"
+#include "dil/ipc_can.h"
 #include <string.h>
 /* USER CODE END Includes */
 
@@ -78,15 +79,7 @@ DMA_HandleTypeDef hdma_spi6_rx;
 DMA_HandleTypeDef hdma_spi6_tx;
 
 /* USER CODE BEGIN PV */
-#if defined(CAN_RX_TEST)
-/* Observe these in the debugger to confirm BONJOUR frames are received. */
-volatile uint32_t canTestRxValidCount   = 0;  /* frames whose payload was "BONJOUR" */
-volatile uint32_t canTestRxInvalidCount = 0;  /* matching frames that failed validation */
-volatile uint8_t  canTestRxLast[8]      = {0}; /* last received payload, for inspection */
 
-/* "BONJOUR" (7 chars) padded to the 8-byte classic CAN payload */
-static const uint8_t CAN_TEST_BONJOUR[8] = { 'B', 'O', 'N', 'J', 'O', 'U', 'R', 0 };
-#endif
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -158,7 +151,7 @@ __HAL_RCC_SPI6_CLK_ENABLE();
 
 #if defined(CAN_RX_TEST)
   /* Bring up CAN with this node's RX filter so only frames addressed to us pass. */
-  if (!CAN_Init(&hfdcan1, CAN_NODE_FILL_F412)) {
+  if (!CAN_Init(&hfdcan1, CAN_NODE_FCU)) {
     Error_Handler();
   }
 #endif
@@ -166,7 +159,6 @@ __HAL_RCC_SPI6_CLK_ENABLE();
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-  static uint32_t lastTxTick = 0;
   while (1)
   {
     /* USER CODE END WHILE */
@@ -174,42 +166,10 @@ __HAL_RCC_SPI6_CLK_ENABLE();
     /* USER CODE BEGIN 3 */
     //ADS131M08_get_data(&hspi6);
 
-#if defined(CAN_TX_TEST)
-    /* Command the other board (Engine) to open valve 1 every period. */
-    
-    if ((HAL_GetTick() - lastTxTick) >= CAN_TX_TEST_PERIOD_MS)
-    {
-      lastTxTick = HAL_GetTick();
-
-      ValveCmdPacket packet;
-      valveCmdPacketMake(CAN_VALVE_1, CAN_CMD_OPEN, &packet);  /* target = Engine */
-      CAN_Send(packet.header.code, packet.payload.data);
-    }
-#endif /* CAN_TX_TEST */
-
-#if defined(CAN_RX_TEST)
-    /* Drain any received frames and validate the BONJOUR test payload. */
-    CANHeader rxHeader;
-    uint8_t   rxData[8];
-
-    while (CAN_Receive(&rxHeader, rxData))
-    {
-      /* Only the debug test frames addressed to this node are validated. */
-      if (rxHeader.frame.targetID  == CAN_NODE_FILL_F412 &&
-          rxHeader.frame.messageID == CAN_ID_DEBUG)
-      {
-        for (int i = 0; i < 8; i++) {
-          canTestRxLast[i] = rxData[i];
-        }
-
-        if (memcmp(rxData, CAN_TEST_BONJOUR, sizeof(CAN_TEST_BONJOUR)) == 0) {
-          canTestRxValidCount++;    /* good "BONJOUR" frame */
-        } else {
-          canTestRxInvalidCount++;  /* right id, wrong payload */
-        }
-      }
-    }
-#endif /* CAN_RX_TEST */
+    /* Inter-core CAN bridge: the M7 owns the protocol/state machine, the M4
+       owns FDCAN1. Forward M7-queued frames to the bus and publish received
+       frames into the shared RX ring for the M7. */
+    IpcCan_M4Service();
   }
   /* USER CODE END 3 */
 }

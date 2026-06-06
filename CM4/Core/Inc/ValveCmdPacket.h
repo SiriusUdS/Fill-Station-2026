@@ -21,8 +21,8 @@ typedef struct {
 // Build a packet
 static inline void valveCmdPacketMake(CanValveIndex valve, CanValveCmd cmd, ValveCmdPacket* packet)
 {
-    packet->header.frame.targetID = CAN_NODE_ENGINE_H747;
-    packet->header.frame.senderID = CAN_NODE_FILL_F412;
+    packet->header.frame.targetID = CAN_NODE_ECU;
+    packet->header.frame.senderID = CAN_NODE_FCU;
     packet->header.frame.deviceState = cmd;
     packet->header.frame.messageID = CAN_ID_CMD_VALVE;
     packet->header.frame.errorCtrl = 0;

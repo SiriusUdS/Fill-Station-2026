@@ -26,6 +26,8 @@
 #include "Ethernet.h"
 #include "stdio.h"
 #include "FillStation.h"
+#include "dil/ipc_can.h"
+#include "dil/can_types.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -105,6 +107,56 @@ uint32_t counterTx = 0;
 NetAddr ethNetAddr;
 
 FillStation fill;
+
+/* ---- TEMP: M7<->M7 CAN ping/echo test (remove when done) ----------------- *
+ * Sends a PING to Engine ~1 Hz, echoes any PING it receives as a PONG, and
+ * counts PONGs. Watch these globals in the debugger:
+ *   canPingTxCount  - PINGs sent     canPongRxCount - replies received
+ *   canRxTotal      - total frames   canLastRxId/Data - last frame seen
+ * While this runs it is the sole RX-ring consumer (drains it each loop).      */
+volatile uint32_t canPingTxCount = 0;
+volatile uint32_t canPongRxCount = 0;
+volatile uint32_t canRxTotal     = 0;
+volatile uint32_t canLastRxId    = 0;
+volatile uint8_t  canLastRxData[8] = {0};
+
+static void CAN_PingPongTest(void)
+{
+    /* Send a PING to Engine once per second. */
+    static uint32_t lastPing = 0;
+    uint32_t now = HAL_GetTick();
+    if ((now - lastPing) >= 1000u) {
+        lastPing = now;
+        CANHeader h; h.code = 0;
+        h.frame.senderID  = CAN_NODE_FCU;
+        h.frame.targetID  = CAN_NODE_ECU;
+        h.frame.messageID = CAN_ID_COMM_PING;
+        uint8_t d[8] = { 'P', 'I', 'N', 'G', 0, 0, 0, 0 };
+        d[4] = (uint8_t)canPingTxCount;            /* sequence number */
+        if (IpcCan_Send(h.code, d)) { canPingTxCount++; }
+    }
+
+    /* Drain received frames: echo PINGs back as PONGs, count PONGs. */
+    uint32_t id;
+    uint8_t  d[8];
+    while (IpcCan_Receive(&id, d)) {
+        canRxTotal++;
+        canLastRxId = id;
+        for (uint32_t i = 0u; i < 8u; i++) { canLastRxData[i] = d[i]; }
+
+        CANHeader h; h.code = id;
+        if (h.frame.messageID == CAN_ID_COMM_PING) {
+            CANHeader r; r.code = 0;
+            r.frame.senderID  = CAN_NODE_FCU;
+            r.frame.targetID  = h.frame.senderID;  /* reply to whoever pinged */
+            r.frame.messageID = CAN_ID_COMM_PONG;
+            IpcCan_Send(r.code, d);                 /* echo the same payload */
+        } else if (h.frame.messageID == CAN_ID_COMM_PONG) {
+            canPongRxCount++;
+        }
+    }
+}
+/* ---- end TEMP CAN ping/echo test ----------------------------------------- */
 /* USER CODE END 0 */
 
 /**
@@ -152,6 +204,9 @@ int main(void)
   /* Configure the peripherals common clocks */
   PeriphCommonClock_Config();
 /* USER CODE BEGIN Boot_Mode_Sequence_2 */
+/* Initialise the shared inter-core CAN rings before releasing the M4, so the
+   M4 always sees them in a known (empty) state. */
+IpcCan_Init();
 #if defined(DUAL_CORE_BOOT_SYNC_SEQUENCE)
 /* When system initialization is finished, Cortex-M7 will release Cortex-M4 by means of
 HSEM notification */
@@ -208,10 +263,12 @@ Error_Handler();
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    CAN_PingPongTest();   /* TEMP: M7<->M7 CAN link test (remove when done) */
+
     TESTIP_Process();
 
     FILL_tick(HAL_GetTick());
-  
+
   }
   /* USER CODE END 3 */
 }
@@ -512,24 +569,11 @@ void MPU_Config(void)
 
   HAL_MPU_ConfigRegion(&MPU_InitStruct);
 
-  /** AXI-SRAM 0x24040000..0x24080000 (256K): shared inter-core region + SD/FATFS
-   * DMA buffers. Marked Normal, non-cacheable, shareable so that:
-   *  - data shared with the cacheless CM4 stays coherent, and
-   *  - SDMMC IDMA transfers don't require manual D-cache clean/invalidate.
-   */
-  MPU_InitStruct.Enable = MPU_REGION_ENABLE;
-  MPU_InitStruct.Number = MPU_REGION_NUMBER1;
-  MPU_InitStruct.BaseAddress = 0x24040000;
-  MPU_InitStruct.Size = MPU_REGION_SIZE_256KB;
-  MPU_InitStruct.SubRegionDisable = 0x0;
-  MPU_InitStruct.TypeExtField = MPU_TEX_LEVEL1;
-  MPU_InitStruct.AccessPermission = MPU_REGION_FULL_ACCESS;
-  MPU_InitStruct.DisableExec = MPU_INSTRUCTION_ACCESS_DISABLE;
-  MPU_InitStruct.IsShareable = MPU_ACCESS_SHAREABLE;
-  MPU_InitStruct.IsCacheable = MPU_ACCESS_NOT_CACHEABLE;
-  MPU_InitStruct.IsBufferable = MPU_ACCESS_NOT_BUFFERABLE;
+  /* AXI-SRAM 0x24040000..0x24080000 (256K): shared inter-core region + SD/FATFS
+   * DMA buffers, Normal/non-cacheable/shareable. Shared helper so every board
+   * (FillStation, Engine) configures this region identically. */
+  IpcCan_MpuConfigShared(MPU_REGION_NUMBER1);
 
-  HAL_MPU_ConfigRegion(&MPU_InitStruct);
   /* Enables the MPU */
   HAL_MPU_Enable(MPU_PRIVILEGED_DEFAULT);
 

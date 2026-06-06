@@ -42,10 +42,8 @@ FLASH (rx)      : ORIGIN = 0x08000000, LENGTH = 1024K
 RAM (xrw)      : ORIGIN = 0x20000000, LENGTH = 128K
 ITCMRAM (xrw)      : ORIGIN = 0x00000000, LENGTH = 64K
 RAM_D2 (xrw)    : ORIGIN = 0x30000000, LENGTH = 288K  /* D2 SRAM1+2+3, reserved entirely for Ethernet DMA */
-/* Shared M4<->M7 region (mirrors the CM4 SHARED region). Non-cacheable via MPU. */
-SHARED (xrw)    : ORIGIN = 0x24040000, LENGTH = 192K
-/* M7 SD/FATFS DMA buffers (SDMMC IDMA cannot reach DTCM). Non-cacheable via MPU. */
-SD_RAM (xrw)    : ORIGIN = 0x24070000, LENGTH = 64K
+/* Shared SHARED + SD_RAM regions, common to every board (see stm-2026-common/ld). */
+INCLUDE stm32h747_ipc_regions.ld
 }
 /* Highest address of the user mode stack */
 _estack = 0x20020000;    /* end of RAM */
@@ -254,21 +252,8 @@ SECTIONS
 
   
 
-  /* Shared inter-core region (SPI4 DMA buffers + mailbox). Mirrors CM4. */
-  .shared_ram (NOLOAD) :
-  {
-    . = ALIGN(4);
-    KEEP(*(.shared_ram))
-    . = ALIGN(4);
-  } >SHARED
-
-  /* SD / FATFS DMA buffers - place buffers here via __attribute__((section(".sd_ram"))) */
-  .sd_ram (NOLOAD) :
-  {
-    . = ALIGN(4);
-    KEEP(*(.sd_ram))
-    . = ALIGN(4);
-  } >SD_RAM
+  /* Shared .shared_ram + .sd_ram output sections, common to every board. */
+  INCLUDE stm32h747_ipc_sections.ld
 
   /* Remove information from the standard libraries */
   /DISCARD/ :

@@ -4,6 +4,8 @@
 #include "string.h"
 #include "sirius-headers-common/Telecommunication/BoardCommandV2.h"
 #include "CRC.h"
+#include "dil/ipc_can.h"
+#include "dil/can_types.h"
 
 static volatile FillStation fill;
 
@@ -142,6 +144,44 @@ static void valveTick(){
 
 }
 
+/* Drain CAN frames received from the bus (published by the M4) and keep the
+   latest one available to the controller. */
+static void canTick(){
+    uint32_t id;
+    uint8_t  d[8];
+    while (IpcCan_Receive(&id, d)) {
+        fill.canRxCount++;
+        fill.canLastRxId = id;
+        for (uint32_t i = 0u; i < 8u; i++) {
+            fill.canLastRxData[i] = d[i];
+        }
+        /* TODO: dispatch to the state machine, e.g. decode CAN_ID_STATUS_VALVE. */
+    }
+}
+
+void FILL_sendValveCmd(uint8_t valve, uint8_t cmd){
+    CANHeader h;
+    h.code = 0;
+    h.frame.senderID    = CAN_NODE_FCU;
+    h.frame.targetID    = CAN_NODE_ECU;
+    h.frame.deviceState = cmd;
+    h.frame.messageID   = CAN_ID_CMD_VALVE;
+    h.frame.errorCtrl   = 0;
+    h.frame.errorCode   = 0;
+    h.frame.reserved    = 0;
+
+    /* Payload mirrors ValveCmdPayload: timeStamp_ms (4 bytes) + valveIndex. */
+    uint32_t ts = fill.currentTick;
+    uint8_t d[8] = {0};
+    d[0] = (uint8_t)(ts & 0xFFu);
+    d[1] = (uint8_t)((ts >> 8) & 0xFFu);
+    d[2] = (uint8_t)((ts >> 16) & 0xFFu);
+    d[3] = (uint8_t)((ts >> 24) & 0xFFu);
+    d[4] = valve;
+
+    IpcCan_Send(h.code, d);
+}
+
 
 static void STATE_test(){
 
@@ -193,6 +233,7 @@ void FILL_init(SD_HandleTypeDef* sdHandler)
 void FILL_tick(uint32_t tick)
 {
     fill.currentTick = tick;
+    canTick();
     messageTick();
     valveTick();
     

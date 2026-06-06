@@ -27,7 +27,8 @@ set(STM32_MCU_FLAGS  "-mcpu=cortex-m4 -mfpu=fpv4-sp-d16 -mfloat-abi=hard" )
 
 #Linker options
 set(STM32_LINKER_SCRIPT stm32h747xx_flash_CM4.ld)
-set(STM32_LINKER_OPTION  )
+# Search path so the linker script can INCLUDE the shared IPC memory-map template.
+set(STM32_LINKER_OPTION "-L${CMAKE_CURRENT_LIST_DIR}/../stm-2026-common/ld")
 
 # Set the project name
 set(CMAKE_PROJECT_NAME FillStation_CM4)
@@ -63,8 +64,8 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user sources here
     Core/Src/ads131m08.c
     Core/Src/spi.c
-    Core/Src/dil/can_port_stm32h7.c
     ../stm-2026-common/Src/dil/can.c
+    ../stm-2026-common/Src/dil/ipc_can.c
 )
 
 # Link directories setup

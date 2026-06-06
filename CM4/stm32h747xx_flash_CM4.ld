@@ -43,10 +43,9 @@ FLASH (rx)      : ORIGIN = 0x08100000, LENGTH = 1024K
    for the Ethernet DMA. AXI-SRAM is always clocked in Run mode, so it is safe
    for the reset-time .data copy. */
 RAM (xrw)       : ORIGIN = 0x24000000, LENGTH = 256K
-/* Shared M4<->M7 region: SPI4 (DMA1) buffers + inter-core mailbox. Must use the
-   SAME ORIGIN/LENGTH in the CM7 script; the CM7 MPU marks it non-cacheable. */
-SHARED (xrw)    : ORIGIN = 0x24040000, LENGTH = 192K
 RAM_D3 (xrw)    : ORIGIN = 0x38000000, LENGTH = 64K
+/* Shared SHARED + SD_RAM regions, common to every board (see stm-2026-common/ld). */
+INCLUDE stm32h747_ipc_regions.ld
 }
 
 
@@ -226,13 +225,8 @@ SECTIONS
     . = ALIGN(4);
   } >RAM_D3
 
-  /* Shared inter-core region (SPI4 DMA buffers + mailbox). Mirrored in CM7. */
-  .shared_ram (NOLOAD) :
-  {
-    . = ALIGN(4);
-    KEEP(*(.shared_ram))
-    . = ALIGN(4);
-  } >SHARED
+  /* Shared .shared_ram + .sd_ram output sections, common to every board. */
+  INCLUDE stm32h747_ipc_sections.ld
 
   /* Remove information from the standard libraries */
   /DISCARD/ :
