@@ -39,14 +39,20 @@ ENTRY(Reset_Handler)
 MEMORY
 {
 FLASH (rx)      : ORIGIN = 0x08100000, LENGTH = 1024K
-RAM (xrw)      : ORIGIN = 0x10000000, LENGTH = 288K
+/* CM4 data/stack live in D1 AXI-SRAM so that all of D2 SRAM can be reserved
+   for the Ethernet DMA. AXI-SRAM is always clocked in Run mode, so it is safe
+   for the reset-time .data copy. */
+RAM (xrw)       : ORIGIN = 0x24000000, LENGTH = 256K
+/* Shared M4<->M7 region: SPI4 (DMA1) buffers + inter-core mailbox. Must use the
+   SAME ORIGIN/LENGTH in the CM7 script; the CM7 MPU marks it non-cacheable. */
+SHARED (xrw)    : ORIGIN = 0x24040000, LENGTH = 192K
 RAM_D3 (xrw)    : ORIGIN = 0x38000000, LENGTH = 64K
 }
 
 
 
 /* Highest address of the user mode stack */
-_estack = 0x10048000;    /* end of RAM */
+_estack = 0x24040000;    /* end of CM4 RAM (0x24000000 + 256K AXI-SRAM) */
 /* Generate a link error if heap and stack don't fit into RAM */
 _Min_Heap_Size = 0x200;      /* required amount of heap  */
 _Min_Stack_Size = 0x400; /* required amount of stack */
@@ -212,13 +218,21 @@ SECTIONS
     . = ALIGN(8);
   } >RAM
 
-  /* SRAM4 for BDMA (D3 domain) */
+  /* SRAM4 for BDMA (D3 domain) - SPI6 BDMA buffers must live here */
   .sram4 (NOLOAD) :
   {
     . = ALIGN(4);
     *(.SRAM4)
     . = ALIGN(4);
   } >RAM_D3
+
+  /* Shared inter-core region (SPI4 DMA buffers + mailbox). Mirrored in CM7. */
+  .shared_ram (NOLOAD) :
+  {
+    . = ALIGN(4);
+    KEEP(*(.shared_ram))
+    . = ALIGN(4);
+  } >SHARED
 
   /* Remove information from the standard libraries */
   /DISCARD/ :
