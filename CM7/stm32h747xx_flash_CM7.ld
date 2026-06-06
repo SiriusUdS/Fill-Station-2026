@@ -39,11 +39,10 @@ ENTRY(Reset_Handler)
 MEMORY
 {
 FLASH (rx)      : ORIGIN = 0x08000000, LENGTH = 1024K
-RAM (xrw)      : ORIGIN = 0x20000000, LENGTH = 128K
+RAM (xrw)      : ORIGIN = 0x20000000, LENGTH = 128K     /* DTCM, M7 .data/.bss/heap/stack */
 ITCMRAM (xrw)      : ORIGIN = 0x00000000, LENGTH = 64K
+RAM_D1 (xrw)    : ORIGIN = 0x24000000, LENGTH = 512K  /* D1 AXI-SRAM, all M7 (no M4, no shared region) */
 RAM_D2 (xrw)    : ORIGIN = 0x30000000, LENGTH = 288K  /* D2 SRAM1+2+3, reserved entirely for Ethernet DMA */
-/* Shared SHARED + SD_RAM regions, common to every board (see stm-2026-common/ld). */
-INCLUDE stm32h747_ipc_regions.ld
 }
 /* Highest address of the user mode stack */
 _estack = 0x20020000;    /* end of RAM */
@@ -250,10 +249,15 @@ SECTIONS
     . = ALIGN(4);
   } >RAM_D2
 
-  
-
-  /* Shared .shared_ram + .sd_ram output sections, common to every board. */
-  INCLUDE stm32h747_ipc_sections.ld
+  /* General-purpose D1 AXI-SRAM, available to M7 for explicitly-placed data
+     (e.g. __attribute__((section(".axisram")))). */
+  .axisram (NOLOAD) :
+  {
+    . = ALIGN(4);
+    *(.axisram)
+    *(.axisram*)
+    . = ALIGN(4);
+  } >RAM_D1
 
   /* Remove information from the standard libraries */
   /DISCARD/ :

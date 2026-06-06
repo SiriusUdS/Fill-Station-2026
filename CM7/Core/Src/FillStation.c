@@ -4,10 +4,49 @@
 #include "string.h"
 #include "sirius-headers-common/Telecommunication/BoardCommandV2.h"
 #include "CRC.h"
-#include "dil/ipc_can.h"
+#include "dil/can_bus.h"
 #include "dil/can_types.h"
+#include "can/CANController.h"
+#include "can/handlers/handlerPing.h"
+#include "can/packets/ValveCmdPacket.h"
+#include "can/packets/ValveStatusPacket.h"
 
 static volatile FillStation fill;
+
+/* ---- CAN protocol layer (runs on the M7, transported directly over FDCAN1
+   by the CanBus_* shim) ----------------------------------------------------- */
+static CanNodeId s_fcuNode = CAN_NODE_FCU;   /* PONG sender id for handler_ping */
+
+/* FCU-side handler for valve-status frames returned by the Engine (ECU). */
+static void fillValveStatusHandler(void *ctx, const CANHeader *header,
+                                   const uint8_t *rxData)
+{
+    (void)ctx;
+    CanValveIndex  valve;
+    CanValveStatus status;
+    uint32_t       ts;
+    valveStatusPacketParse(header->code, rxData, &valve, &status, &ts);
+
+    fill.canRxCount++;
+    fill.canLastRxId = header->code;
+    for (uint32_t i = 0u; i < 8u; i++) {
+        fill.canLastRxData[i] = rxData[i];
+    }
+    /* TODO: feed `valve`/`status` into the fill state machine. */
+}
+
+static const CANHandlerEntry s_canHandlers[] = {
+    { CAN_ID_COMM_PING,    handler_ping,           &s_fcuNode },
+    { CAN_ID_STATUS_VALVE, fillValveStatusHandler, NULL       },
+};
+
+static CANControllerConfig s_canCfg = {
+    .nodeID       = CAN_NODE_FCU,
+    .handlers     = s_canHandlers,
+    .handlerCount = (uint8_t)(sizeof(s_canHandlers) / sizeof(s_canHandlers[0])),
+};
+
+static CANController s_can;
 
 void safeHandler(UDPPacketHeader header, const uint8_t* payload){
 }
@@ -144,42 +183,17 @@ static void valveTick(){
 
 }
 
-/* Drain CAN frames received from the bus (published by the M4) and keep the
-   latest one available to the controller. */
+/* Drain every CAN frame received on FDCAN1 (queued by the RX FIFO0 ISR) and
+   dispatch it through the controller (ping -> PONG, valve-status -> fillValveStatusHandler). */
 static void canTick(){
-    uint32_t id;
-    uint8_t  d[8];
-    while (IpcCan_Receive(&id, d)) {
-        fill.canRxCount++;
-        fill.canLastRxId = id;
-        for (uint32_t i = 0u; i < 8u; i++) {
-            fill.canLastRxData[i] = d[i];
-        }
-        /* TODO: dispatch to the state machine, e.g. decode CAN_ID_STATUS_VALVE. */
-    }
+    while (CANController_Process(&s_can));
 }
 
 void FILL_sendValveCmd(uint8_t valve, uint8_t cmd){
-    CANHeader h;
-    h.code = 0;
-    h.frame.senderID    = CAN_NODE_FCU;
-    h.frame.targetID    = CAN_NODE_ECU;
-    h.frame.deviceState = cmd;
-    h.frame.messageID   = CAN_ID_CMD_VALVE;
-    h.frame.errorCtrl   = 0;
-    h.frame.errorCode   = 0;
-    h.frame.reserved    = 0;
-
-    /* Payload mirrors ValveCmdPayload: timeStamp_ms (4 bytes) + valveIndex. */
-    uint32_t ts = fill.currentTick;
-    uint8_t d[8] = {0};
-    d[0] = (uint8_t)(ts & 0xFFu);
-    d[1] = (uint8_t)((ts >> 8) & 0xFFu);
-    d[2] = (uint8_t)((ts >> 16) & 0xFFu);
-    d[3] = (uint8_t)((ts >> 24) & 0xFFu);
-    d[4] = valve;
-
-    IpcCan_Send(h.code, d);
+    ValveCmdPacket pkt;
+    valveCmdPacketMake(CAN_NODE_FCU, CAN_NODE_ECU,
+                       (CanValveIndex)valve, (CanValveCmd)cmd, &pkt);
+    CanBus_Send(pkt.header.code, pkt.payload.data);
 }
 
 
@@ -208,7 +222,7 @@ static void STATE_error(){
 
 }
 
-void FILL_init(SD_HandleTypeDef* sdHandler)
+void FILL_init(SD_HandleTypeDef* sdHandler, FDCAN_HandleTypeDef* hfdcan)
 {
     fill.fillState = FILLING_STATION_STATE_INIT;
     fill.lastEthernetMessageRx_MS = 0;
@@ -223,6 +237,11 @@ void FILL_init(SD_HandleTypeDef* sdHandler)
     fill.gsAddr.port = 7520;
 
     TESTIP_Init();
+
+    /* Start FDCAN1: install the FCU RX filter, start the peripheral and enable
+       the RX FIFO0 interrupt. The peripheral itself is created in MX_FDCAN1_Init(). */
+    CanBus_Init(hfdcan, CAN_NODE_FCU);
+    CANController_Init(&s_can, &s_canCfg);
 
     SDCARD_init(&fill.sd, sdHandler);
 

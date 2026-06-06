@@ -27,8 +27,6 @@ set(STM32_MCU_FLAGS  "-mcpu=cortex-m7 -mfpu=fpv5-d16 -mfloat-abi=hard " )
 
 #Linker options
 set(STM32_LINKER_SCRIPT stm32h747xx_flash_CM7.ld)
-# Search path so the linker script can INCLUDE the shared IPC memory-map template.
-set(STM32_LINKER_OPTION "-L${CMAKE_CURRENT_LIST_DIR}/../stm-2026-common/ld")
 
 # Set the project name
 set(CMAKE_PROJECT_NAME FillStation_CM7)
@@ -67,7 +65,12 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Src/Ethernet_it.c
     Core/Src/SDCard.c
     Core/Src/CRC.c
-    ../stm-2026-common/Src/dil/ipc_can.c
+    Core/Src/ads131m08.c
+    Core/Src/spi.c
+    ../stm-2026-common/Src/dil/can.c
+    ../stm-2026-common/Src/dil/can_bus.c
+    ../stm-2026-common/Src/can/CANController.c
+    ../stm-2026-common/Src/can/handlers/handlerPing.c
 )
 
 # Link directories setup

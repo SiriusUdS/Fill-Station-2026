@@ -62,10 +62,6 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
 # Add sources to executable
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user sources here
-    Core/Src/ads131m08.c
-    Core/Src/spi.c
-    ../stm-2026-common/Src/dil/can.c
-    ../stm-2026-common/Src/dil/ipc_can.c
 )
 
 # Link directories setup
