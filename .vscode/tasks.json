@@ -1,0 +1,44 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Build CM7",
+      "type": "process",
+      "command": "cmake",
+      "args": ["--build", "${workspaceFolder}/CM7/build"],
+      "group": "build",
+      "problemMatcher": ["$gcc"]
+    },
+    {
+      "label": "Build CM4",
+      "type": "process",
+      "command": "cmake",
+      "args": ["--build", "${workspaceFolder}/CM4/build"],
+      "group": "build",
+      "problemMatcher": ["$gcc"]
+    },
+    {
+      "label": "Flash both cores",
+      "type": "process",
+      "command": "C:/Program Files/STMicroelectronics/STM32Cube/STM32CubeProgrammer/bin/STM32_Programmer_CLI.exe",
+      "args": [
+        "-c", "port=SWD", "mode=UR",
+        "-w", "${workspaceFolder}/CM7/build/FillStation_CM7.elf",
+        "-w", "${workspaceFolder}/CM4/build/FillStation_CM4.elf",
+        "-rst"
+      ],
+      "dependsOrder": "sequence",
+      "dependsOn": ["Build CM7", "Build CM4"],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared",
+        "clear": true
+      },
+      "problemMatcher": []
+    }
+  ]
+}

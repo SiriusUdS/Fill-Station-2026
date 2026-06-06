@@ -167,6 +167,7 @@ __HAL_RCC_SPI6_CLK_ENABLE();
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
+  static uint32_t lastTxTick = 0;
   while (1)
   {
     /* USER CODE END WHILE */
@@ -176,7 +177,7 @@ __HAL_RCC_SPI6_CLK_ENABLE();
 
 #if defined(CAN_TX_TEST)
     /* Command the other board (Engine) to open valve 1 every period. */
-    static uint32_t lastTxTick = 0;
+    
     if ((HAL_GetTick() - lastTxTick) >= CAN_TX_TEST_PERIOD_MS)
     {
       lastTxTick = HAL_GetTick();
