@@ -3,6 +3,7 @@
 #include "sirius-headers-common/Telecommunication/PacketHeaderVariable.h"
 #include "string.h"
 #include "sirius-headers-common/Telecommunication/BoardCommandV2.h"
+#include "CRC.h"
 
 static volatile FillStation fill;
 
@@ -126,9 +127,14 @@ static void messageTick(){
     header.frame.deviceState = fill.fillState;
     header.frame.deviceTS_MS = fill.currentTick;
     header.frame.payloadID = GET_SYSTEM;
-    header.frame.payloadLenght = 0;
+    header.frame.payloadLenght = 4;
+    uint8_t values[] = {0xDE,0xAD,0xBE,0xEF};
+    uint32_t crc = CRC32_Calculate(values, 4);
+    // Write header then CRC directly into buffer — no intermediate sizedBuf needed
     memcpy(buffer, header.bytes, sizeof(UDPPacketHeader));
-    TESTIP_SendUDPPacket(&(fill.gsAddr), sizeof(UDPPacketHeader));
+    memcpy(buffer + sizeof(UDPPacketHeader), values, sizeof(uint32_t));
+    memcpy(buffer+sizeof(UDPPacketHeader)+4, &crc, sizeof(uint32_t));
+    TESTIP_SendUDPPacket(&(fill.gsAddr), sizeof(UDPPacketHeader)+8);
     fill.lastEthernetMessageTx_MS = fill.currentTick;
 }
 
@@ -162,7 +168,7 @@ static void STATE_error(){
 
 }
 
-void FILL_init()
+void FILL_init(SD_HandleTypeDef* sdHandler)
 {
     fill.fillState = FILLING_STATION_STATE_INIT;
     fill.lastEthernetMessageRx_MS = 0;
@@ -177,6 +183,11 @@ void FILL_init()
     fill.gsAddr.port = 7520;
 
     TESTIP_Init();
+
+    SDCARD_init(&fill.sd, sdHandler);
+
+    uint8_t test[] = "ALLO!!!";
+    SDCARD_write(&fill.sd, test, sizeof(test));
 }
 
 void FILL_tick(uint32_t tick)

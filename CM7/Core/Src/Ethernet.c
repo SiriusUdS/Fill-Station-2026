@@ -181,19 +181,21 @@ void TESTIP_Process() {
 	}
 
 	while (rxQueueSize) {
-		if (rxBufStatus[rxBufReadIdx] == BUF_OWNED_CPU) {
-			uint8_t *rxBuf = rxPool[rxBufReadIdx];
+    if (rxBufStatus[rxBufReadIdx] == BUF_OWNED_CPU) {
+        uint8_t *rxBuf = rxPool[rxBufReadIdx];
 
-			TESTIP_ProcessETHFrame(rxBuf);
+        TESTIP_ProcessETHFrame(rxBuf);
 
-			rxBufStatus[rxBufReadIdx] = BUF_FREE;
+        rxBufStatus[rxBufReadIdx] = BUF_FREE;
+        rxBufReadIdx = (rxBufReadIdx + 1) % RX_BUF_CNT;  // ← move here
 
-			__disable_irq();
-			rxQueueSize--;
-			__enable_irq();
-		}
-		rxBufReadIdx = (rxBufReadIdx + 1) % RX_BUF_CNT;
-	}
+        __disable_irq();
+        rxQueueSize--;
+        __enable_irq();
+    } else {
+        break; // buffer not ready yet, come back later
+    }
+}
 }
 
 uint8_t* TESTIP_GetDataPtr() {
