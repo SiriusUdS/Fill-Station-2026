@@ -22,8 +22,8 @@ RW_REG write_command;
 
 
 
-__attribute__((section(".d3ram"))) uint8_t txBuff_SPI[message_length];
-__attribute__((section(".d3ram"))) uint8_t rxBuff_SPI[message_length];
+uint8_t txBuff_SPI[message_length];
+uint8_t rxBuff_SPI[message_length];
 
 
 

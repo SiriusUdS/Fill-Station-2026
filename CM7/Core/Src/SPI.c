@@ -2,6 +2,7 @@
 #include "main.h"  
 #include "stdio.h"
 #include "stm32h7xx_hal_gpio.h"
+#include "stm32h7xx_hal_spi.h"
 #include "string.h"
 
 struct SPI4_HANDLE  spi4_handle  = {0};
@@ -51,10 +52,8 @@ void spi_write_read(SPI_HandleTypeDef *hspi){
         if (spi_flags.flags.SPI6_Done == 1)
         {
             spi_flags.flags.SPI6_Done = 0;
-            disable_slave(spi6_config.spi6_cs_gpio_type[0], spi6_config.spi6_cs_gpio_number[0]);
-
-            //enable_slave(spi6_config.spi6_cs_gpio_type[0], spi6_config.spi6_cs_gpio_number[0]);
-            HAL_SPI_TransmitReceive_DMA(hspi, spi6_handle.txBuff_SPI6, spi6_handle.rxBuff_SPI6, spi6_handle.length_spi6);
+            enable_slave(spi6_config.spi6_cs_gpio_type[0], spi6_config.spi6_cs_gpio_number[0]);
+            HAL_SPI_TransmitReceive_IT(hspi, spi6_handle.txBuff_SPI6, spi6_handle.rxBuff_SPI6, spi6_handle.length_spi6);
         }
     break;
 

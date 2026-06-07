@@ -70,7 +70,6 @@
 
 /* Private function prototypes -----------------------------------------------*/
 static void MX_DMA_Init(void);
-static void MX_BDMA_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -123,7 +122,6 @@ __HAL_RCC_SPI6_CLK_ENABLE();
 
   /* Initialize all configured peripherals */
   MX_DMA_Init();
-  MX_BDMA_Init();
   /* USER CODE BEGIN 2 */
   HAL_GPIO_WritePin(GPIOF, GPIO_PIN_1, GPIO_PIN_SET);
   //ADS131M08_init(&hspi6);
@@ -183,17 +181,6 @@ void PeriphCommonClock_Config(void)
   {
     Error_Handler();
   }
-}
-
-/**
-  * Enable DMA controller clock
-  */
-static void MX_BDMA_Init(void)
-{
-
-  /* DMA controller clock enable */
-  __HAL_RCC_BDMA_CLK_ENABLE();
-
 }
 
 /**
