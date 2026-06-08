@@ -18,6 +18,7 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "dma.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -69,7 +70,6 @@
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
-static void MX_DMA_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -83,68 +83,6 @@ static void MX_DMA_Init(void);
   * @brief  The application entry point.
   * @retval int
   */
-int main(void)
-{
-
-  /* USER CODE BEGIN 1 */
-  
-  /* USER CODE END 1 */
-
-/* USER CODE BEGIN Boot_Mode_Sequence_1 */
-#if defined(DUAL_CORE_BOOT_SYNC_SEQUENCE)
-  /*HW semaphore Clock enable*/
-  __HAL_RCC_HSEM_CLK_ENABLE();
-  /* Activate HSEM notification for Cortex-M4*/
-  HAL_HSEM_ActivateNotification(__HAL_HSEM_SEMID_TO_MASK(HSEM_ID_0));
-  /*
-  Domain D2 goes to STOP mode (Cortex-M4 in deep-sleep) waiting for Cortex-M7 to
-  perform system initialization (system clock config, external memory configuration.. )
-  */
-  HAL_PWREx_ClearPendingEvent();
-  HAL_PWREx_EnterSTOPMode(PWR_MAINREGULATOR_ON, PWR_STOPENTRY_WFE, PWR_D2_DOMAIN);
-  /* Clear HSEM flag */
-  __HAL_HSEM_CLEAR_FLAG(__HAL_HSEM_SEMID_TO_MASK(HSEM_ID_0));
-
-#endif /* DUAL_CORE_BOOT_SYNC_SEQUENCE */
-/* USER CODE END Boot_Mode_Sequence_1 */
-  /* MCU Configuration--------------------------------------------------------*/
-
-  /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
-  HAL_Init();
-
-  /* USER CODE BEGIN Init */
-
-  /* USER CODE END Init */
-
-  /* USER CODE BEGIN SysInit */
-__HAL_RCC_SPI6_CLK_ENABLE();
-  /* USER CODE END SysInit */
-
-  /* Initialize all configured peripherals */
-  MX_DMA_Init();
-  /* USER CODE BEGIN 2 */
-  HAL_GPIO_WritePin(GPIOF, GPIO_PIN_1, GPIO_PIN_SET);
-  //ADS131M08_init(&hspi6);
-
-
-  /* USER CODE END 2 */
-
-  /* Infinite loop */
-  /* USER CODE BEGIN WHILE */
-  while (1)
-  {
-    /* USER CODE END WHILE */
-
-    /* USER CODE BEGIN 3 */
-    //ADS131M08_get_data(&hspi6);
-
-    /* Inter-core CAN bridge: the M7 owns the protocol/state machine, the M4
-       owns FDCAN1. Forward M7-queued frames to the bus and publish received
-       frames into the shared RX ring for the M7. */
-    
-  }
-  /* USER CODE END 3 */
-}
 
 /**
   * @brief Peripherals Common Clock Configuration
@@ -181,17 +119,6 @@ void PeriphCommonClock_Config(void)
   {
     Error_Handler();
   }
-}
-
-/**
-  * Enable DMA controller clock
-  */
-static void MX_DMA_Init(void)
-{
-
-  /* DMA controller clock enable */
-  __HAL_RCC_DMA1_CLK_ENABLE();
-
 }
 
 /* USER CODE BEGIN 4 */

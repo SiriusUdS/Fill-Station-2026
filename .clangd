@@ -6,6 +6,6 @@ If:
 ---
 
 CompileFlags:
-  CompilationDatabase: CM7/build
+  CompilationDatabase: CM7/build/Debug
 If:
   PathMatch: CM7/.*

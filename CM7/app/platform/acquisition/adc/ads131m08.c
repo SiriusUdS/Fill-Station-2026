@@ -1,9 +1,7 @@
 #include "acquisition/adc/ads131m08.h"
-#include "communication/spi/spi.h"
+#include "communication/spi/spi_dil.h"
 #include <stdint.h>
 #include <string.h>
-
-
 
 typedef union {
 	uint16_t COMMAND;
@@ -20,12 +18,8 @@ typedef union {
 
 RW_REG write_command;
 
-
-
 uint8_t txBuff_SPI[message_length];
 uint8_t rxBuff_SPI[message_length];
-
-
 
 void ADS131M08_write_register(uint8_t address, uint16_t value, SPI_HandleTypeDef *hspi){ //Writing directly into a singular register. Value is the all part of a register union
 
@@ -40,7 +34,6 @@ void ADS131M08_write_register(uint8_t address, uint16_t value, SPI_HandleTypeDef
   memcpy(spi6_handle.txBuff_SPI6, msg, sizeof(msg));
 
   spi_write_read(hspi);
-
 }
 
 
@@ -49,7 +42,6 @@ void ADS131M08_get_data(SPI_HandleTypeDef *hspi){ //Sending the dummy command NU
   if(HAL_GPIO_ReadPin(GPIOE, GPIO_PIN_5) == 0){
 
     spi_write_read(hspi);
-
   }
 }
 

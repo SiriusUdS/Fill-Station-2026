@@ -17,6 +17,14 @@ set(CMAKE_PROJECT_NAME FillStation)
 # Core project settings
 project(${CMAKE_PROJECT_NAME})
 
+# Single-core mode: only build the CM7 application and skip CM4.
+# mx-generated.cmake builds each core whose name matches BUILD_CONTEXT (or all
+# of them when BUILD_CONTEXT is undefined). Override with -DBUILD_CONTEXT=CM4CM7
+# to restore the dual-core build.
+if(NOT DEFINED BUILD_CONTEXT)
+    set(BUILD_CONTEXT CM7)
+endif()
+
 # Include external project file
 include("mx-generated.cmake")
 
