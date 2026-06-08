@@ -1,3 +1,9 @@
 build
 mx.scratch
 !.settings
+
+# Portable host toolchain for running logic unit tests (see tests/README.md)
+tools/
+
+# Host test build output
+tests/build/

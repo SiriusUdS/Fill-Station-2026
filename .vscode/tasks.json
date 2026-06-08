@@ -8,6 +8,17 @@
       "args": ["--build", "${workspaceFolder}/CM7/build"],
       "group": "build",
       "problemMatcher": ["$gcc"]
+    },
+    {
+      "label": "Run logic tests",
+      "type": "process",
+      "command": "cmake",
+      "args": ["-P", "${workspaceFolder}/tests/run.cmake"],
+      "group": {
+        "kind": "test",
+        "isDefault": true
+      },
+      "problemMatcher": ["$gcc"]
     }
   ]
 }
