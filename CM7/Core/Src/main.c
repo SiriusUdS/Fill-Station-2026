@@ -23,13 +23,13 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "Ethernet.h"
+#include "communication/ethernet/ethernet.h"
 #include "stdio.h"
 #include "FillStation.h"
 #include "dil/can_bus.h"
 #include "dil/can_types.h"   /* TEMP: CAN ids/nodes for the ping sender */
 #include <stdint.h>
-#include "ads131m08.h"
+#include "acquisition/adc/ads131m08.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -105,30 +105,6 @@ uint32_t counterRx = 0;
 uint32_t counterTx = 0;
 NetAddr ethNetAddr;
 
-/* ---- TEMP: FCU -> Engine CAN ping sender (remove when done) --------------- *
- * Queues a PING addressed to the Engine once per second, sent straight out
- * FDCAN1. Replies are handled by the M7 controller:
- * incoming PINGs are answered by handler_ping; incoming PONGs are currently
- * drained but not counted (no PONG handler registered). Watch canPingTxCount
- * in the debugger to confirm frames are being queued.                         */
-volatile uint32_t canPingTxCount = 0;
-
-static void CAN_PingTest(void)
-{
-    static uint32_t lastPing = 0;
-    uint32_t now = HAL_GetTick();
-    if ((now - lastPing) < 1000u) return;
-    lastPing = now;
-
-    CANHeader h; h.code = 0;
-    h.frame.senderID  = CAN_NODE_FCU;
-    h.frame.targetID  = CAN_NODE_ECU;
-    h.frame.messageID = CAN_ID_COMM_PING;
-
-    uint8_t d[8] = { 'B', 'O', 'N', 'J', 'O', 'U', 'R', 'O' };
-    //d[4] = (uint8_t)canPingTxCount;            /* sequence number */
-    if (CanBus_Send(h.code, d)) { canPingTxCount++; }
-}
 /* ---- end TEMP CAN ping sender -------------------------------------------- */
 /* USER CODE END 0 */
 
@@ -193,11 +169,6 @@ int main(void)
   ethNetAddr.ip = MAKE_IPV4_ADDR(192, 168, 0, 111);
   ethNetAddr.port = 2;
 
-  uint32_t lastPingTick = HAL_GetTick();
-
-  uint8_t check = HAL_GPIO_ReadPin(GPIOG, 6);
-  HAL_Delay(250);
-
   FILL_init(&hsd1, &hfdcan1);
   #define  cs_num_spi6 1
   GPIO_TypeDef *csPortSpi6[cs_num_spi6] = {GPIOG};
@@ -215,11 +186,9 @@ int main(void)
 
     ADS131M08_get_data(&hspi6);
 
-    //CAN_PingTest();   /* TEMP: FCU -> Engine PING ~1 Hz (remove when done) */
+    TESTIP_Process();
 
-    //TESTIP_Process();
-
-    //FILL_tick(HAL_GetTick());
+    FILL_tick(HAL_GetTick());
 
   }
   /* USER CODE END 3 */

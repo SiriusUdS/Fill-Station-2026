@@ -1,9 +1,18 @@
-#ifndef __STATEMACH
-#define __STATEMACH
 #include "sirius-headers-common/FillingStation/FillingStationState.h"
 #include "sirius-headers-common/FillingStation/FillingStationErrorStatus.h"
-#include "Ethernet.h"
+#include "communication/ethernet/ethernet.h"
 #include "SDCard.h"
+#include "sirius-headers-common/Ethernet/UDPFrame.h"
+#include "sirius-headers-common/Telecommunication/PacketHeaderVariable.h"
+#include "string.h"
+#include "sirius-headers-common/Telecommunication/BoardCommandV2.h"
+#include "data_integrity/crc.h"
+#include "dil/can_bus.h"
+#include "dil/can_types.h"
+#include "can/CANController.h"
+#include "can/handlers/handlerPing.h"
+#include "can/packets/ValveCmdPacket.h"
+#include "can/packets/ValveStatusPacket.h"
 
 #define RX_WATCHDOG 500
 
@@ -29,5 +38,3 @@ extern void FILL_tick(uint32_t tick);
 
 /* Queue a valve command for transmission over FDCAN1. */
 extern void FILL_sendValveCmd(uint8_t valve, uint8_t cmd);
-
-#endif

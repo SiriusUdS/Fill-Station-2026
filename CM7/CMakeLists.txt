@@ -61,12 +61,12 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user sources here
     Core/Src/FillStation.c
-    Core/Src/Ethernet.c
-    Core/Src/Ethernet_it.c
-    Core/Src/SDCard.c
-    Core/Src/CRC.c
-    Core/Src/ads131m08.c
-    Core/Src/spi.c
+    Core/Src/communication/ethernet/ethernet.c
+    Core/Src/communication/ethernet/ethernet_it.c
+    Core/Src/storage/SDCard.c
+    Core/Src/data_integrity/crc.c
+    Core/Src/acquisition/adc/ads131m08.c
+    Core/Src/communication/spi/spi.c
     ../stm-2026-common/Src/dil/can.c
     ../stm-2026-common/Src/dil/can_bus.c
     ../stm-2026-common/Src/can/CANController.c

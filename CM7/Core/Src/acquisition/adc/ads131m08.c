@@ -1,5 +1,5 @@
-#include "ads131m08.h"
-#include "spi.h"
+#include "acquisition/adc/ads131m08.h"
+#include "communication/spi/spi.h"
 #include <stdint.h>
 #include <string.h>
 

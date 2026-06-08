@@ -1,4 +1,4 @@
-#include "spi.h"
+#include "communication/spi/spi.h"
 #include "main.h"  
 #include "stdio.h"
 #include "stm32h7xx_hal_gpio.h"

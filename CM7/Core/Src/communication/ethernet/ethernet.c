@@ -1,5 +1,5 @@
 /* Includes ------------------------------------------------------------------*/
-#include "Ethernet.h"
+#include "communication/ethernet/ethernet.h"
 #include "string.h"
 #include "stm32h7xx_hal_def.h"
 #include "main.h"

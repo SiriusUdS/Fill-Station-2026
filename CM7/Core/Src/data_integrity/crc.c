@@ -1,4 +1,4 @@
-#include "CRC.h"
+#include "data_integrity/crc.h"
 
 #define CRC_GENERATING_POLYNOMIAL (uint32_t)0x04C11DB7
 #define CRC_INITIAL_VALUE         (uint32_t)0xFFFFFFFF

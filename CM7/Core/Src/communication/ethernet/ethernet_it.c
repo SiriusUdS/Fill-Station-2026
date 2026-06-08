@@ -1,5 +1,5 @@
 /* Includes ------------------------------------------------------------------*/
-#include "Ethernet.h"
+#include "communication/ethernet/ethernet.h"
 #include "main.h"
 
 /* External variables --------------------------------------------------------*/

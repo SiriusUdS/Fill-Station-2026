@@ -1,15 +1,4 @@
 #include "FillStation.h"
-#include "sirius-headers-common/Ethernet/UDPFrame.h"
-#include "sirius-headers-common/Telecommunication/PacketHeaderVariable.h"
-#include "string.h"
-#include "sirius-headers-common/Telecommunication/BoardCommandV2.h"
-#include "CRC.h"
-#include "dil/can_bus.h"
-#include "dil/can_types.h"
-#include "can/CANController.h"
-#include "can/handlers/handlerPing.h"
-#include "can/packets/ValveCmdPacket.h"
-#include "can/packets/ValveStatusPacket.h"
 
 static volatile FillStation fill;
 
