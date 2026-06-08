@@ -25,8 +25,12 @@
 #include "gpio.h"
 
 #include "communication/ethernet/ethernet.hpp"
+#include "communication/can/can_dil.hpp"
+#include "fcu_controller.hpp"
+#include "dil/can_types.h"   // CAN_NODE_FCU
 
 namespace eth = platform::communication::ethernet;
+namespace can = platform::communication::can;
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
@@ -64,14 +68,16 @@ int main(void)
   MX_SPI4_Init();
   MX_SPI6_Init();
 
-  /* Bring up the Ethernet stack: the board now answers ARP and ICMP echo
-     (ping) requests and can exchange UDP datagrams via the logic interface. */
+  /* Bring up the CAN and Ethernet drivers, then the FCU logic. The board now
+     answers ARP and ICMP echo (ping) requests and exchanges UDP/CAN traffic
+     through the logic interfaces. */
+  (void)can::init(&hfdcan1, CAN_NODE_FCU);
   eth::init();
+  logic::fcu::init();
 
-  /* Infinite loop */
-  while (1)
+  for (;;)
   {
-    eth::process();
+    logic::fcu::tick(HAL_GetTick());
   }
 }
 

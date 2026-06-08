@@ -70,6 +70,13 @@ struct Datagram {
  */
 [[nodiscard]] std::optional<Datagram> receive();
 
+/**
+ * @brief  Service the Ethernet link: process inbound frames so received UDP
+ *         datagrams become available to receive() (and ARP / ICMP echo requests
+ *         are answered). Call once per logic cycle before draining receive().
+ */
+void tick();
+
 } // namespace udp
 
 } // namespace logic::communication

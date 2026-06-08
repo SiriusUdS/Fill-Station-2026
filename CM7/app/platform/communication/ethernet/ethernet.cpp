@@ -383,7 +383,15 @@ void init()
     tx_arp.spa = hton32(LOCAL_IP);
 }
 
-void process()
+} // namespace platform::communication::ethernet
+
+/* -------------------------------------------------------------------------- */
+/* Logic-side seam: definitions for communication/interfaces/ethernet.hpp     */
+/* -------------------------------------------------------------------------- */
+
+namespace logic::communication::udp {
+
+void tick()
 {
     static std::size_t rx_read_idx = 0;
 
@@ -402,14 +410,6 @@ void process()
         __enable_irq();
     }
 }
-
-} // namespace platform::communication::ethernet
-
-/* -------------------------------------------------------------------------- */
-/* Logic-side seam: definitions for communication/interfaces/ethernet.hpp     */
-/* -------------------------------------------------------------------------- */
-
-namespace logic::communication::udp {
 
 std::optional<NetError> send(const Endpoint& dest, std::span<const uint8_t> payload)
 {
