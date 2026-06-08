@@ -7,3 +7,6 @@ tools/
 
 # Host test build output
 tests/build/
+
+# GoogleTest is downloaded on demand (tests/fetch-googletest.cmake), not committed
+tests/third_party/googletest/

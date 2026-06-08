@@ -32,9 +32,14 @@ if(MINGW)
 endif()
 
 # --- GoogleTest -----------------------------------------------------------
-# Vendored in third_party/ (committed to the repo) so the test build needs no
-# network access. Update by replacing tests/third_party/googletest with a newer
-# release source tree.
+# Downloaded on demand into third_party/googletest (git-ignored, not committed)
+# by tests/fetch-googletest.cmake, which run.cmake invokes automatically. Update
+# the version by editing GTEST_VERSION/GTEST_SHA256 in that script.
+if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/googletest/CMakeLists.txt")
+    message(FATAL_ERROR
+        "GoogleTest is missing. Run it via 'cmake -P tests/run.cmake', or fetch "
+        "it once with 'cmake -P tests/fetch-googletest.cmake'.")
+endif()
 add_subdirectory(third_party/googletest)
 
 enable_testing()

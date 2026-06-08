@@ -9,11 +9,12 @@ cross-compile build.
 tests/
 ├── CMakeLists.txt          # host build (separate project from the firmware)
 ├── run.cmake               # configure + build + test in one step (any platform)
+├── fetch-googletest.cmake  # downloads GoogleTest into third_party/ (run.cmake calls it)
 ├── fcu_controller_test.cpp # tests for logic::fcu (the FCU state machine)
 ├── support/
 │   ├── fakes.hpp/.cpp      # FakeBus: test doubles for the udp::/can:: interfaces
 └── third_party/
-    └── googletest/         # vendored GoogleTest source (no network needed)
+    └── googletest/         # GoogleTest source (downloaded on demand, git-ignored)
 ```
 
 ## How it works
@@ -92,4 +93,8 @@ ctest --test-dir tests/build --output-on-failure
    logic `.cpp` under test plus `support/fakes.cpp` if it uses the interfaces.
 3. Keep the same `LOGIC_INCLUDE_DIRS` so headers resolve as in the firmware.
 
-The build is offline: GoogleTest is vendored, so no `FetchContent` / network.
+GoogleTest is not committed (it's git-ignored to keep the repo light).
+`fetch-googletest.cmake` downloads a pinned release into `third_party/googletest`
+on the first run — so the first `cmake -P tests/run.cmake` needs network, and
+every run after that is offline. To bump the version, edit `GTEST_VERSION` and
+`GTEST_SHA256` in that script.

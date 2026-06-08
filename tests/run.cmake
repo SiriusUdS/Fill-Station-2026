@@ -58,6 +58,9 @@ function(run_step description)
     endif()
 endfunction()
 
+# GoogleTest is git-ignored (not committed); fetch it on first run. The fetch
+# script is a no-op when it's already present, so this is cheap on later runs.
+run_step("GoogleTest fetch" ${CMAKE_COMMAND} -P "${TESTS_DIR}/fetch-googletest.cmake")
 run_step("CMake configure" ${CMAKE_COMMAND} ${CONFIGURE_ARGS})
 run_step("Build"           ${CMAKE_COMMAND} --build "${BUILD_DIR}")
 run_step("Tests"           ${CTEST_EXE} --test-dir "${BUILD_DIR}" --output-on-failure)
