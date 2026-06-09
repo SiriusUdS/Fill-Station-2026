@@ -51,9 +51,9 @@ set(REPO_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/..)
 # same way it does in the firmware build.
 set(LOGIC_INCLUDE_DIRS
     ${REPO_ROOT}/CM7/app/logic          # app logic + its interface headers (ethernet.hpp)
-    ${REPO_ROOT}/CM7/Core/Inc           # sirius-headers-common submodule lives here
     ${REPO_ROOT}/stm-2026-common/logic        # board-common logic interfaces (can.hpp)
     ${REPO_ROOT}/stm-2026-common/logic/Inc    # board-common CAN protocol defs (dil/can_types.h)
+    ${REPO_ROOT}/stm-2026-common/logic/communication/protocol   # hosts sirius-headers-common submodule
 )
 
 # --- FCU controller logic test -------------------------------------------
