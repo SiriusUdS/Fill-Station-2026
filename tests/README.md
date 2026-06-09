@@ -5,9 +5,11 @@ Native (host-run) unit tests for the **HAL-free logic modules** — the code und
 touches the HAL. These build and run on your PC, separately from the firmware
 cross-compile build.
 
-Test files mirror the source tree (a test for `logic/<path>/<unit>.cpp` lives at
-`tests/logic/<path>/<unit>_test.cpp`), so a test is easy to locate from the code
-it covers.
+Tests are split into `unit/` (one unit in isolation) and `integration/` (several
+real units assembled, no fakes). Unit tests mirror the source tree (a test for
+`logic/<path>/<unit>.cpp` lives at `tests/unit/logic/<path>/<unit>_test.cpp`), so
+a test is easy to locate from the code it covers. Both are labelled, so
+`ctest -L unit` / `ctest -L integration` select a subset; `run.cmake` runs all.
 
 **The framework is not kept here.** The test harness (GoogleTest fetch,
 toolchain selection, the `FakeBus`, and the tests for code that lives in
@@ -19,16 +21,21 @@ parent-only targets. `cmake -P tests/run.cmake` runs the **full** suite (parent
 
 ```
 tests/
-├── CMakeLists.txt   # parent-only: add_subdirectory(stm-2026-common/tests) + fcu_controller_test
+├── CMakeLists.txt   # parent-only: add_subdirectory(stm-2026-common/tests) + the targets below
 ├── run.cmake        # 4-line entry point → reuses the submodule's shared harness
-└── logic/
-    └── fcu_controller_test.cpp   # logic::fcu (the FCU state machine)
+├── unit/            # one unit in isolation; mirrors the source tree
+│   └── logic/
+│       ├── fcu_controller_test.cpp                     # logic::fcu (the FCU state machine)
+│       └── control/command_handlers/command_handlers_test.cpp
+└── integration/     # several real units assembled (no fakes)
+    └── ethernet_state_change_test.cpp   # Ethernet frame → parser → handler → state
 
 stm-2026-common/tests/            # the shared harness + common-owned tests live here
 ├── cmake/host_tests.cmake        # toolchain select + configure/build/ctest (single source)
 ├── fetch-googletest.cmake        # the only copy; one GoogleTest download, one version pin
 ├── support/fakes.hpp/.cpp        # FakeBus (doubles this submodule's udp::/can:: interfaces)
-└── logic/.../*_test.cpp          # persistent_state, command, ...
+├── unit/logic/.../*_test.cpp     # persistent_state, command, ...
+└── integration/                  # reserved (see that README); empty for now
 ```
 
 ## How it works
@@ -105,16 +112,19 @@ Put the test where the code under test lives:
 
 * **Code in `stm-2026-common/`** → add the test in **`stm-2026-common/tests/`**
   (see that README). It runs both standalone and as part of this parent suite.
-* **Code in `CM7/app/` (parent-only)** → add it here under `tests/logic/...`
-  mirroring the source path, then add an `add_executable(...)` +
-  `gtest_discover_tests(...)` block in `tests/CMakeLists.txt` (mirror the
-  `fcu_controller_test` block). Use `${STMCOMMON_LOGIC_INCLUDE_DIRS}` (exported
-  by the submodule build) plus `${REPO_ROOT}/CM7/app/logic`, and link
+* **Code in `CM7/app/` (parent-only)** → add it here under `tests/unit/logic/...`
+  mirroring the source path (or `tests/integration/...` for a test that assembles
+  several real units), then add an `add_executable(...)` +
+  `gtest_discover_tests(... PROPERTIES LABELS "unit")` block in
+  `tests/CMakeLists.txt` (mirror the `command_handlers_test` block; use
+  `"integration"` for an integration test). Use `${STMCOMMON_LOGIC_INCLUDE_DIRS}`
+  (exported by the submodule build) plus `${REPO_ROOT}/CM7/app/logic`, and link
   `GTest::gtest_main`. Includes resolve via `-I`, so the test's own path doesn't
-  affect them.
+  affect them. Handler-linking targets can reuse `${COMMAND_HANDLER_SOURCES}`.
 
-GoogleTest is not committed (it's git-ignored to keep the repo light).
-`fetch-googletest.cmake` downloads a pinned release into `third_party/googletest`
-on the first run — so the first `cmake -P tests/run.cmake` needs network, and
-every run after that is offline. To bump the version, edit `GTEST_VERSION` and
-`GTEST_SHA256` in that script.
+GoogleTest is not committed (it's git-ignored to keep the repo light). The
+submodule's `stm-2026-common/tests/fetch-googletest.cmake` downloads a pinned
+release into `stm-2026-common/tests/third_party/googletest` on the first run — so
+the first `cmake -P tests/run.cmake` needs network, and every run after that is
+offline. To bump the version, edit `GTEST_VERSION` and `GTEST_SHA256` in that
+script.

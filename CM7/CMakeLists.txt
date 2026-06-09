@@ -91,6 +91,15 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user sources here
     app/platform/main.cpp
     app/logic/fcu_controller.cpp
+    app/logic/control/command_handlers/main_handler.cpp
+    app/logic/control/command_handlers/ping.cpp
+    app/logic/control/command_handlers/execute_ping.cpp
+    app/logic/control/command_handlers/set_state.cpp
+    app/logic/control/command_handlers/set_state_transitions/activate_igniter.cpp
+    app/logic/control/command_handlers/set_valve_position.cpp
+    app/logic/control/command_handlers/execute_set_valve_position.cpp
+    app/logic/control/command_handlers/synchronise.cpp
+    app/logic/control/command_handlers/execute_synchronise.cpp
     ../stm-2026-common/logic/control/persistent_state.cpp
     ../stm-2026-common/platform/memory/backup_ram.cpp
     app/platform/communication/ethernet/ethernet.cpp
