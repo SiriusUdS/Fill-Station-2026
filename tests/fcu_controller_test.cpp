@@ -270,7 +270,7 @@ TEST_F(FcuControllerTest, TrafficKeepsUnsafeAlive)
 TEST_F(FcuControllerTest, PingIsEchoedAsPong)
 {
     const std::array<uint8_t, 8> payload = {1, 2, 3, 4, 5, 6, 7, 8};
-    bus().push_can(makeCanFrame(CAN_NODE_ECU, CAN_NODE_FCU, CAN_ID_COMM_PING, payload));
+    bus().push_can(makeCanFrame(ENGINE_BOARD_ID, FILLING_STATION_BOARD_ID, CAN_ID_COMM_PING, payload));
     step();
 
     ASSERT_EQ(bus().can_tx.size(), 1u);
@@ -279,23 +279,23 @@ TEST_F(FcuControllerTest, PingIsEchoedAsPong)
     CANHeader header;
     header.code = pong.id;
     EXPECT_EQ(header.frame.messageID, CAN_ID_COMM_PONG);
-    EXPECT_EQ(header.frame.senderID, CAN_NODE_FCU);
-    EXPECT_EQ(header.frame.targetID, CAN_NODE_ECU);
+    EXPECT_EQ(header.frame.senderID, FILLING_STATION_BOARD_ID);
+    EXPECT_EQ(header.frame.targetID, ENGINE_BOARD_ID);
     EXPECT_EQ(pong.data, payload);  // payload echoed verbatim
 }
 
 TEST_F(FcuControllerTest, ValveStatusDoesNotProduceCanReply)
 {
-    bus().push_can(makeCanFrame(CAN_NODE_ECU, CAN_NODE_FCU, CAN_ID_STATUS_VALVE));
+    bus().push_can(makeCanFrame(ENGINE_BOARD_ID, FILLING_STATION_BOARD_ID, CAN_ID_STATUS_VALVE));
     step();
     EXPECT_TRUE(bus().can_tx.empty());
 }
 
 TEST_F(FcuControllerTest, AllQueuedCanFramesAreDrainedInOneTick)
 {
-    bus().push_can(makeCanFrame(CAN_NODE_ECU, CAN_NODE_FCU, CAN_ID_COMM_PING));
-    bus().push_can(makeCanFrame(CAN_NODE_ECU, CAN_NODE_FCU, CAN_ID_COMM_PING));
-    bus().push_can(makeCanFrame(CAN_NODE_ECU, CAN_NODE_FCU, CAN_ID_COMM_PING));
+    bus().push_can(makeCanFrame(ENGINE_BOARD_ID, FILLING_STATION_BOARD_ID, CAN_ID_COMM_PING));
+    bus().push_can(makeCanFrame(ENGINE_BOARD_ID, FILLING_STATION_BOARD_ID, CAN_ID_COMM_PING));
+    bus().push_can(makeCanFrame(ENGINE_BOARD_ID, FILLING_STATION_BOARD_ID, CAN_ID_COMM_PING));
     step();
     EXPECT_EQ(bus().can_tx.size(), 3u);
     EXPECT_TRUE(bus().can_rx.empty());

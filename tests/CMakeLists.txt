@@ -69,3 +69,18 @@ target_include_directories(fcu_controller_test PRIVATE
 target_link_libraries(fcu_controller_test PRIVATE GTest::gtest_main)
 
 gtest_discover_tests(fcu_controller_test)
+
+# --- Command parser test --------------------------------------------------
+set(COMMAND_DIR ${REPO_ROOT}/stm-2026-common/logic/communication/protocol/command)
+add_executable(command_test
+    command_test.cpp
+    ${COMMAND_DIR}/parser/command_can_parser.cpp
+    ${COMMAND_DIR}/parser/command_ethernet_parser.cpp
+)
+target_include_directories(command_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${LOGIC_INCLUDE_DIRS}
+)
+target_link_libraries(command_test PRIVATE GTest::gtest_main)
+
+gtest_discover_tests(command_test)

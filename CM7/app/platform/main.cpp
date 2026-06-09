@@ -27,7 +27,8 @@
 #include "communication/ethernet/ethernet.hpp"
 #include "communication/can/can_dil.hpp"
 #include "fcu_controller.hpp"
-#include "dil/can_types.h"   // CAN_NODE_FCU
+#include "dil/can_types.h"
+#include "sirius-headers-common/Telecommunication/PacketHeaderVariable.h"   // FILLING_STATION_BOARD_ID
 
 namespace eth = platform::communication::ethernet;
 namespace can = platform::communication::can;
@@ -71,7 +72,7 @@ int main(void)
   /* Bring up the CAN and Ethernet drivers, then the FCU logic. The board now
      answers ARP and ICMP echo (ping) requests and exchanges UDP/CAN traffic
      through the logic interfaces. */
-  (void)can::init(&hfdcan1, CAN_NODE_FCU);
+  (void)can::init(&hfdcan1, FILLING_STATION_BOARD_ID);
   eth::init();
   logic::fcu::init();
 

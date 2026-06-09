@@ -79,8 +79,8 @@ uint32_t crc32(const uint8_t* data, std::size_t length_bytes)
 [[maybe_unused]] void sendValveCmd(uint8_t valve, uint8_t cmd)
 {
     CANHeader header = {};
-    header.frame.senderID    = CAN_NODE_FCU;
-    header.frame.targetID    = CAN_NODE_ECU;
+    header.frame.senderID    = FILLING_STATION_BOARD_ID;
+    header.frame.targetID    = ENGINE_BOARD_ID;
     header.frame.deviceState = cmd;
     header.frame.messageID   = CAN_ID_CMD_VALVE;
 
@@ -102,7 +102,7 @@ void handleCanFrame(const CanFrame& frame)
         case CAN_ID_COMM_PING: {
             /* Echo the payload back to the sender as a PONG. */
             CANHeader resp = {};
-            resp.frame.senderID  = CAN_NODE_FCU;
+            resp.frame.senderID  = FILLING_STATION_BOARD_ID;
             resp.frame.targetID  = header.frame.senderID;
             resp.frame.messageID = CAN_ID_COMM_PONG;
 
