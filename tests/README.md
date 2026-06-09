@@ -5,16 +5,30 @@ Native (host-run) unit tests for the **HAL-free logic modules** — the code und
 touches the HAL. These build and run on your PC, separately from the firmware
 cross-compile build.
 
+Test files mirror the source tree (a test for `logic/<path>/<unit>.cpp` lives at
+`tests/logic/<path>/<unit>_test.cpp`), so a test is easy to locate from the code
+it covers.
+
+**The framework is not kept here.** The test harness (GoogleTest fetch,
+toolchain selection, the `FakeBus`, and the tests for code that lives in
+`stm-2026-common`) lives once in the submodule — see
+`stm-2026-common/tests/` — so that submodule is testable on its own (e.g. in its
+own CI). This parent build *reuses* it via `add_subdirectory` and adds only the
+parent-only targets. `cmake -P tests/run.cmake` runs the **full** suite (parent
++ common).
+
 ```
 tests/
-├── CMakeLists.txt          # host build (separate project from the firmware)
-├── run.cmake               # configure + build + test in one step (any platform)
-├── fetch-googletest.cmake  # downloads GoogleTest into third_party/ (run.cmake calls it)
-├── fcu_controller_test.cpp # tests for logic::fcu (the FCU state machine)
-├── support/
-│   ├── fakes.hpp/.cpp      # FakeBus: test doubles for the udp::/can:: interfaces
-└── third_party/
-    └── googletest/         # GoogleTest source (downloaded on demand, git-ignored)
+├── CMakeLists.txt   # parent-only: add_subdirectory(stm-2026-common/tests) + fcu_controller_test
+├── run.cmake        # 4-line entry point → reuses the submodule's shared harness
+└── logic/
+    └── fcu_controller_test.cpp   # logic::fcu (the FCU state machine)
+
+stm-2026-common/tests/            # the shared harness + common-owned tests live here
+├── cmake/host_tests.cmake        # toolchain select + configure/build/ctest (single source)
+├── fetch-googletest.cmake        # the only copy; one GoogleTest download, one version pin
+├── support/fakes.hpp/.cpp        # FakeBus (doubles this submodule's udp::/can:: interfaces)
+└── logic/.../*_test.cpp          # persistent_state, command, ...
 ```
 
 ## How it works
@@ -85,13 +99,19 @@ cmake --build tests/build
 ctest --test-dir tests/build --output-on-failure
 ```
 
-## Adding tests for another logic module
+## Adding a test — which repo?
 
-1. Create `tests/<module>_test.cpp`.
-2. In `tests/CMakeLists.txt`, add an `add_executable(... )` for it (mirror the
-   `fcu_controller_test` block), linking `GTest::gtest_main` and listing the
-   logic `.cpp` under test plus `support/fakes.cpp` if it uses the interfaces.
-3. Keep the same `LOGIC_INCLUDE_DIRS` so headers resolve as in the firmware.
+Put the test where the code under test lives:
+
+* **Code in `stm-2026-common/`** → add the test in **`stm-2026-common/tests/`**
+  (see that README). It runs both standalone and as part of this parent suite.
+* **Code in `CM7/app/` (parent-only)** → add it here under `tests/logic/...`
+  mirroring the source path, then add an `add_executable(...)` +
+  `gtest_discover_tests(...)` block in `tests/CMakeLists.txt` (mirror the
+  `fcu_controller_test` block). Use `${STMCOMMON_LOGIC_INCLUDE_DIRS}` (exported
+  by the submodule build) plus `${REPO_ROOT}/CM7/app/logic`, and link
+  `GTest::gtest_main`. Includes resolve via `-I`, so the test's own path doesn't
+  affect them.
 
 GoogleTest is not committed (it's git-ignored to keep the repo light).
 `fetch-googletest.cmake` downloads a pinned release into `third_party/googletest`
