@@ -13,6 +13,8 @@
 
 #include "communication/interfaces/can.hpp"
 #include "communication/interfaces/ethernet.hpp"
+#include "control/persistent_state.hpp"
+#include "control/states.hpp"
 #include "dil/can_types.h"
 
 #include "sirius-headers-common/Ethernet/UDPFrame.h"
@@ -69,6 +71,9 @@ protected:
     void SetUp() override
     {
         bus().reset();
+        /* Start every test from a cold Backup SRAM so persisted state never
+           leaks between tests; init() then commits a fresh INIT. */
+        logic::control::persistent_state = logic::control::PersistentState{};
         logic::fcu::init();
     }
 
@@ -299,6 +304,38 @@ TEST_F(FcuControllerTest, AllQueuedCanFramesAreDrainedInOneTick)
     step();
     EXPECT_EQ(bus().can_tx.size(), 3u);
     EXPECT_TRUE(bus().can_rx.empty());
+}
+
+/* ---- Persistent state (Backup SRAM) -------------------------------------- */
+
+TEST_F(FcuControllerTest, StateTransitionIsPersisted)
+{
+    reachSafe();
+    requestState(FILLING_STATION_STATE_UNSAFE);
+
+    const auto loaded = logic::control::persistent_state.loadState();
+    ASSERT_TRUE(loaded.has_value());
+    EXPECT_EQ(*loaded, logic::control::State::Unsafe);
+}
+
+TEST_F(FcuControllerTest, ResumesPersistedStateOnInit)
+{
+    /* Simulate a reset while UNSAFE: the blob is already committed in Backup SRAM. */
+    logic::control::persistent_state.saveState(logic::control::State::Unsafe);
+
+    logic::fcu::init();  // reboot
+    step();
+    EXPECT_EQ(lastHeartbeatState(), FILLING_STATION_STATE_UNSAFE);
+}
+
+TEST_F(FcuControllerTest, ColdBootWithInvalidBlobStartsAtInit)
+{
+    logic::control::persistent_state.saveState(logic::control::State::Ignite);
+    logic::control::persistent_state.magic = 0;  // corrupt => looks like cold garbage
+
+    logic::fcu::init();  // reboot
+    step();
+    EXPECT_EQ(lastHeartbeatState(), FILLING_STATION_STATE_INIT);
 }
 
 } // namespace

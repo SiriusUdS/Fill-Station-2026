@@ -26,12 +26,14 @@
 
 #include "communication/ethernet/ethernet.hpp"
 #include "communication/can/can_dil.hpp"
+#include "memory/backup_ram.hpp"
 #include "fcu_controller.hpp"
 #include "dil/can_types.h"
 #include "sirius-headers-common/Telecommunication/PacketHeaderVariable.h"   // FILLING_STATION_BOARD_ID
 
-namespace eth = platform::communication::ethernet;
-namespace can = platform::communication::can;
+namespace eth        = platform::communication::ethernet;
+namespace can        = platform::communication::can;
+namespace backup_ram = platform::memory::backup_ram;
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
@@ -68,6 +70,12 @@ int main(void)
   MX_FDCAN1_Init();
   MX_SPI4_Init();
   MX_SPI6_Init();
+
+  /* Bring up the backup domain first, so the battery-backed Backup SRAM that
+     holds the persistent state is clocked, writable and retained on VBAT before
+     the FCU logic reads it. A regulator-timeout only means VBAT retention is
+     unconfirmed; the SRAM is still accessible, so we proceed. */
+  (void)backup_ram::init();
 
   /* Bring up the CAN and Ethernet drivers, then the FCU logic. The board now
      answers ARP and ICMP echo (ping) requests and exchanges UDP/CAN traffic

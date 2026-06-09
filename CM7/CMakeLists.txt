@@ -91,6 +91,8 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user sources here
     app/platform/main.cpp
     app/logic/fcu_controller.cpp
+    ../stm-2026-common/logic/control/persistent_state.cpp
+    ../stm-2026-common/platform/memory/backup_ram.cpp
     app/platform/communication/ethernet/ethernet.cpp
     ../stm-2026-common/platform/communication/can/can_dil.cpp
     # Servo/valve drivers need a TIM peripheral configured in CubeMX

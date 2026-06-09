@@ -61,6 +61,7 @@ add_executable(fcu_controller_test
     fcu_controller_test.cpp
     support/fakes.cpp
     ${REPO_ROOT}/CM7/app/logic/fcu_controller.cpp
+    ${REPO_ROOT}/stm-2026-common/logic/control/persistent_state.cpp
 )
 target_include_directories(fcu_controller_test PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}        # so #include "support/fakes.hpp" resolves
@@ -69,6 +70,19 @@ target_include_directories(fcu_controller_test PRIVATE
 target_link_libraries(fcu_controller_test PRIVATE GTest::gtest_main)
 
 gtest_discover_tests(fcu_controller_test)
+
+# --- Persistent state test ------------------------------------------------
+add_executable(persistent_state_test
+    persistent_state_test.cpp
+    ${REPO_ROOT}/stm-2026-common/logic/control/persistent_state.cpp
+)
+target_include_directories(persistent_state_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${LOGIC_INCLUDE_DIRS}
+)
+target_link_libraries(persistent_state_test PRIVATE GTest::gtest_main)
+
+gtest_discover_tests(persistent_state_test)
 
 # --- Command parser test --------------------------------------------------
 set(COMMAND_DIR ${REPO_ROOT}/stm-2026-common/logic/communication/protocol/command)

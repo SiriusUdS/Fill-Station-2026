@@ -43,6 +43,7 @@ RAM (xrw)      : ORIGIN = 0x20000000, LENGTH = 128K     /* DTCM, M7 .data/.bss/h
 ITCMRAM (xrw)      : ORIGIN = 0x00000000, LENGTH = 64K
 RAM_D1 (xrw)    : ORIGIN = 0x24000000, LENGTH = 512K  /* D1 AXI-SRAM, all M7 (no M4, no shared region) */
 RAM_D2 (xrw)    : ORIGIN = 0x30000000, LENGTH = 288K  /* D2 SRAM1+2+3, reserved entirely for Ethernet DMA */
+RAM_BACKUP (xrw): ORIGIN = 0x38800000, LENGTH = 4K    /* Backup SRAM, retained on VBAT (battery/supercap) */
 
 }
 /* Highest address of the user mode stack */
@@ -259,6 +260,18 @@ SECTIONS
     *(.axisram*)
     . = ALIGN(4);
   } >RAM_D1
+
+  /* Battery-backed Backup SRAM: persistent state that survives a reset and,
+     with the backup regulator (BREN) enabled, VBAT-only power loss. NOLOAD so
+     startup never copies or zeroes it. Populated via
+     __attribute__((section(".backup_sram"))) — see logic/control/persistent_state.cpp. */
+  .backup_sram (NOLOAD) :
+  {
+    . = ALIGN(4);
+    *(.backup_sram)
+    *(.backup_sram*)
+    . = ALIGN(4);
+  } >RAM_BACKUP
 
 
   /* Remove information from the standard libraries */

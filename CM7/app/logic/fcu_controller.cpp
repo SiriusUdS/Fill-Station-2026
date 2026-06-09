@@ -12,6 +12,7 @@
 
 #include "communication/interfaces/ethernet.hpp"   // logic::communication::udp + Endpoint
 #include "communication/interfaces/can.hpp"          // logic::communication::can + CanFrame
+#include "control/persistent_state.hpp"              // Backup-SRAM state snapshot
 #include "dil/can_types.h"                            // HAL-free CAN protocol (CANHeader, enums)
 
 #include "sirius-headers-common/Ethernet/UDPFrame.h"
@@ -25,8 +26,9 @@
 #include <cstring>
 #include <span>
 
-namespace udp = logic::communication::udp;
-namespace can = logic::communication::can;
+namespace udp     = logic::communication::udp;
+namespace can     = logic::communication::can;
+namespace control = logic::control;
 using logic::communication::CanFrame;
 using logic::communication::Endpoint;
 
@@ -46,8 +48,10 @@ constexpr uint32_t make_ipv4(uint8_t b1, uint8_t b2, uint8_t b3, uint8_t b4)
            (static_cast<uint32_t>(b3) << 8) | static_cast<uint32_t>(b4);
 }
 
+/* The state-machine state itself is NOT held here: it lives in battery-backed
+   Backup SRAM via logic::control::persistentState(), so it survives a reset.
+   This struct holds only the volatile per-boot bookkeeping. */
 struct FillStation {
-    uint8_t  fill_state     = FILLING_STATION_STATE_INIT;
     uint32_t current_tick_ms = 0;
     uint32_t last_tx_ms     = 0;
     uint32_t last_rx_ms     = 0;
@@ -141,7 +145,7 @@ void handleStateRequest(const UDPPacketHeader& header, std::span<const uint8_t> 
     }
     const uint8_t requested = payload[REQUEST_STATE_OFFSET_BYTES];
 
-    switch (s_fill.fill_state) {
+    switch (static_cast<uint8_t>(control::persistent_state.fill_state)) {
         case FILLING_STATION_STATE_SAFE:
             if (requested != FILLING_STATION_STATE_TEST &&
                 requested != FILLING_STATION_STATE_UNSAFE) return;
@@ -164,7 +168,7 @@ void handleStateRequest(const UDPPacketHeader& header, std::span<const uint8_t> 
         default:
             return;
     }
-    s_fill.fill_state = requested;
+    control::persistent_state.saveState(static_cast<control::State>(requested));
 }
 
 void handleDatagram(std::span<const uint8_t> payload)
@@ -199,10 +203,11 @@ void rxTick()
 
 void messageTick()
 {
-    if (s_fill.fill_state == FILLING_STATION_STATE_UNSAFE ||
-        s_fill.fill_state == FILLING_STATION_STATE_IGNITE) {
+    const uint8_t state = static_cast<uint8_t>(control::persistent_state.fill_state);
+    if (state == FILLING_STATION_STATE_UNSAFE ||
+        state == FILLING_STATION_STATE_IGNITE) {
         if ((s_fill.current_tick_ms - s_fill.last_rx_ms) >= RX_WATCHDOG_MS) {
-            s_fill.fill_state = FILLING_STATION_STATE_ABORT;
+            control::persistent_state.saveState(control::State::Abort);
         }
     }
 
@@ -212,7 +217,7 @@ void messageTick()
 
     UDPPacketHeader header = {};
     header.frame.deviceID      = FILLING_STATION_BOARD_ID;
-    header.frame.deviceState   = s_fill.fill_state;
+    header.frame.deviceState   = static_cast<uint8_t>(control::persistent_state.fill_state);
     header.frame.deviceTS_MS   = s_fill.current_tick_ms;
     header.frame.payloadID     = GET_SYSTEM;
     header.frame.payloadLenght = 4;
@@ -239,6 +244,13 @@ void init()
     s_fill.gs.mac  = GS_MAC;
     s_fill.gs.ipv4 = make_ipv4(192, 168, 0, 111);
     s_fill.gs.port = GS_PORT;
+
+    // The state machine state lives in Backup SRAM. Resume it across a reset; on
+    // a cold or corrupt boot, commit a fresh INIT so the blob is valid from here
+    // on. (The platform inspects the same persistent_state before bringing the
+    // valves up, to decide whether to skip the normal valve-moving init.)
+    control::persistent_state.saveState(
+        control::persistent_state.loadState().value_or(control::State::Init));
 }
 
 void tick(uint32_t now_ms)
@@ -249,8 +261,8 @@ void tick(uint32_t now_ms)
     rxTick();
     messageTick();
 
-    if (s_fill.fill_state == FILLING_STATION_STATE_INIT) {
-        s_fill.fill_state = FILLING_STATION_STATE_SAFE;
+    if (control::persistent_state.fill_state == control::State::Init) {
+        control::persistent_state.saveState(control::State::Safe);
     }
 }
 
