@@ -270,26 +270,13 @@ TEST_F(FcuControllerTest, TrafficKeepsUnsafeAlive)
     EXPECT_EQ(lastHeartbeatState(), FILLING_STATION_STATE_UNSAFE);
 }
 
-/* ---- CAN ----------------------------------------------------------------- */
+/* ---- CAN ------------------------------------------------------------------ *
+ * The FCU receives only status/telemetry from the ECU over CAN — never commands
+ * (those arrive over Ethernet) — so it never answers on the bus; it just drains
+ * the RX ring each tick. Consuming valve status into the state machine is a
+ * later step. */
 
-TEST_F(FcuControllerTest, PingIsEchoedAsPong)
-{
-    const std::array<uint8_t, 8> payload = {1, 2, 3, 4, 5, 6, 7, 8};
-    bus().push_can(makeCanFrame(ENGINE_BOARD_ID, FILLING_STATION_BOARD_ID, CAN_ID_COMM_PING, payload));
-    step();
-
-    ASSERT_EQ(bus().can_tx.size(), 1u);
-    const CanFrame& pong = bus().can_tx.front();
-
-    CANHeader header;
-    header.code = pong.id;
-    EXPECT_EQ(header.frame.messageID, CAN_ID_COMM_PONG);
-    EXPECT_EQ(header.frame.senderID, FILLING_STATION_BOARD_ID);
-    EXPECT_EQ(header.frame.targetID, ENGINE_BOARD_ID);
-    EXPECT_EQ(pong.data, payload);  // payload echoed verbatim
-}
-
-TEST_F(FcuControllerTest, ValveStatusDoesNotProduceCanReply)
+TEST_F(FcuControllerTest, IncomingCanFrameProducesNoReply)
 {
     bus().push_can(makeCanFrame(ENGINE_BOARD_ID, FILLING_STATION_BOARD_ID, CAN_ID_STATUS_VALVE));
     step();
@@ -298,12 +285,12 @@ TEST_F(FcuControllerTest, ValveStatusDoesNotProduceCanReply)
 
 TEST_F(FcuControllerTest, AllQueuedCanFramesAreDrainedInOneTick)
 {
-    bus().push_can(makeCanFrame(ENGINE_BOARD_ID, FILLING_STATION_BOARD_ID, CAN_ID_COMM_PING));
-    bus().push_can(makeCanFrame(ENGINE_BOARD_ID, FILLING_STATION_BOARD_ID, CAN_ID_COMM_PING));
-    bus().push_can(makeCanFrame(ENGINE_BOARD_ID, FILLING_STATION_BOARD_ID, CAN_ID_COMM_PING));
+    bus().push_can(makeCanFrame(ENGINE_BOARD_ID, FILLING_STATION_BOARD_ID, CAN_ID_STATUS_VALVE));
+    bus().push_can(makeCanFrame(ENGINE_BOARD_ID, FILLING_STATION_BOARD_ID, CAN_ID_STATUS_VALVE));
+    bus().push_can(makeCanFrame(ENGINE_BOARD_ID, FILLING_STATION_BOARD_ID, CAN_ID_STATUS_VALVE));
     step();
-    EXPECT_EQ(bus().can_tx.size(), 3u);
-    EXPECT_TRUE(bus().can_rx.empty());
+    EXPECT_TRUE(bus().can_rx.empty());  // all drained in one tick
+    EXPECT_TRUE(bus().can_tx.empty());  // and never answered
 }
 
 /* ---- Persistent state (Backup SRAM) -------------------------------------- */

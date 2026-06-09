@@ -13,7 +13,7 @@
 #include "communication/interfaces/ethernet.hpp"   // logic::communication::udp + Endpoint
 #include "communication/interfaces/can.hpp"          // logic::communication::can + CanFrame
 #include "control/persistent_state.hpp"              // Backup-SRAM state snapshot
-#include "dil/can_types.h"                            // HAL-free CAN protocol (CANHeader, enums)
+#include "dil/can_types.h"                            // HAL-free CAN protocol (CANHeader, enums) — used by sendValveCmd (outbound, TBD)
 
 #include "sirius-headers-common/Ethernet/UDPFrame.h"
 #include "sirius-headers-common/Telecommunication/PacketHeaderVariable.h"
@@ -56,7 +56,6 @@ struct FillStation {
     uint32_t last_tx_ms     = 0;
     uint32_t last_rx_ms     = 0;
     Endpoint gs;
-    uint32_t can_rx_count   = 0;
 };
 
 FillStation s_fill;
@@ -97,39 +96,13 @@ uint32_t crc32(const uint8_t* data, std::size_t length_bytes)
     (void)can::send(frame);
 }
 
-void handleCanFrame(const CanFrame& frame)
-{
-    CANHeader header;
-    header.code = frame.id;
-
-    switch (header.frame.messageID) {
-        case CAN_ID_COMM_PING: {
-            /* Echo the payload back to the sender as a PONG. */
-            CANHeader resp = {};
-            resp.frame.senderID  = FILLING_STATION_BOARD_ID;
-            resp.frame.targetID  = header.frame.senderID;
-            resp.frame.messageID = CAN_ID_COMM_PONG;
-
-            CanFrame pong = frame;
-            pong.id = resp.code;
-            (void)can::send(pong);
-            break;
-        }
-        case CAN_ID_STATUS_VALVE: {
-            /* ValveStatus: valveIndex at byte 4, status in the header. */
-            s_fill.can_rx_count++;
-            /* TODO: feed the valve index/status into the state machine. */
-            break;
-        }
-        default:
-            break;
-    }
-}
-
+/* The FCU receives only status/telemetry from the ECU over CAN — never commands,
+   which always arrive over Ethernet. Drain the RX ring each tick so it cannot
+   back up; feeding ECU valve status into the state machine is a later step. */
 void canTick()
 {
     while (auto frame = can::receive()) {
-        handleCanFrame(*frame);
+        (void)frame;  // TODO: consume ECU valve status / telemetry
     }
 }
 
