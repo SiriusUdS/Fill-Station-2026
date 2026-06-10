@@ -26,6 +26,7 @@
 
 #include "communication/ethernet/ethernet.hpp"
 #include "communication/can/can_dil.hpp"
+#include "acquisition/adc/ads131m08.hpp"
 #include "memory/backup_ram.hpp"
 #include "fcu_controller.hpp"
 #include "dil/can_types.h"
@@ -33,18 +34,55 @@
 
 namespace eth        = platform::communication::ethernet;
 namespace can        = platform::communication::can;
+namespace ads131m08  = platform::acquisition::adc::ads131m08;
 namespace backup_ram = platform::memory::backup_ram;
+
+/* DRDY (PE7) data-ready EXTI vector. The handler symbol is fixed by the pin
+   group (EXTI lines 5-9), so it is board-specific and lives here; it dispatches
+   through the HAL to the ADC driver's HAL_GPIO_EXTI_Callback. */
+extern "C" void EXTI9_5_IRQHandler(void)
+{
+  HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_7);
+}
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 void PeriphCommonClock_Config(void);
 static void MPU_Config(void);
 
+/* Application init — defined below main(), forward declared so main reads first. */
+static void init(void);        /* full bring-up: HAL first, then our logic */
+static void stmHalInit(void);  /* STM32 HAL + CubeMX peripheral init */
+static void fcuInit(void);     /* our drivers (backup RAM, CAN, Ethernet) + FCU logic */
+
 /**
   * @brief  The application entry point.
   * @retval int
   */
 int main(void)
+{
+  init();
+
+  for (;;)
+  {
+    logic::fcu::tick(HAL_GetTick());
+  }
+}
+
+/**
+  * @brief  Full system bring-up: STM32 HAL/peripherals first, then our logic.
+  */
+static void init(void)
+{
+  stmHalInit();
+  fcuInit();
+}
+
+/**
+  * @brief  STM32 HAL and CubeMX peripheral initialization (MPU, clocks,
+  *         peripherals). Generated bring-up only — no application logic here.
+  */
+static void stmHalInit(void)
 {
   /* MPU Configuration--------------------------------------------------------*/
   MPU_Config();
@@ -64,13 +102,18 @@ int main(void)
   MX_GPIO_Init();
   MX_DMA_Init();
   MX_ETH_Init();
-  MX_SDMMC1_SD_Init();
   MX_SDMMC2_SD_Init();
   MX_FATFS_Init();
   MX_FDCAN1_Init();
   MX_SPI4_Init();
   MX_SPI6_Init();
+}
 
+/**
+  * @brief  Bring up our drivers and the FCU logic, on top of the HAL.
+  */
+static void fcuInit(void)
+{
   /* Bring up the backup domain first, so the battery-backed Backup SRAM that
      holds the persistent state is clocked, writable and retained on VBAT before
      the FCU logic reads it. A regulator-timeout only means VBAT retention is
@@ -82,12 +125,27 @@ int main(void)
      through the logic interfaces. */
   (void)can::init(&hfdcan1, FILLING_STATION_BOARD_ID);
   eth::init();
-  logic::fcu::init();
 
-  for (;;)
-  {
-    logic::fcu::tick(HAL_GetTick());
-  }
+  /* Bring up the ADS131M08 ADC. The board owns the DRDY (PE7) pin: configure it
+     as a falling-edge EXTI input here, then let the driver arm it. CS is PE15.
+     The ADC then streams DRDY-paced conversions to the logic layer through
+     logic::communication::adc::samples(). */
+  GPIO_InitTypeDef drdy = {};
+  drdy.Pin  = GPIO_PIN_7;
+  drdy.Mode = GPIO_MODE_IT_FALLING;
+  drdy.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(GPIOE, &drdy);
+
+  ads131m08::init({
+      .hspi      = &hspi4,
+      .cs_port   = GPIOE,
+      .cs_pin    = GPIO_PIN_15,
+      .drdy_pin  = GPIO_PIN_7,
+      .drdy_irqn = EXTI9_5_IRQn,
+  });
+  ads131m08::start();
+
+  logic::fcu::init();
 }
 
 /**

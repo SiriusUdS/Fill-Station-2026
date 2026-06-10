@@ -57,6 +57,16 @@ void Error_Handler(void);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
+#define ADS_DRDY_Pin GPIO_PIN_7
+#define ADS_DRDY_GPIO_Port GPIOE
+#define ADS_SCK_SPI4_Pin GPIO_PIN_12
+#define ADS_SCK_SPI4_GPIO_Port GPIOE
+#define ADS_MISO_SPI4_Pin GPIO_PIN_13
+#define ADS_MISO_SPI4_GPIO_Port GPIOE
+#define ADS_MOSI_SPI4_Pin GPIO_PIN_14
+#define ADS_MOSI_SPI4_GPIO_Port GPIOE
+#define ADS_CS_Pin GPIO_PIN_15
+#define ADS_CS_GPIO_Port GPIOE
 
 /* USER CODE BEGIN Private defines */
 

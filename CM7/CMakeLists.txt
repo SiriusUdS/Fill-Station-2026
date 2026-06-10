@@ -103,6 +103,12 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ../stm-2026-common/logic/control/persistent_state.cpp
     ../stm-2026-common/platform/memory/backup_ram.cpp
     app/platform/communication/ethernet/ethernet.cpp
+    app/platform/communication/spi/spi_dil.cpp
+    app/platform/communication/spi/spi_dma.cpp
+    app/platform/communication/spi/spi_irq.cpp
+    app/platform/acquisition/adc/ads131m08.cpp
+    app/platform/storage/sd_card.cpp
+    app/platform/storage/storage.cpp
     ../stm-2026-common/platform/communication/can/can_dil.cpp
     # Servo/valve drivers need a TIM peripheral configured in CubeMX
     # (HAL_TIM_MODULE_ENABLED); re-add once a timer exists:
