@@ -154,7 +154,10 @@ The genuinely hard part. CubeMX is one-project-per-directory and regenerates `Co
 
 ## 7. Phased execution (each phase ends with a green build)
 
-- [x] **Phase 0 — Prep & safety** *(in progress — fold-in done; commit + CM4 cleanup pending)*
+- [x] **Phase 0 — Prep & safety** ✅ *DONE — committed `e1f9426` on branch `dual-board-refactor`*
+  - [x] Drop CM4: untracked + removed `CM4/`, added `.gitignore` rule. Durable control = `BUILD_CONTEXT=CM7`
+        in root `CMakeLists.txt` (CubeMX never regenerates it), which keeps the regenerated
+        `mx-generated.cmake` CM4 block inert. Left `mx-generated.cmake` untouched (CubeMX owns it).
   - [x] Branch from `reorganisation` → **`dual-board-refactor`**.
   - [x] Confirm clean FCU build baseline: `cmake --preset Debug` then `cmake --build build/Debug`
         → `FillStation_CM7.elf`, FLASH 97032 B / 9.25%. (toolchain: arm-none-eabi-gcc 12.3, ninja, cmake 3.28)
