@@ -17,10 +17,12 @@ set(CMAKE_PROJECT_NAME FillStation)
 # Core project settings
 project(${CMAKE_PROJECT_NAME})
 
-# Single-core mode: only build the CM7 application and skip CM4.
-# mx-generated.cmake builds each core whose name matches BUILD_CONTEXT (or all
-# of them when BUILD_CONTEXT is undefined). Override with -DBUILD_CONTEXT=CM4CM7
-# to restore the dual-core build.
+# CM7-only build — neither board uses the CM4 core. This is the DURABLE control
+# point: CubeMX does NOT regenerate this file, whereas it DOES regenerate
+# mx-generated.cmake (whose CM4 ExternalProject is gated on BUILD_CONTEXT). Forcing
+# CM7 here keeps that CM4 block inert even after a CubeMX regen, so we never edit the
+# generated file. The CM4/ project dir is untracked/.gitignore'd; if a regen recreates
+# it, it is ignored and never built.
 if(NOT DEFINED BUILD_CONTEXT)
     set(BUILD_CONTEXT CM7)
 endif()

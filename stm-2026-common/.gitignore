@@ -1,0 +1,4 @@
+# Host unit-test artifacts — never committed.
+tests/build/
+tests/third_party/googletest/
+tests/third_party/*.tar.gz
