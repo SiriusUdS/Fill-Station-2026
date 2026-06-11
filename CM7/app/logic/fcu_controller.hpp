@@ -122,13 +122,18 @@ struct LogBuffer {
  * @tparam V A type modelling logic::actuation::Valve (a BallValve in firmware);
  *           both the Fill and Dump valves are of this type.
  * @tparam A A type modelling logic::communication::StreamingAdc (the ADS131M08).
+ * @tparam E A type modelling logic::communication::Ethernet (the UDP link).
+ * @tparam C A type modelling logic::communication::Can (the FDCAN bus).
  */
-template <logic::storage::Storage S, logic::actuation::Valve V, logic::communication::StreamingAdc A>
+template <logic::storage::Storage S, logic::actuation::Valve V,
+          logic::communication::StreamingAdc A, logic::communication::Ethernet E,
+          logic::communication::Can C>
 class Controller {
 public:
     /** @brief Construct over the held drivers; does not touch hardware. Call init() next. */
-    Controller(S& storage, V& fill_valve, V& dump_valve, A& adc)
-        : storage_(storage), fill_valve_(fill_valve), dump_valve_(dump_valve), adc_(adc) {}
+    Controller(S& storage, V& fill_valve, V& dump_valve, A& adc, E& eth, C& can)
+        : storage_(storage), fill_valve_(fill_valve), dump_valve_(dump_valve),
+          adc_(adc), eth_(eth), can_(can) {}
 
     /**
      * @brief  Initialise the FCU logic: starting state, ground-station endpoint,
@@ -173,6 +178,8 @@ private:
     V&                  fill_valve_;      // injected Fill / Dump valves, read for telemetry
     V&                  dump_valve_;
     A&                  adc_;            // injected streaming ADC; produceRecord() drains its ring
+    E&                  eth_;            // injected UDP link; rx in rxTick(), tx in sendBatched()
+    C&                  can_;            // injected CAN bus; drained in canTick(), tx in sendValveCmd()
     detail::FillStation fill_{};
     detail::LogBuffer   log_;            // .axisram in firmware; left uninitialised until init()
     volatile uint32_t   last_adc_ms_ = 0;  // last tick a conversion was drained; gates the silent-ADC filler

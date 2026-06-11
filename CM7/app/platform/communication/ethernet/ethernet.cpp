@@ -23,12 +23,18 @@
 
 extern "C" ETH_TxPacketConfig TxConfig;   // defined in eth.c
 
+using logic::communication::Datagram;
 using logic::communication::Endpoint;
 using logic::communication::MAC_LENGTH_BYTES;
 using logic::communication::NetError;
-using logic::communication::udp::Datagram;
 
 namespace {
+
+/* The link's telemetry record. The board has one Ethernet, so this is file-
+   static like the rest of the stack state; the Ethernet handle exposes it
+   through info(). Updated from CPU context (init / send / the tick() RX drain),
+   never from the DMA ISR. */
+EthernetInfo s_info{};
 
 /* ---- Byte-order helpers -------------------------------------------------- */
 inline uint16_t hton16(uint16_t v) { return __builtin_bswap16(v); }
@@ -210,6 +216,9 @@ void enqueue_rx(const Endpoint& source, const uint8_t* payload, std::size_t leng
     rx_ring_head = (rx_ring_head + 1) % RX_RING_CAPACITY_DATAGRAMS;
     if (rx_ring_head == rx_ring_tail) {
         rx_ring_tail = (rx_ring_tail + 1) % RX_RING_CAPACITY_DATAGRAMS;  // drop oldest
+        if (s_info.rx_dropped != 0xFFFFu) {
+            ++s_info.rx_dropped;  // saturating drop counter (telemetry)
+        }
     }
 }
 
@@ -330,7 +339,7 @@ void process_eth_frame(const uint8_t* frame)
 
 namespace platform::communication::ethernet {
 
-void init()
+void Ethernet::init()
 {
     HAL_ETH_Start_IT(&heth);
 
@@ -381,17 +390,14 @@ void init()
     tx_arp.plen  = ARP_PLEN_IPV4;
     std::memcpy(tx_arp.sha, heth.Init.MACAddr, 6);
     tx_arp.spa = hton32(LOCAL_IP);
+
+    s_info.status.initialized = 1u;
+    s_info.state              = EthernetState::Up;
 }
 
-} // namespace platform::communication::ethernet
+/* ---- logic::communication::Ethernet contract ----------------------------- */
 
-/* -------------------------------------------------------------------------- */
-/* Logic-side seam: definitions for communication/interfaces/ethernet.hpp     */
-/* -------------------------------------------------------------------------- */
-
-namespace logic::communication::udp {
-
-void tick()
+void Ethernet::tick()
 {
     static std::size_t rx_read_idx = 0;
 
@@ -411,9 +417,10 @@ void tick()
     }
 }
 
-std::optional<NetError> send(const Endpoint& dest, std::span<const uint8_t> payload)
+std::optional<NetError> Ethernet::send(const Endpoint& dest, std::span<const uint8_t> payload)
 {
     if (payload.size() > MAX_UDP_PAYLOAD_BYTES) {
+        s_info.status.tx_error = 1u;
         return NetError::InternalError;
     }
 
@@ -428,13 +435,20 @@ std::optional<NetError> send(const Endpoint& dest, std::span<const uint8_t> payl
     TxConfig.Length = sizeof(EthHeader) + sizeof(Ipv4Header) + sizeof(UdpHeader) + len;
 
     switch (HAL_ETH_Transmit_IT(&heth, &TxConfig)) {
-        case HAL_OK:   return std::nullopt;
-        case HAL_BUSY: return NetError::Busy;
-        default:       return NetError::InternalError;
+        case HAL_OK:
+            s_info.status.tx_busy  = 0u;
+            s_info.status.tx_error = 0u;
+            return std::nullopt;
+        case HAL_BUSY:
+            s_info.status.tx_busy = 1u;
+            return NetError::Busy;
+        default:
+            s_info.status.tx_error = 1u;
+            return NetError::InternalError;
     }
 }
 
-std::optional<Datagram> receive()
+std::optional<Datagram> Ethernet::receive()
 {
     if (rx_ring_tail == rx_ring_head) {
         return std::nullopt;  // ring empty
@@ -449,7 +463,12 @@ std::optional<Datagram> receive()
     return datagram;
 }
 
-} // namespace logic::communication::udp
+EthernetInfo Ethernet::info() const
+{
+    return s_info;
+}
+
+} // namespace platform::communication::ethernet
 
 /* -------------------------------------------------------------------------- */
 /* HAL ETH RX DMA callbacks (producer side of the RX pool)                    */

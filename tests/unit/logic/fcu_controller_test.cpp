@@ -3,9 +3,10 @@
  *
  * The logic is exercised purely through its public surface (init/tick) and the
  * communication interfaces, which the FakeBus stands in for. The state machine
- * keeps its state in an anonymous namespace with no getter, but every state is
- * observable: the heartbeat emitted each tick carries the current state in its
- * UDPPacketHeader.frame.deviceState field, so we read state back off the bus.
+ * keeps its state in battery-backed persistent_state; telemetry is no longer a
+ * per-tick heartbeat (the GET_SYSTEM SystemState packet is now produced on the
+ * record timer, see produceRecord), so the state-machine tests read the current
+ * state straight from persistent_state via currentState().
  * ------------------------------------------------------------------------- */
 
 #include "fcu_controller.hpp"
@@ -16,6 +17,7 @@
 
 #include "communication/interfaces/can.hpp"
 #include "communication/interfaces/ethernet.hpp"
+#include "communication/protocol/ethernet/ethernet_header.hpp"   // EthernetHeader (downlink header)
 #include "control/persistent_state.hpp"
 #include "control/states.hpp"
 #include "dil/can_types.h"
@@ -73,8 +75,10 @@ protected:
     FakeValve        fill_valve_;
     FakeValve        dump_valve_;
     FakeStreamingAdc adc_;
-    logic::fcu::Controller<FakeStorage, FakeValve, FakeStreamingAdc>
-                     controller_{storage_, fill_valve_, dump_valve_, adc_};
+    FakeEthernet     eth_;
+    FakeCan          can_;
+    logic::fcu::Controller<FakeStorage, FakeValve, FakeStreamingAdc, FakeEthernet, FakeCan>
+                     controller_{storage_, fill_valve_, dump_valve_, adc_, eth_, can_};
     uint32_t         now_ms_ = 0;
 
     void SetUp() override
@@ -92,23 +96,18 @@ protected:
     /* Advance to an absolute timestamp (must be > the current one). */
     void stepTo(uint32_t now) { controller_.tick(now_ms_ = now); }
 
-    /* The state carried by the most recent heartbeat (only UDP traffic sent). */
-    uint8_t lastHeartbeatState() const
+    /* The controller's current state, read straight from the persisted snapshot
+       (the state machine commits every transition there). */
+    uint8_t currentState() const
     {
-        EXPECT_FALSE(bus().udp_tx.empty()) << "no heartbeat was sent";
-        const auto& payload = bus().udp_tx.back().payload;
-        EXPECT_GE(payload.size(), sizeof(UDPPacketHeader));
-        UDPPacketHeader header;
-        std::memcpy(header.bytes, payload.data(), sizeof(UDPPacketHeader));
-        return header.frame.deviceState;
+        return static_cast<uint8_t>(logic::control::persistent_state.fill_state);
     }
 
     /* Drive the machine into SAFE and clear recorded traffic. */
     void reachSafe()
     {
-        step();  // heartbeat (INIT), then INIT -> SAFE
-        step();  // heartbeat now reports SAFE
-        ASSERT_EQ(lastHeartbeatState(), FILLING_STATION_STATE_SAFE);
+        step();  // first tick moves INIT -> SAFE
+        ASSERT_EQ(currentState(), FILLING_STATION_STATE_SAFE);
         bus().udp_tx.clear();
         bus().can_tx.clear();
     }
@@ -124,25 +123,35 @@ protected:
 
 /* ---- Startup ------------------------------------------------------------- */
 
-TEST_F(FcuControllerTest, FirstTickEmitsInitThenEntersSafe)
+TEST_F(FcuControllerTest, StartsAtInitAndFirstTickEntersSafe)
 {
+    EXPECT_EQ(currentState(), FILLING_STATION_STATE_INIT);  // right after init(), before any tick
     step();
-    EXPECT_EQ(lastHeartbeatState(), FILLING_STATION_STATE_INIT);
-    step();
-    EXPECT_EQ(lastHeartbeatState(), FILLING_STATION_STATE_SAFE);
+    EXPECT_EQ(currentState(), FILLING_STATION_STATE_SAFE);  // first tick moves INIT -> SAFE
 }
 
-TEST_F(FcuControllerTest, HeartbeatHeaderIsWellFormed)
+/* Telemetry is no longer a per-tick heartbeat: SystemState records are produced
+   on the record timer (produceRecord) and batched into GET_SYSTEM datagrams when
+   a 4096-byte half fills and drains. Pump records until that happens and check
+   the downlinked packet is a well-formed GET_SYSTEM frame. */
+TEST_F(FcuControllerTest, FullTelemetryBufferDownlinksGetSystem)
 {
-    step();
-    ASSERT_FALSE(bus().udp_tx.empty());
+    reachSafe();  // also clears udp_tx
+
+    const AdcInfo sample{};
+    for (int i = 0; i < 1000 && bus().udp_tx.empty(); ++i) {
+        adc_.push(sample);                  // one conversion into the ADC ring
+        controller_.produceRecord(++now_ms_);  // drain it into the telemetry buffer
+        step();                             // drainTick flushes any full half
+    }
+
+    ASSERT_FALSE(bus().udp_tx.empty()) << "a full telemetry half never downlinked";
     const auto& payload = bus().udp_tx.back().payload;
-    UDPPacketHeader header;
-    std::memcpy(header.bytes, payload.data(), sizeof(UDPPacketHeader));
-    EXPECT_EQ(header.frame.deviceID, FILLING_STATION_BOARD_ID);
-    EXPECT_EQ(header.frame.payloadID, GET_SYSTEM);
-    /* 12-byte header + 4-byte payload + 4-byte CRC. */
-    EXPECT_EQ(payload.size(), sizeof(UDPPacketHeader) + 8);
+    ASSERT_GE(payload.size(), sizeof(EthernetHeader));
+    EthernetHeader header;
+    std::memcpy(&header, payload.data(), sizeof(EthernetHeader));
+    EXPECT_EQ(header.deviceID, FILLING_STATION_BOARD_ID);
+    EXPECT_EQ(header.payloadID, GET_SYSTEM);
 }
 
 TEST_F(FcuControllerTest, EveryTickServicesTheLink)
@@ -159,14 +168,14 @@ TEST_F(FcuControllerTest, SafeToTest)
 {
     reachSafe();
     requestState(FILLING_STATION_STATE_TEST);
-    EXPECT_EQ(lastHeartbeatState(), FILLING_STATION_STATE_TEST);
+    EXPECT_EQ(currentState(), FILLING_STATION_STATE_TEST);
 }
 
 TEST_F(FcuControllerTest, SafeToUnsafe)
 {
     reachSafe();
     requestState(FILLING_STATION_STATE_UNSAFE);
-    EXPECT_EQ(lastHeartbeatState(), FILLING_STATION_STATE_UNSAFE);
+    EXPECT_EQ(currentState(), FILLING_STATION_STATE_UNSAFE);
 }
 
 TEST_F(FcuControllerTest, TestBackToSafe)
@@ -174,7 +183,7 @@ TEST_F(FcuControllerTest, TestBackToSafe)
     reachSafe();
     requestState(FILLING_STATION_STATE_TEST);
     requestState(FILLING_STATION_STATE_SAFE);
-    EXPECT_EQ(lastHeartbeatState(), FILLING_STATION_STATE_SAFE);
+    EXPECT_EQ(currentState(), FILLING_STATION_STATE_SAFE);
 }
 
 TEST_F(FcuControllerTest, UnsafeToIgnite)
@@ -182,7 +191,7 @@ TEST_F(FcuControllerTest, UnsafeToIgnite)
     reachSafe();
     requestState(FILLING_STATION_STATE_UNSAFE);
     requestState(FILLING_STATION_STATE_IGNITE);
-    EXPECT_EQ(lastHeartbeatState(), FILLING_STATION_STATE_IGNITE);
+    EXPECT_EQ(currentState(), FILLING_STATION_STATE_IGNITE);
 }
 
 TEST_F(FcuControllerTest, UnsafeToAbort)
@@ -190,7 +199,7 @@ TEST_F(FcuControllerTest, UnsafeToAbort)
     reachSafe();
     requestState(FILLING_STATION_STATE_UNSAFE);
     requestState(FILLING_STATION_STATE_ABORT);
-    EXPECT_EQ(lastHeartbeatState(), FILLING_STATION_STATE_ABORT);
+    EXPECT_EQ(currentState(), FILLING_STATION_STATE_ABORT);
 }
 
 TEST_F(FcuControllerTest, IgniteToAbort)
@@ -199,7 +208,7 @@ TEST_F(FcuControllerTest, IgniteToAbort)
     requestState(FILLING_STATION_STATE_UNSAFE);
     requestState(FILLING_STATION_STATE_IGNITE);
     requestState(FILLING_STATION_STATE_ABORT);
-    EXPECT_EQ(lastHeartbeatState(), FILLING_STATION_STATE_ABORT);
+    EXPECT_EQ(currentState(), FILLING_STATION_STATE_ABORT);
 }
 
 TEST_F(FcuControllerTest, AbortBackToSafe)
@@ -208,7 +217,7 @@ TEST_F(FcuControllerTest, AbortBackToSafe)
     requestState(FILLING_STATION_STATE_UNSAFE);
     requestState(FILLING_STATION_STATE_ABORT);
     requestState(FILLING_STATION_STATE_SAFE);
-    EXPECT_EQ(lastHeartbeatState(), FILLING_STATION_STATE_SAFE);
+    EXPECT_EQ(currentState(), FILLING_STATION_STATE_SAFE);
 }
 
 /* ---- Rejected state transitions ----------------------------------------- */
@@ -217,14 +226,14 @@ TEST_F(FcuControllerTest, SafeRejectsIgnite)
 {
     reachSafe();
     requestState(FILLING_STATION_STATE_IGNITE);
-    EXPECT_EQ(lastHeartbeatState(), FILLING_STATION_STATE_SAFE);
+    EXPECT_EQ(currentState(), FILLING_STATION_STATE_SAFE);
 }
 
 TEST_F(FcuControllerTest, SafeRejectsAbort)
 {
     reachSafe();
     requestState(FILLING_STATION_STATE_ABORT);
-    EXPECT_EQ(lastHeartbeatState(), FILLING_STATION_STATE_SAFE);
+    EXPECT_EQ(currentState(), FILLING_STATION_STATE_SAFE);
 }
 
 TEST_F(FcuControllerTest, UnsafeRejectsTest)
@@ -232,21 +241,21 @@ TEST_F(FcuControllerTest, UnsafeRejectsTest)
     reachSafe();
     requestState(FILLING_STATION_STATE_UNSAFE);
     requestState(FILLING_STATION_STATE_TEST);
-    EXPECT_EQ(lastHeartbeatState(), FILLING_STATION_STATE_UNSAFE);
+    EXPECT_EQ(currentState(), FILLING_STATION_STATE_UNSAFE);
 }
 
 TEST_F(FcuControllerTest, CommandForAnotherBoardIsIgnored)
 {
     reachSafe();
     requestState(FILLING_STATION_STATE_UNSAFE, ENGINE_BOARD_ID);
-    EXPECT_EQ(lastHeartbeatState(), FILLING_STATION_STATE_SAFE);
+    EXPECT_EQ(currentState(), FILLING_STATION_STATE_SAFE);
 }
 
 TEST_F(FcuControllerTest, BroadcastCommandIsAccepted)
 {
     reachSafe();
     requestState(FILLING_STATION_STATE_UNSAFE, BOARD_BROADCAST_ID);
-    EXPECT_EQ(lastHeartbeatState(), FILLING_STATION_STATE_UNSAFE);
+    EXPECT_EQ(currentState(), FILLING_STATION_STATE_UNSAFE);
 }
 
 /* ---- Receive watchdog ---------------------------------------------------- */
@@ -255,17 +264,17 @@ TEST_F(FcuControllerTest, WatchdogAbortsUnsafeAfterSilence)
 {
     reachSafe();
     requestState(FILLING_STATION_STATE_UNSAFE);  // last_rx updated at this tick
-    ASSERT_EQ(lastHeartbeatState(), FILLING_STATION_STATE_UNSAFE);
+    ASSERT_EQ(currentState(), FILLING_STATION_STATE_UNSAFE);
 
     stepTo(now_ms_ + 500);  // 500 ms with no inbound datagram
-    EXPECT_EQ(lastHeartbeatState(), FILLING_STATION_STATE_ABORT);
+    EXPECT_EQ(currentState(), FILLING_STATION_STATE_ABORT);
 }
 
 TEST_F(FcuControllerTest, WatchdogDoesNotAbortSafe)
 {
     reachSafe();
     stepTo(now_ms_ + 5000);  // long silence, but SAFE has no watchdog
-    EXPECT_EQ(lastHeartbeatState(), FILLING_STATION_STATE_SAFE);
+    EXPECT_EQ(currentState(), FILLING_STATION_STATE_SAFE);
 }
 
 TEST_F(FcuControllerTest, TrafficKeepsUnsafeAlive)
@@ -276,7 +285,7 @@ TEST_F(FcuControllerTest, TrafficKeepsUnsafeAlive)
     for (int i = 0; i < 600; ++i) {
         requestState(FILLING_STATION_STATE_UNSAFE);  // self-transition keeps rx alive
     }
-    EXPECT_EQ(lastHeartbeatState(), FILLING_STATION_STATE_UNSAFE);
+    EXPECT_EQ(currentState(), FILLING_STATION_STATE_UNSAFE);
 }
 
 /* ---- CAN ------------------------------------------------------------------ *
@@ -319,9 +328,8 @@ TEST_F(FcuControllerTest, ResumesPersistedStateOnInit)
     /* Simulate a reset while UNSAFE: the blob is already committed in Backup SRAM. */
     logic::control::persistent_state.saveState(logic::control::State::Unsafe);
 
-    controller_.init();  // reboot
-    step();
-    EXPECT_EQ(lastHeartbeatState(), FILLING_STATION_STATE_UNSAFE);
+    controller_.init();  // reboot resumes the persisted state (before any tick advances it)
+    EXPECT_EQ(currentState(), FILLING_STATION_STATE_UNSAFE);
 }
 
 TEST_F(FcuControllerTest, ColdBootWithInvalidBlobStartsAtInit)
@@ -329,9 +337,8 @@ TEST_F(FcuControllerTest, ColdBootWithInvalidBlobStartsAtInit)
     logic::control::persistent_state.saveState(logic::control::State::Ignite);
     logic::control::persistent_state.magic = 0;  // corrupt => looks like cold garbage
 
-    controller_.init();  // reboot
-    step();
-    EXPECT_EQ(lastHeartbeatState(), FILLING_STATION_STATE_INIT);
+    controller_.init();  // cold/corrupt boot starts at INIT (before any tick advances it)
+    EXPECT_EQ(currentState(), FILLING_STATION_STATE_INIT);
 }
 
 } // namespace

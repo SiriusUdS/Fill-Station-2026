@@ -54,8 +54,10 @@ protected:
     FakeValve        fill_valve_;
     FakeValve        dump_valve_;
     FakeStreamingAdc adc_;
-    logic::fcu::Controller<FakeStorage, FakeValve, FakeStreamingAdc>
-                     controller_{storage_, fill_valve_, dump_valve_, adc_};
+    FakeEthernet     eth_;
+    FakeCan          can_;
+    logic::fcu::Controller<FakeStorage, FakeValve, FakeStreamingAdc, FakeEthernet, FakeCan>
+                     controller_{storage_, fill_valve_, dump_valve_, adc_, eth_, can_};
     uint32_t         now_ms_ = 0;
 
     void SetUp() override

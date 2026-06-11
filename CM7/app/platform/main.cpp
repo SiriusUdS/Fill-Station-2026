@@ -51,14 +51,21 @@ static valve::BallValve g_dump_valve;
    and is reached from the ADC ISRs while acquiring. */
 static ads131m08::Ads131m08 g_ads131;
 
+/* The board's single Ethernet link (UDP-over-Ethernet stack) and CAN node. Each
+   is a thin handle over file-static stack state (ethernet.cpp / can_dil.cpp);
+   both brought up in fcuInit(). */
+static eth::Ethernet g_eth;
+static can::Can      g_can;
+
 /* The board's single SD card and the FCU controller built over it. Both pinned in
    D1 AXI-SRAM: the controller's telemetry double buffer is handed straight to the
    SDMMC DMA, which cannot reach DTCM. g_card is declared (and so constructed)
    before g_controller, which holds a reference to it. */
 __attribute__((section(".axisram"))) static platform::storage::SdCard g_card{&hsd2, "0:/"};
 __attribute__((section(".axisram")))
-static logic::fcu::Controller<platform::storage::SdCard, valve::BallValve, ads131m08::Ads131m08>
-    g_controller{g_card, g_fill_valve, g_dump_valve, g_ads131};
+static logic::fcu::Controller<platform::storage::SdCard, valve::BallValve, ads131m08::Ads131m08,
+                              eth::Ethernet, can::Can>
+    g_controller{g_card, g_fill_valve, g_dump_valve, g_ads131, g_eth, g_can};
 
 /* Record-production timer (TIM6) ISR -> controller. TIM6 fires at a fixed cadence
    (set in fcuInit), decoupled from the ADC's DRDY rate: each tick drains every
@@ -168,8 +175,8 @@ static void fcuInit(void)
   /* Bring up the CAN and Ethernet drivers, then the FCU logic. The board now
      answers ARP and ICMP echo (ping) requests and exchanges UDP/CAN traffic
      through the logic interfaces. */
-  (void)can::init(&hfdcan1, FILLING_STATION_BOARD_ID);
-  eth::init();
+  (void)g_can.init(&hfdcan1, FILLING_STATION_BOARD_ID);
+  g_eth.init();
 
   /* Bring up the ADS131M08 ADC. The board owns the DRDY (PE7) pin: configure it
      as a falling-edge EXTI input here, then let the driver arm it. CS is PE15.

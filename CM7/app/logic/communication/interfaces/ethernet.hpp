@@ -1,18 +1,21 @@
 #pragma once
 
 #include <array>
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <span>
 
+#include "communication/protocol/telemetry/ethernet_info.hpp"   // EthernetInfo (the link's own info record)
+
 /* ------------------------------------------------------------------------- *
- * Statically-linked UDP-over-Ethernet interface for the FCU logic layer.
+ * Class-based UDP-over-Ethernet contract for the FCU logic layer (C++23 concept).
  *
- * FCU-only: the ground-station link lives entirely in this board's app, not in
- * the shared submodule. Logic depends ONLY on the declarations below; the
- * platform provides the definitions (raw Ethernet/IPv4/UDP stack, DMA buffers,
- * HAL ETH driver) at link time. No HAL type appears here.
+ * Mirrors the valve/adc/storage seams: the contract is a concept, the platform
+ * driver (the raw Ethernet/IPv4/UDP stack) models it, and a host fake models it
+ * for tests. No HAL type appears here. The link is FCU-only — the ground-station
+ * connection lives in this board's app, not the shared submodule.
  *
  * send() copies the payload into the DMA-accessible transmit region before
  * framing it, so callers may pass any buffer.
@@ -41,8 +44,6 @@ enum class NetError {
     Busy,           /**< Transmit path busy; retry later. */
 };
 
-namespace udp {
-
 /**
  * @brief  A received UDP datagram.
  *
@@ -55,28 +56,21 @@ struct Datagram {
 };
 
 /**
- * @brief  Send a UDP datagram.
- * @param  dest     Destination endpoint (MAC + IPv4 + port).
- * @param  payload  Bytes to send; copied into the DMA-accessible transmit
- *                  region before framing.
- * @return std::nullopt on success, or a NetError describing the failure.
+ * @brief The contract a UDP-over-Ethernet link must satisfy.
+ *
+ * A conforming type exposes:
+ *   - tick()        — service the link so received datagrams become available and
+ *                     ARP / ICMP echo requests are answered.
+ *   - receive()     — pop the oldest received datagram, or std::nullopt.
+ *   - send(d, p)    — send a UDP datagram; payload is copied before framing.
+ *   - info()        — the link's own EthernetInfo (state + status + drop count).
  */
-[[nodiscard]] std::optional<NetError> send(const Endpoint& dest,
-                                           std::span<const uint8_t> payload);
-
-/**
- * @brief  Pop the oldest received UDP datagram.
- * @return The datagram, or std::nullopt if none are available.
- */
-[[nodiscard]] std::optional<Datagram> receive();
-
-/**
- * @brief  Service the Ethernet link: process inbound frames so received UDP
- *         datagrams become available to receive() (and ARP / ICMP echo requests
- *         are answered). Call once per logic cycle before draining receive().
- */
-void tick();
-
-} // namespace udp
+template <typename T>
+concept Ethernet = requires(T eth, const Endpoint& dest, std::span<const uint8_t> payload) {
+    { eth.tick() }              -> std::same_as<void>;
+    { eth.receive() }          -> std::same_as<std::optional<Datagram>>;
+    { eth.send(dest, payload) } -> std::same_as<std::optional<NetError>>;
+    { eth.info() }             -> std::same_as<::EthernetInfo>;
+};
 
 } // namespace logic::communication
