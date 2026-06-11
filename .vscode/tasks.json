@@ -2,12 +2,38 @@
   "version": "2.0.0",
   "tasks": [
     {
-      "label": "Build CM7",
+      "label": "Build FCU",
       "type": "process",
       "command": "cmake",
-      "args": ["--build", "${workspaceFolder}/CM7/build"],
+      "args": ["--build", "${workspaceFolder}/build/fcu-Debug"],
+      "group": { "kind": "build", "isDefault": true },
+      "problemMatcher": ["$gcc"],
+      "detail": "Build the FCU board (configure first with 'Configure FCU' if build/fcu-Debug is missing)."
+    },
+    {
+      "label": "Build ECU",
+      "type": "process",
+      "command": "cmake",
+      "args": ["--build", "${workspaceFolder}/build/ecu-Debug"],
       "group": "build",
-      "problemMatcher": ["$gcc"]
+      "problemMatcher": ["$gcc"],
+      "detail": "Build the ECU board (configure first with 'Configure ECU' if build/ecu-Debug is missing)."
+    },
+    {
+      "label": "Configure FCU",
+      "type": "process",
+      "command": "cmake",
+      "args": ["--preset", "fcu-Debug"],
+      "problemMatcher": [],
+      "detail": "One-time / after-CMake-change configure of the FCU board."
+    },
+    {
+      "label": "Configure ECU",
+      "type": "process",
+      "command": "cmake",
+      "args": ["--preset", "ecu-Debug"],
+      "problemMatcher": [],
+      "detail": "One-time / after-CMake-change configure of the ECU board."
     },
     {
       "label": "Run logic tests",

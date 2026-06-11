@@ -6,33 +6,34 @@
             "hidden": true,
             "generator": "Ninja",
             "binaryDir": "${sourceDir}/build/${presetName}",
-		    "toolchainFile": "${sourceDir}/gcc-arm-none-eabi.cmake",
-            "cacheVariables": {
-            }
+            "toolchainFile": "${sourceDir}/gcc-arm-none-eabi.cmake",
+            "cacheVariables": {}
         },
         {
-            "name": "Debug",
+            "name": "fcu-Debug",
             "inherits": "default",
-            "cacheVariables": {
-                "CMAKE_BUILD_TYPE": "Debug"
-            }
+            "cacheVariables": { "BOARD": "fcu", "CMAKE_BUILD_TYPE": "Debug" }
         },
         {
-            "name": "Release",
+            "name": "fcu-Release",
             "inherits": "default",
-            "cacheVariables": {
-                "CMAKE_BUILD_TYPE": "Release"
-            }
+            "cacheVariables": { "BOARD": "fcu", "CMAKE_BUILD_TYPE": "Release" }
+        },
+        {
+            "name": "ecu-Debug",
+            "inherits": "default",
+            "cacheVariables": { "BOARD": "ecu", "CMAKE_BUILD_TYPE": "Debug" }
+        },
+        {
+            "name": "ecu-Release",
+            "inherits": "default",
+            "cacheVariables": { "BOARD": "ecu", "CMAKE_BUILD_TYPE": "Release" }
         }
     ],
     "buildPresets": [
-        {
-            "name": "Debug",
-            "configurePreset": "Debug"
-        },
-        {
-            "name": "Release",
-            "configurePreset": "Release"
-        }
+        { "name": "fcu-Debug",   "configurePreset": "fcu-Debug" },
+        { "name": "fcu-Release", "configurePreset": "fcu-Release" },
+        { "name": "ecu-Debug",   "configurePreset": "ecu-Debug" },
+        { "name": "ecu-Release", "configurePreset": "ecu-Release" }
     ]
 }

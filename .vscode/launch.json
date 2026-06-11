@@ -6,11 +6,11 @@
             "request": "launch",
             "serverReset": "Connect under reset", // Asserts NRST on connect -> device resets from a clean state
             "cwd": "${workspaceFolder}",
-            "preLaunchTask": "Build CM7", // Use the explicit tasks.json build (separate build dir) instead of the ST build command
+            "preLaunchTask": "Build FCU", // Use the explicit tasks.json build (separate build dir) instead of the ST build command
             "runEntry": "main",
             "imagesAndSymbols": [
                 {
-                    "imageFileName": "${workspaceFolder}/CM7/build/FillStation_CM7.elf"
+                    "imageFileName": "${workspaceFolder}/boards/fcu/CM7/build/fcu_CM7.elf"
                 }
             ],
             "verbose": false

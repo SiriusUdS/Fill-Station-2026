@@ -1,6 +1,10 @@
 {
     "configurations": [
         {
+            "name": "STM32_boards",
+            "compileCommands": "${workspaceFolder}/boards/fcu/CM7/build/compile_commands.json"
+        },
+        {
             "name": "STM32_CM4",
             "compileCommands": "${workspaceFolder}/CM4/build/compile_commands.json",
             "intelliSenseMode": "linux-gcc-x64",

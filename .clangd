@@ -1,4 +1,23 @@
 CompileFlags:
+  CompilationDatabase: boards/fcu/CM7/build
+
+---
+
+If:
+  PathMatch: boards/ecu/.*
+CompileFlags:
+  CompilationDatabase: boards/ecu/CM7/build
+
+---
+
+CompileFlags:
+  CompilationDatabase: boards/fcu/CM7/build
+If:
+  PathMatch: boards/.*
+
+---
+
+CompileFlags:
   CompilationDatabase: CM4/build
 If:
   PathMatch: CM4/.*

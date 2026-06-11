@@ -192,15 +192,26 @@ The genuinely hard part. CubeMX is one-project-per-directory and regenerates `Co
   - [ ] Dedupe `ping` against `stm-2026-common/logic/commands/ping.*` — one source of truth.
   - [ ] Update `CM7/CMakeLists.txt` source list. Build FCU. ✅
 
-- [ ] **Phase 2 — Extract the `board::` seam from `main.cpp`**
-  - [ ] Add `app/board.hpp` contract.
-  - [ ] Split `main.cpp`: shared `run()` → `app/logic/fcu/`; `halInit`/`wireDrivers`/ISR/clocks → a `board.cpp`.
-  - [ ] FCU `main()` becomes the 2-line entry. Build FCU. ✅
+> **Naming note:** the shared-code root is **`src/`** (not `app/`). `boards/<board>/` holds each board's
+> CubeMX project + `board.cpp`. Vendor HAL (`Drivers/Middlewares/Common`) is **duplicated per board**
+> under `boards/<board>/` (accepted trade-off — CubeMX projects are self-contained, regen-safe).
 
-- [ ] **Phase 3 — Relocate to target layout + `-DBOARD` plumbing (single board = fcu)**
-  - [ ] Move shared code to `/app`, FCU CubeMX project to `boards/fcu/`.
-  - [ ] Author `app_sources.cmake`; rewrite root + per-board CMake for `-DBOARD`.
-  - [ ] Add `fcu-*` presets. Build FCU via `-DBOARD=fcu`. ✅ (proves the selection machinery with one board)
+- [x] **Phase 2 — Extract the `board::` seam from `main.cpp`** *(halInit done; wireDrivers/run pending)*
+  - [x] Add `src/board.hpp` contract.
+  - [x] Move `halInit` (clocks/MPU/MX_*_Init) → `boards/fcu/board.cpp`; `main()` calls `board::halInit()`.
+  - [ ] Still pending: the composition seam — `board::wireDrivers()` + a shared `run()` (the `g_*`-wiring
+        half of `fcuInit`, which still names `hspi4`/`htim1`/pins inside `main.cpp`).
+
+- [~] **Phase 3 — Relocate to target layout + `-DBOARD` plumbing** *(structure done; shared-code move pending)*
+  - [x] **FCU CubeMX project moved to `boards/fcu/`**, renamed `FillStation`→`fcu`: `fcu.ioc`, `CM7/Core/`,
+        generated cmake, + its own `Drivers/Middlewares/Common` copy. Build byte-identical (`fcu_CM7.elf`).
+  - [x] New top-level `CMakeLists.txt` board selector (`-DBOARD=fcu|ecu`, default fcu) builds
+        `boards/<board>/CM7` directly, anchoring shared-tree includes via a passed `REPO_ROOT`.
+  - [x] Per-board ergonomics: `fcu-*`/`ecu-*` presets; `.clangd` indexes **both** boards at once
+        (PathMatch per board); `.vscode/tasks.json` Configure/Build per board (Build FCU = default).
+  - [ ] **Still pending (next slice):** relocate shared *code* (drivers + logic) out of
+        `boards/fcu/CM7/app/` and `stm-2026-common/` into `src/`. Right now the shared code physically
+        lives under the FCU board dir; it must move to `src/` before ECU can share it.
 
 - [ ] **Phase 4 — Stand up the ECU CubeMX project**
   - [ ] Create `boards/ecu/ECU.ioc` for the ECU pinout (no Ethernet; CAN; its own peripheral instances).
