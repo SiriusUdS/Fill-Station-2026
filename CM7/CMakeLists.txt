@@ -90,7 +90,8 @@ set_property(TARGET ${CMAKE_PROJECT_NAME} PROPERTY SOURCES "${MX_SOURCES}")
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user sources here
     app/platform/main.cpp
-    app/logic/fcu_controller.cpp
+    # fcu_controller is now a header-only class template (Controller<S>);
+    # main.cpp instantiates it (Controller<SdCard>). No .cpp to compile.
     app/logic/control/command_handlers/main_handler.cpp
     app/logic/control/command_handlers/ping.cpp
     app/logic/control/command_handlers/execute_ping.cpp
@@ -108,12 +109,11 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     app/platform/communication/spi/spi_irq.cpp
     app/platform/acquisition/adc/ads131m08.cpp
     app/platform/storage/sd_card.cpp
-    app/platform/storage/storage.cpp
     ../stm-2026-common/platform/communication/can/can_dil.cpp
-    # Servo/valve drivers need a TIM peripheral configured in CubeMX
-    # (HAL_TIM_MODULE_ENABLED); re-add once a timer exists:
-    #   ../stm-2026-common/platform/actuation/servomotor/hbl388.cpp
-    #   ../stm-2026-common/platform/actuation/valve/ball_valve.cpp
+    # Fill/Dump servo-actuated ball valves: TIM1 (PE9) + TIM15 (PE6) PWM, with
+    # limit switches on PE2-PE5.
+    ../stm-2026-common/platform/actuation/servomotor/hbl388.cpp
+    ../stm-2026-common/platform/actuation/valve/ball_valve.cpp
 )
 
 # Link directories setup

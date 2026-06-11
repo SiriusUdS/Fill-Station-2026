@@ -10,6 +10,8 @@
 
 #include "fcu_controller.hpp"
 #include "support/fakes.hpp"
+#include "support/fake_storage.hpp"
+#include "support/fake_valve.hpp"
 
 #include "communication/interfaces/can.hpp"
 #include "communication/interfaces/ethernet.hpp"
@@ -66,7 +68,11 @@ CanFrame makeCanFrame(uint8_t sender, uint8_t target, uint8_t messageId,
 
 class FcuControllerTest : public ::testing::Test {
 protected:
-    uint32_t now_ms_ = 0;
+    FakeStorage                                    storage_;
+    FakeValve                                      fill_valve_;
+    FakeValve                                      dump_valve_;
+    logic::fcu::Controller<FakeStorage, FakeValve> controller_{storage_, fill_valve_, dump_valve_};
+    uint32_t                                       now_ms_ = 0;
 
     void SetUp() override
     {
@@ -74,14 +80,14 @@ protected:
         /* Start every test from a cold Backup SRAM so persisted state never
            leaks between tests; init() then commits a fresh INIT. */
         logic::control::persistent_state = logic::control::PersistentState{};
-        logic::fcu::init();
+        controller_.init();
     }
 
     /* Advance the logic one tick with a strictly increasing timestamp. */
-    void step() { logic::fcu::tick(++now_ms_); }
+    void step() { controller_.tick(++now_ms_); }
 
     /* Advance to an absolute timestamp (must be > the current one). */
-    void stepTo(uint32_t now) { logic::fcu::tick(now_ms_ = now); }
+    void stepTo(uint32_t now) { controller_.tick(now_ms_ = now); }
 
     /* The state carried by the most recent heartbeat (only UDP traffic sent). */
     uint8_t lastHeartbeatState() const
@@ -310,7 +316,7 @@ TEST_F(FcuControllerTest, ResumesPersistedStateOnInit)
     /* Simulate a reset while UNSAFE: the blob is already committed in Backup SRAM. */
     logic::control::persistent_state.saveState(logic::control::State::Unsafe);
 
-    logic::fcu::init();  // reboot
+    controller_.init();  // reboot
     step();
     EXPECT_EQ(lastHeartbeatState(), FILLING_STATION_STATE_UNSAFE);
 }
@@ -320,7 +326,7 @@ TEST_F(FcuControllerTest, ColdBootWithInvalidBlobStartsAtInit)
     logic::control::persistent_state.saveState(logic::control::State::Ignite);
     logic::control::persistent_state.magic = 0;  // corrupt => looks like cold garbage
 
-    logic::fcu::init();  // reboot
+    controller_.init();  // reboot
     step();
     EXPECT_EQ(lastHeartbeatState(), FILLING_STATION_STATE_INIT);
 }

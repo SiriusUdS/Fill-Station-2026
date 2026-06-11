@@ -22,20 +22,49 @@
 #include "fdcan.h"
 #include "sdmmc.h"
 #include "spi.h"
+#include "tim.h"
 #include "gpio.h"
 
 #include "communication/ethernet/ethernet.hpp"
 #include "communication/can/can_dil.hpp"
 #include "acquisition/adc/ads131m08.hpp"
+#include "storage/sd_card.hpp"
+#include "actuation/valve/ball_valve.hpp"
 #include "memory/backup_ram.hpp"
 #include "fcu_controller.hpp"
 #include "dil/can_types.h"
 #include "sirius-headers-common/Telecommunication/PacketHeaderVariable.h"   // FILLING_STATION_BOARD_ID
 
+#include <span>
+
 namespace eth        = platform::communication::ethernet;
 namespace can        = platform::communication::can;
 namespace ads131m08  = platform::acquisition::adc::ads131m08;
+namespace valve      = platform::actuation::valve;
 namespace backup_ram = platform::memory::backup_ram;
+
+/* The FCU's two local ball valves: Fill (servo on TIM1_CH1/PE9) and Dump (servo
+   on TIM15_CH2/PE6), each with opened/closed limit switches on PE2-PE5. Brought
+   up in fcuInit() and ticked every loop so their open/close state machines run. */
+static valve::BallValve g_fill_valve;
+static valve::BallValve g_dump_valve;
+
+/* The board's single streaming ADC. Static lifetime: it backs the SPI CS arrays
+   and is reached from the ADC ISRs while acquiring. */
+static ads131m08::Ads131m08 g_ads131;
+
+/* The board's single SD card and the FCU controller built over it. Both pinned in
+   D1 AXI-SRAM: the controller's telemetry double buffer is handed straight to the
+   SDMMC DMA, which cannot reach DTCM. g_card is declared (and so constructed)
+   before g_controller, which holds a reference to it. */
+__attribute__((section(".axisram"))) static platform::storage::SdCard g_card{&hsd2, "0:/"};
+__attribute__((section(".axisram"))) static logic::fcu::Controller<platform::storage::SdCard, valve::BallValve>
+    g_controller{g_card, g_fill_valve, g_dump_valve};
+
+/* ADC ISR -> controller trampoline. The streaming ADC's callback is a fixed
+   void(span) free function carrying no `this`, so forward each conversion to the
+   one controller instance. */
+static void on_adc_sample(std::span<const int32_t> channels) { g_controller.onAdcSample(channels); }
 
 /* DRDY (PE7) data-ready EXTI vector. The handler symbol is fixed by the pin
    group (EXTI lines 5-9), so it is board-specific and lives here; it dispatches
@@ -65,7 +94,10 @@ int main(void)
 
   for (;;)
   {
-    logic::fcu::tick(HAL_GetTick());
+    const uint32_t now = HAL_GetTick();
+    g_fill_valve.tick(now);   // advance each valve's open/close + limit-switch state machine
+    g_dump_valve.tick(now);
+    g_controller.tick(now);
   }
 }
 
@@ -107,6 +139,8 @@ static void stmHalInit(void)
   MX_FDCAN1_Init();
   MX_SPI4_Init();
   MX_SPI6_Init();
+  MX_TIM1_Init();   // Fill valve servo PWM (PE9 / TIM1_CH1)
+  MX_TIM15_Init();  // Dump valve servo PWM (PE6 / TIM15_CH2)
 }
 
 /**
@@ -136,16 +170,56 @@ static void fcuInit(void)
   drdy.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOE, &drdy);
 
-  ads131m08::init({
+  g_ads131.init({
       .hspi      = &hspi4,
       .cs_port   = GPIOE,
       .cs_pin    = GPIO_PIN_15,
       .drdy_pin  = GPIO_PIN_7,
       .drdy_irqn = EXTI9_5_IRQn,
   });
-  ads131m08::start();
+  g_ads131.start();
 
-  logic::fcu::init();
+  /* Bring up the two local ball valves. The 333 Hz (3 ms) servo PWM frequency is
+     owned HERE, not in CubeMX: leave the generated timer at its defaults and set
+     the period in code so it lives in one place. 100 MHz APB2 clock / (PSC 99 + 1)
+     = 1 MHz tick; ARR 2999 -> 3 ms. The UG event reloads the prescaler immediately
+     so the first period is already correct. Servo pulse 1-2 ms = 1000-2000 ticks;
+     tune min/max for the valve's actual travel. */
+  __HAL_TIM_SET_PRESCALER(&htim1,   99);
+  __HAL_TIM_SET_AUTORELOAD(&htim1,  2999);
+  htim1.Instance->EGR = TIM_EGR_UG;   // reload PSC/ARR now (no first-period glitch)
+  __HAL_TIM_SET_PRESCALER(&htim15,  99);
+  __HAL_TIM_SET_AUTORELOAD(&htim15, 2999);
+  htim15.Instance->EGR = TIM_EGR_UG;
+
+  g_fill_valve.init({
+      .servo       = {.htim = &htim1, .channel = TIM_CHANNEL_1,
+                      .min_pulse_ticks = 1000.0F, .max_pulse_ticks = 2000.0F},
+      .open_limit  = {.port = FILL_SWITCH_OPENED_GPIO_Port, .pin = FILL_SWITCH_OPENED_Pin},
+      .close_limit = {.port = FILL_SWITCH_CLOSED_GPIO_Port, .pin = FILL_SWITCH_CLOSED_Pin},
+      .max_transit_timeout_ms = 5000,
+  });
+  g_dump_valve.init({
+      .servo       = {.htim = &htim15, .channel = TIM_CHANNEL_2,
+                      .min_pulse_ticks = 1000.0F, .max_pulse_ticks = 2000.0F},
+      .open_limit  = {.port = DUMP_SWITCH_OPENED_GPIO_Port, .pin = DUMP_SWITCH_OPENED_Pin},
+      .close_limit = {.port = DUMP_SWITCH_CLOSED_GPIO_Port, .pin = DUMP_SWITCH_CLOSED_Pin},
+      .max_transit_timeout_ms = 5000,
+      .opened_switch_ignored  = true,   // no physical open switch on the dump valve
+  });
+
+  /* Safe boot state: drive both valves closed (no flow) before logic starts. */
+  (void)g_fill_valve.close();
+  (void)g_dump_valve.close();
+
+  /* Bring up the FCU controller (this also mounts the SD card via g_card.init()). */
+  g_controller.init();
+
+  /* Connect the streaming ADC to the logic pipeline last: each conversion now
+     invokes g_controller.onAdcSample (via the trampoline) from the ADC ISR,
+     producing one telemetry record per sample. Wired after init() so the logic
+     and SD are ready first. */
+  g_ads131.set_sample_callback(&on_adc_sample);
 }
 
 /**

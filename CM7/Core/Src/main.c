@@ -25,6 +25,7 @@
 #include "fdcan.h"
 #include "sdmmc.h"
 #include "spi.h"
+#include "tim.h"
 #include "gpio.h"
 
 /* Private includes ----------------------------------------------------------*/

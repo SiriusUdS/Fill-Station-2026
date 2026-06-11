@@ -16,9 +16,14 @@
  * the bitfields, then hand reg.all to write_register().
  * ------------------------------------------------------------------------- */
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
+#include <optional>
+#include <span>
 
-#include "stm32h7xx_hal.h"   // SPI_HandleTypeDef, GPIO_TypeDef, IRQn_Type (Config)
+#include "stm32h7xx_hal.h"                   // SPI_HandleTypeDef, GPIO_TypeDef, IRQn_Type (Config)
+#include "communication/interfaces/adc.hpp"  // logic::communication::StreamingAdc contract
 
 namespace platform::acquisition::adc::ads131m08 {
 
@@ -424,29 +429,88 @@ struct Config {
 };
 
 /**
- * @brief  Bind the SPI bus and CS to the device, then configure clock/OSR and
- *         per-channel PGA gain. Blocks until each register write completes (or
- *         times out). Call once at startup, after the SPI peripheral is inited.
+ * @brief  The board's single ADS131M08: a continuous, DRDY-paced, DMA-fed ADC
+ *         that owns its latest-sample storage and models the logic-side
+ *         logic::communication::StreamingAdc contract.
+ *
+ * There is one instance per device (the FCU has exactly one, on SPI4); bring-up
+ * holds it, init()/start() it, and wires its per-sample callback. The HAL-free
+ * contract members (samples(), set_sample_callback()) are what the logic layer
+ * consumes; init()/start()/stop()/write_register() are platform-only.
+ *
+ * Acquisition runs from interrupt context: each DRDY edge kicks one frame, and
+ * the SPI/DMA completion lands in handle_frame(). Those ISR entry points are
+ * dispatched to this instance from the board's free-function EXTI/DMA hooks, so
+ * they are public but are NOT part of the contract — logic never calls them.
  */
-void init(const Config& config);
+class Ads131m08 {
+public:
+    /** @brief Channels the device streams (8-channel part). */
+    static constexpr std::size_t channel_count = 8;
 
-/**
- * @brief  Start DRDY-paced acquisition: register the per-frame parser and arm
- *         the DRDY interrupt. From then on each DRDY edge clocks one frame and
- *         publishes it through logic::communication::adc::samples(), with no
- *         polling. Call after init() and after the board has configured the
- *         DRDY pin as a falling-edge EXTI input.
- */
-void start();
+    Ads131m08() = default;
 
-/** @brief Stop acquisition: disable the DRDY interrupt and unregister the parser. */
-void stop();
+    /* ---- platform-only bring-up ------------------------------------------ */
 
-/**
- * @brief  Write one 16-bit register over the bus. @p value is the .all word of a
- *         REG_* union. Asynchronous: the frame may be dropped (Busy) if a
- *         transfer is already in flight.
- */
-void write_register(uint8_t address, uint16_t value);
+    /**
+     * @brief  Bind the SPI bus and CS to the device, then configure clock/OSR and
+     *         per-channel PGA gain. Blocks until each register write completes (or
+     *         times out). Call once at startup, after the SPI peripheral is inited.
+     */
+    void init(const Config& config);
+
+    /**
+     * @brief  Start DRDY-paced acquisition: route this instance's frames, register
+     *         the per-frame parser and arm the DRDY interrupt. From then on each
+     *         DRDY edge clocks one frame into samples()/the callback, with no
+     *         polling. Call after init() and after the board has configured the
+     *         DRDY pin as a falling-edge EXTI input.
+     */
+    void start();
+
+    /** @brief Stop acquisition: disable the DRDY interrupt and unregister the parser. */
+    void stop();
+
+    /**
+     * @brief  Write one 16-bit register over the bus. @p value is the .all word of a
+     *         REG_* union. Asynchronous: the frame may be dropped (Busy) if a
+     *         transfer is already in flight.
+     */
+    void write_register(uint8_t address, uint16_t value);
+
+    /* ---- logic::communication::StreamingAdc contract --------------------- */
+
+    /**
+     * @brief  The most recent conversion: one signed count per channel (24-bit
+     *         two's complement, sign-extended into int32).
+     * @return A view over this object's storage (valid only until the next
+     *         samples() call), or std::nullopt if no new conversion has completed
+     *         since the last call.
+     */
+    [[nodiscard]] std::optional<std::span<const int32_t>> samples();
+
+    /** @brief Register (or clear, with nullptr) the per-sample callback. */
+    void set_sample_callback(logic::communication::SampleCallback cb);
+
+    /* ---- ISR entry points (platform dispatch; not the contract) ---------- */
+
+    /** @brief Parse one completed SPI frame into the latest sample (DMA ISR). */
+    void handle_frame(std::span<const uint8_t> frame);
+
+    /** @brief On our DRDY edge, kick one frame to clock the channels back (EXTI ISR). */
+    void handle_drdy(uint16_t gpio_pin);
+
+private:
+    Config        cfg_{};
+    GPIO_TypeDef* cs_ports_[1] = {};  /**< Backs BusConfig; instance-lived (instance is static). */
+    uint16_t      cs_pins_[1]  = {};
+    std::array<int32_t, channel_count>   latest_{};
+    volatile bool                        new_       = false;
+    logic::communication::SampleCallback sample_cb_ = nullptr;
+};
+
+// The driver is the logic seam: enforce conformance here so a contract drift is
+// caught in the platform layer rather than at a logic call.
+static_assert(logic::communication::StreamingAdc<Ads131m08>);
 
 } // namespace platform::acquisition::adc::ads131m08

@@ -44,6 +44,9 @@ void SdCard::write(std::span<const uint8_t> data)
     if (status_.bits.state != STORAGE_STATE_ACTIVE) {
         return;  // not ready (init() failed or never ran)
     }
+    if (status_.bits.writeEnabled == 0) {
+        return;  // writing disarmed (default) — intentional no-op, store stays ACTIVE
+    }
 
     const UINT len = static_cast<UINT>(data.size());
     UINT written = 0;

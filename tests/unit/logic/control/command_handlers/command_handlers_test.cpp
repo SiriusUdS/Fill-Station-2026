@@ -43,10 +43,10 @@ Command makeSetState(uint8_t requestedId, uint8_t flags = 0)
     return cmd;
 }
 
-Command makeSetValve(uint8_t action, uint16_t value = 0)
+Command makeSetValve(ValveCommand action, uint8_t value = 0)
 {
     Command cmd = makeCommand(CommandType::SetValvePosition);
-    const SetValvePositionFrame frame{action, 0, value};
+    const SetValvePositionFrame frame{FcuValves::Fill, action, value};
     std::memcpy(cmd.payload.data(), &frame, sizeof(frame));
     return cmd;
 }
@@ -124,17 +124,12 @@ TEST(PingHandler, NonPingIsRejected)
 
 TEST(SetValveHandler, ValidActionIsHandled)
 {
-    EXPECT_TRUE(ch::handleSetValvePosition(makeSetValve(VALVE_OPEN, 1234)));
+    EXPECT_TRUE(ch::handleSetValvePosition(makeSetValve(ValveCommand::Open, 42)));
 }
 
-TEST(SetValveHandler, EmptyActionIsRejected)
+TEST(SetValveHandler, UnknownActionIsRejected)
 {
-    EXPECT_FALSE(ch::handleSetValvePosition(makeSetValve(0)));
-}
-
-TEST(SetValveHandler, CombinedActionIsRejected)
-{
-    EXPECT_FALSE(ch::handleSetValvePosition(makeSetValve(VALVE_OPEN | VALVE_CLOSE)));
+    EXPECT_FALSE(ch::handleSetValvePosition(makeSetValve(static_cast<ValveCommand>(0xFF))));
 }
 
 TEST(SetValveHandler, WrongTypeIsRejected)

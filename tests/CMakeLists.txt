@@ -67,16 +67,30 @@ set(COMMAND_HANDLER_SOURCES
 add_executable(fcu_controller_test
     unit/logic/fcu_controller_test.cpp
     ${STMCOMMON}/tests/support/fakes.cpp
-    ${REPO_ROOT}/CM7/app/logic/fcu_controller.cpp
     ${STMCOMMON}/logic/control/persistent_state.cpp
 )
 target_include_directories(fcu_controller_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}         # so #include "support/fake_storage.hpp" resolves
     ${STMCOMMON}/tests                  # so #include "support/fakes.hpp" resolves
-    ${REPO_ROOT}/CM7/app/logic          # app logic + its interface headers (ethernet.hpp)
+    ${REPO_ROOT}/CM7/app/logic          # app logic (now header-only Controller<S>) + interface headers
     ${STMCOMMON_LOGIC_INCLUDE_DIRS}     # exported by the submodule's test build
 )
 target_link_libraries(fcu_controller_test PRIVATE GTest::gtest_main)
 gtest_discover_tests(fcu_controller_test PROPERTIES LABELS "unit")
+
+# --- ADC seam test (unit) -------------------------------------------------
+# Header-only on the logic side (the Adc/StreamingAdc concepts + fake ADCs), so
+# the test compiles just its own TU; the platform Ads131m08 is firmware-only (HAL).
+add_executable(adc_test
+    unit/logic/communication/adc_test.cpp
+)
+target_include_directories(adc_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}             # so #include "support/fake_adc.hpp" resolves
+    ${REPO_ROOT}/CM7/app/logic              # the ADC seam header
+    ${STMCOMMON_LOGIC_INCLUDE_DIRS}
+)
+target_link_libraries(adc_test PRIVATE GTest::gtest_main)
+gtest_discover_tests(adc_test PROPERTIES LABELS "unit")
 
 # --- Command handlers test (unit) -----------------------------------------
 # Covers CM7/app/logic/control/command_handlers. SetState commits through the
@@ -108,3 +122,20 @@ target_include_directories(ethernet_state_change_test PRIVATE
 )
 target_link_libraries(ethernet_state_change_test PRIVATE GTest::gtest_main)
 gtest_discover_tests(ethernet_state_change_test PROPERTIES LABELS "integration")
+
+# --- UDP SetValvePosition -> valve actuation (integration) ----------------
+# A raw UDP datagram through the real Controller drives the injected (fake)
+# valves: open / close / set-% for both Fill and Dump.
+add_executable(valve_actuation_test
+    integration/valve_actuation_test.cpp
+    ${STMCOMMON}/tests/support/fakes.cpp
+    ${STMCOMMON}/logic/control/persistent_state.cpp
+)
+target_include_directories(valve_actuation_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}         # support/fake_storage.hpp, support/fake_valve.hpp
+    ${STMCOMMON}/tests                  # support/fakes.hpp
+    ${REPO_ROOT}/CM7/app/logic          # fcu_controller.hpp (header-only Controller<S,V>)
+    ${STMCOMMON_LOGIC_INCLUDE_DIRS}
+)
+target_link_libraries(valve_actuation_test PRIVATE GTest::gtest_main)
+gtest_discover_tests(valve_actuation_test PROPERTIES LABELS "integration")

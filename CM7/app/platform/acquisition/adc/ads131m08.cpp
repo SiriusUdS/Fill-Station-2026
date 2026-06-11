@@ -1,11 +1,12 @@
 /**
  ******************************************************************************
  * @file    acquisition/adc/ads131m08.cpp
- * @brief   TI ADS131M08 8-channel 24-bit ADC driver. Binds the SPI bus and CS,
+ * @brief   TI ADS131M08 8-channel 24-bit ADC driver. One Ads131m08 object per
+ *          device, owning its latest-sample storage and modelling the logic-side
+ *          logic::communication::StreamingAdc contract. Binds the SPI bus and CS,
  *          configures clock/OSR and per-channel PGA gain, and acquires
  *          DRDY-paced: each DRDY edge kicks one frame DMA and the completion ISR
- *          parses the channel words into per-channel counts, published through
- *          the logic ADC seam (logic::communication::adc::samples).
+ *          parses the channel words into per-channel counts.
  *
  *          Board wiring (SPI handle, CS, DRDY pin/IRQ) is supplied by bring-up
  *          through Config - the driver hardcodes no pin numbers, so it ports to
@@ -14,13 +15,20 @@
  *          handler (its symbol is fixed by the pin group); this driver only arms
  *          the line (NVIC) in start() and filters HAL_GPIO_EXTI_Callback by the
  *          configured DRDY pin.
+ *
+ *          The board runs a single ADS131M08, so the ISR hooks (the SPI/DMA frame
+ *          completion and the DRDY EXTI callback, both fixed-signature free
+ *          functions that carry no `this`) dispatch to the one live instance
+ *          through s_instance, set while acquisition is running (start()..stop()).
+ *          Supporting several would mean routing by DRDY pin / active transfer,
+ *          but the DMA bus serialises transfers anyway, so we keep it to one until
+ *          a second device actually exists.
  ******************************************************************************
  */
 
 #include "acquisition/adc/ads131m08.hpp"
 #include "communication/spi/spi_dil.hpp"      // platform SPI seam: init/transfer/receive
 #include "communication/spi/spi_dma.hpp"      // dma::set_frame_callback (per-frame parse)
-#include "communication/interfaces/adc.hpp"   // logic ADC seam this driver defines
 
 #include <array>
 #include <cstddef>
@@ -31,28 +39,16 @@
 #include "stm32h7xx_hal.h"   // HAL_GPIO_Init / HAL_NVIC_* / HAL_GetTick
 
 namespace spi = platform::communication::spi;
-namespace adc_if = logic::communication::adc;
 using spi::SpiBus;
 using spi::SpiError;
-
-namespace {
-
-// Latest conversion, one signed count per channel. Written by the DMA ISR
-// (on_frame) and read by the ADC seam samples(); single-producer (ISR) /
-// single-consumer (caller). At file scope so both the driver and the seam
-// definition below can reach it. samples() returns a view over s_latest while
-// the ISR may overwrite it, so callers consume it promptly.
-std::array<int32_t, adc_if::CHANNEL_COUNT> s_latest{};
-volatile bool s_new = false;
-
-// Optional per-sample callback, invoked from on_frame (ISR) after parsing.
-adc_if::SampleCallback s_sample_cb = nullptr;
-
-} // namespace
 
 namespace platform::acquisition::adc::ads131m08 {
 
 namespace {
+
+// The single live device while acquisition is running (start()..stop()), so the
+// fixed-signature ISR hooks below can reach the instance that owns the sample.
+Ads131m08* s_instance = nullptr;
 
 // The ADS131M08 frames live on the DMA SPI transport (Spi4 selects DMA, the
 // peripheral handle itself comes from Config). Not a board pin.
@@ -69,12 +65,6 @@ constexpr uint32_t WRITE_TIMEOUT_MS = 10;
 // channel, then a 3-byte CRC word - MESSAGE_LENGTH (30) bytes total.
 constexpr std::size_t WORD_BYTES   = 3;
 constexpr std::size_t STATUS_BYTES = WORD_BYTES;
-
-// Board wiring captured at init(). The CS arrays back the BusConfig (which keeps
-// pointers into them), so they have static lifetime.
-Config        s_cfg{};
-GPIO_TypeDef* s_cs_ports[1] = {};
-uint16_t      s_cs_pins[1]  = {};
 
 // SPI command/register word: write the bitfields, then ship the two bytes MSB
 // first. Layout relies on the little-endian ordering of the command word.
@@ -132,49 +122,63 @@ int32_t sign_extend_24(uint32_t raw)
                                : static_cast<int32_t>(raw);
 }
 
-// Per-frame completion callback (DMA ISR context): parse the channel words out
-// of one frame into s_latest. Kept short - no SPI or blocking work here.
+// Per-frame completion hook (DMA ISR context): forward to the live instance.
 void on_frame(std::span<const uint8_t> frame)
 {
-    const std::size_t need = STATUS_BYTES + adc_if::CHANNEL_COUNT * WORD_BYTES;
-    if (frame.size() < need) {
-        return;  // short frame; leave the last good sample in place
-    }
-    for (std::size_t i = 0; i < adc_if::CHANNEL_COUNT; ++i) {
-        const uint8_t* w = frame.data() + STATUS_BYTES + i * WORD_BYTES;
-        const uint32_t raw = (static_cast<uint32_t>(w[0]) << 16) |
-                             (static_cast<uint32_t>(w[1]) << 8) |
-                              static_cast<uint32_t>(w[2]);
-        s_latest[i] = sign_extend_24(raw);
-    }
-    s_new = true;
-
-    if (s_sample_cb != nullptr) {
-        s_sample_cb(std::span<const int32_t>(s_latest.data(), s_latest.size()));
+    if (s_instance != nullptr) {
+        s_instance->handle_frame(frame);
     }
 }
 
 } // namespace
 
-void write_register(uint8_t address, uint16_t value)
+void Ads131m08::handle_frame(std::span<const uint8_t> frame)
+{
+    const std::size_t need = STATUS_BYTES + channel_count * WORD_BYTES;
+    if (frame.size() < need) {
+        return;  // short frame; leave the last good sample in place
+    }
+    for (std::size_t i = 0; i < channel_count; ++i) {
+        const uint8_t* w = frame.data() + STATUS_BYTES + i * WORD_BYTES;
+        const uint32_t raw = (static_cast<uint32_t>(w[0]) << 16) |
+                             (static_cast<uint32_t>(w[1]) << 8) |
+                              static_cast<uint32_t>(w[2]);
+        latest_[i] = sign_extend_24(raw);
+    }
+    new_ = true;
+
+    if (sample_cb_ != nullptr) {
+        sample_cb_(std::span<const int32_t>(latest_.data(), latest_.size()));
+    }
+}
+
+void Ads131m08::handle_drdy(uint16_t gpio_pin)
+{
+    if (gpio_pin == cfg_.drdy_pin) {
+        (void)spi::transfer(BUS, std::span<const uint8_t>{});
+    }
+}
+
+void Ads131m08::write_register(uint8_t address, uint16_t value)
 {
     const std::array<uint8_t, 6> frame = make_write_frame(address, value);
     (void)spi::transfer(BUS, frame);
 }
 
-void init(const Config& config)
+void Ads131m08::init(const Config& config)
 {
-    s_cfg         = config;
-    s_cs_ports[0] = config.cs_port;
-    s_cs_pins[0]  = config.cs_pin;
+    cfg_         = config;
+    cs_ports_[0] = config.cs_port;
+    cs_pins_[0]  = config.cs_pin;
 
     // Bind the SPI bus to the ADS131M08 frame size and CS before issuing any
     // command. The driver drives CS low around each command and acquisition
-    // frame.
+    // frame. cs_ports_/cs_pins_ back the BusConfig pointers, so they must outlive
+    // the bus binding - they do, the instance has static lifetime.
     spi::BusConfig bus{};
     bus.hspi         = config.hspi;
-    bus.cs_ports     = s_cs_ports;
-    bus.cs_pins      = s_cs_pins;
+    bus.cs_ports     = cs_ports_;
+    bus.cs_pins      = cs_pins_;
     bus.cs_num       = 1;
     bus.frame_length = MESSAGE_LENGTH;
     bus.manage_cs    = true;
@@ -202,53 +206,48 @@ void init(const Config& config)
     write_register_blocking(REG_ADDR_GAIN2, GAIN_REG2.all);
 }
 
-void start()
+void Ads131m08::start()
 {
-    // Parse each completed frame straight from the SPI completion ISR.
+    // Route this instance's ISR frames, then parse each completed frame straight
+    // from the SPI completion ISR.
+    s_instance = this;
     spi::dma::set_frame_callback(&on_frame);
 
     // The board has already configured the DRDY pin as a falling-edge EXTI
     // input; arm it. Each edge then kicks one frame via HAL_GPIO_EXTI_Callback.
-    HAL_NVIC_SetPriority(s_cfg.drdy_irqn, DRDY_IRQ_PRIO, 0);
-    HAL_NVIC_EnableIRQ(s_cfg.drdy_irqn);
+    HAL_NVIC_SetPriority(cfg_.drdy_irqn, DRDY_IRQ_PRIO, 0);
+    HAL_NVIC_EnableIRQ(cfg_.drdy_irqn);
 }
 
-void stop()
+void Ads131m08::stop()
 {
-    HAL_NVIC_DisableIRQ(s_cfg.drdy_irqn);
+    HAL_NVIC_DisableIRQ(cfg_.drdy_irqn);
     spi::dma::set_frame_callback(nullptr);
+    s_instance = nullptr;
+}
+
+std::optional<std::span<const int32_t>> Ads131m08::samples()
+{
+    if (!new_) {
+        return std::nullopt;
+    }
+    new_ = false;
+    return std::span<const int32_t>(latest_.data(), latest_.size());
+}
+
+void Ads131m08::set_sample_callback(logic::communication::SampleCallback cb)
+{
+    sample_cb_ = cb;
 }
 
 // DRDY edge dispatch. The board's EXTI vector handler calls
-// HAL_GPIO_EXTI_IRQHandler, which lands here; kick one NULL frame to clock the
-// channels back when it is our DRDY pin.
+// HAL_GPIO_EXTI_IRQHandler, which lands here; forward to the live instance,
+// which kicks one NULL frame when it is its DRDY pin.
 extern "C" void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
-    if (GPIO_Pin == s_cfg.drdy_pin) {
-        (void)spi::transfer(BUS, std::span<const uint8_t>{});
+    if (s_instance != nullptr) {
+        s_instance->handle_drdy(GPIO_Pin);
     }
 }
 
 } // namespace platform::acquisition::adc::ads131m08
-
-/* -------------------------------------------------------------------------- */
-/* Logic-side seam: definition for communication/interfaces/adc.hpp           */
-/* -------------------------------------------------------------------------- */
-
-namespace logic::communication::adc {
-
-std::optional<std::span<const int32_t>> samples()
-{
-    if (!s_new) {
-        return std::nullopt;
-    }
-    s_new = false;
-    return std::span<const int32_t>(s_latest.data(), s_latest.size());
-}
-
-void set_sample_callback(SampleCallback cb)
-{
-    s_sample_cb = cb;
-}
-
-} // namespace logic::communication::adc

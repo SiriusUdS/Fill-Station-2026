@@ -57,8 +57,20 @@ void Error_Handler(void);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
+#define FILL_SWITCH_CLOSED_Pin GPIO_PIN_2
+#define FILL_SWITCH_CLOSED_GPIO_Port GPIOE
+#define FILL_SWITCH_OPENED_Pin GPIO_PIN_3
+#define FILL_SWITCH_OPENED_GPIO_Port GPIOE
+#define DUMP_SWITCH_CLOSED_Pin GPIO_PIN_4
+#define DUMP_SWITCH_CLOSED_GPIO_Port GPIOE
+#define DUMP_SWITCH_OPENED_Pin GPIO_PIN_5
+#define DUMP_SWITCH_OPENED_GPIO_Port GPIOE
+#define PWM_VALVE_DUMP_Pin GPIO_PIN_6
+#define PWM_VALVE_DUMP_GPIO_Port GPIOE
 #define ADS_DRDY_Pin GPIO_PIN_7
 #define ADS_DRDY_GPIO_Port GPIOE
+#define PWM_VALVE_FILL_Pin GPIO_PIN_9
+#define PWM_VALVE_FILL_GPIO_Port GPIOE
 #define ADS_SCK_SPI4_Pin GPIO_PIN_12
 #define ADS_SCK_SPI4_GPIO_Port GPIOE
 #define ADS_MISO_SPI4_Pin GPIO_PIN_13
