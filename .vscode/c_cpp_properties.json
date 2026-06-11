@@ -17,6 +17,10 @@
             "intelliSenseMode": "linux-gcc-x64",
             "cStandard": "c17",
             "cppStandard": "gnu++17"
+        },
+        {
+            "name": "STM32_src",
+            "compileCommands": "${workspaceFolder}/src/boards/fcu/CM7/build/compile_commands.json"
         }
     ],
     "version": 4

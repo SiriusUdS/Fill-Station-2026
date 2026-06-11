@@ -10,7 +10,7 @@
             "runEntry": "main",
             "imagesAndSymbols": [
                 {
-                    "imageFileName": "${workspaceFolder}/boards/fcu/CM7/build/fcu_CM7.elf"
+                    "imageFileName": "${workspaceFolder}/src/boards/fcu/CM7/build/fcu_CM7.elf"
                 }
             ],
             "verbose": false

@@ -37,8 +37,8 @@ set(REPO_ROOT ${CMAKE_SOURCE_DIR})
 # CubeMX orchestrator under boards/<board>/ is left for CubeMX regen and is not used
 # as the build entry point).
 ExternalProject_Add(${BOARD}_CM7
-    BINARY_DIR                  ${CMAKE_SOURCE_DIR}/boards/${BOARD}/CM7/build
-    SOURCE_DIR                  ${CMAKE_SOURCE_DIR}/boards/${BOARD}/CM7
+    BINARY_DIR                  ${CMAKE_SOURCE_DIR}/src/boards/${BOARD}/CM7/build
+    SOURCE_DIR                  ${CMAKE_SOURCE_DIR}/src/boards/${BOARD}/CM7
     PREFIX                      ${BOARD}
     CONFIGURE_HANDLED_BY_BUILD  true
     INSTALL_COMMAND             ""

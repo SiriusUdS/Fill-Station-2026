@@ -1,12 +1,12 @@
 CompileFlags:
-  CompilationDatabase: boards/fcu/CM7/build
+  CompilationDatabase: src/boards/fcu/CM7/build
 
 ---
 
 If:
-  PathMatch: boards/ecu/.*
+  PathMatch: src/boards/ecu/.*
 CompileFlags:
-  CompilationDatabase: boards/ecu/CM7/build
+  CompilationDatabase: src/boards/ecu/CM7/build
 
 ---
 
@@ -28,3 +28,10 @@ CompileFlags:
   CompilationDatabase: CM7/build
 If:
   PathMatch: CM7/.*
+
+---
+
+CompileFlags:
+  CompilationDatabase: src/boards/fcu/CM7/build
+If:
+  PathMatch: src/.*
