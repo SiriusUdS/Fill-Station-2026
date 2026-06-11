@@ -54,8 +54,7 @@ function(run_host_tests TESTS_DIR)
         set(_mingw_candidates
             "$ENV{MINGW_DIR}/bin"
             "${MINGW_DIR}/bin"
-            "${TESTS_DIR}/../tools/mingw64/bin"        # parent layout: <repo>/tests/../tools
-            "${TESTS_DIR}/../../tools/mingw64/bin")     # nested submodule: <repo>/stm-2026-common/tests/../../tools
+            "${TESTS_DIR}/../../../tools/mingw64/bin")  # repo tools/ from src/app/tests
         set(_mingw_bin "")
         foreach(c ${_mingw_candidates})
             if(c AND EXISTS "${c}/g++.exe")

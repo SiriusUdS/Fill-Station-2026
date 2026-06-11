@@ -3,11 +3,12 @@ mx.scratch
 !.settings
 
 # CM4 core is unused (CM7-only build). CubeMX may regenerate CM4/ from the dual-core
-# .ioc; keep it untracked and unbuilt. (Phase 3: also boards/*/CM4/.)
+# .ioc; keep it untracked and unbuilt. Each board's project lives at src/boards/<board>/.
 CM4/
+src/boards/*/CM4/
 
-# Portable host toolchain for running logic unit tests (see tests/README.md)
+# Portable host toolchain (MinGW-w64) for running logic unit tests.
 tools/
 
-# Host test build output
-tests/build/
+# GoogleTest is fetched on demand, not committed.
+src/app/tests/third_party/
