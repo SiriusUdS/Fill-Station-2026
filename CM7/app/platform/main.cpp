@@ -35,8 +35,6 @@
 #include "dil/can_types.h"
 #include "sirius-headers-common/Telecommunication/PacketHeaderVariable.h"   // FILLING_STATION_BOARD_ID
 
-#include <span>
-
 namespace eth        = platform::communication::ethernet;
 namespace can        = platform::communication::can;
 namespace ads131m08  = platform::acquisition::adc::ads131m08;
@@ -58,13 +56,25 @@ static ads131m08::Ads131m08 g_ads131;
    SDMMC DMA, which cannot reach DTCM. g_card is declared (and so constructed)
    before g_controller, which holds a reference to it. */
 __attribute__((section(".axisram"))) static platform::storage::SdCard g_card{&hsd2, "0:/"};
-__attribute__((section(".axisram"))) static logic::fcu::Controller<platform::storage::SdCard, valve::BallValve>
-    g_controller{g_card, g_fill_valve, g_dump_valve};
+__attribute__((section(".axisram")))
+static logic::fcu::Controller<platform::storage::SdCard, valve::BallValve, ads131m08::Ads131m08>
+    g_controller{g_card, g_fill_valve, g_dump_valve, g_ads131};
 
-/* ADC ISR -> controller trampoline. The streaming ADC's callback is a fixed
-   void(span) free function carrying no `this`, so forward each conversion to the
-   one controller instance. */
-static void on_adc_sample(std::span<const int32_t> channels) { g_controller.onAdcSample(channels); }
+/* Record-production timer (TIM6) ISR -> controller. TIM6 fires at a fixed cadence
+   (set in fcuInit), decoupled from the ADC's DRDY rate: each tick drains every
+   conversion the ADC has queued in its ring and emits one telemetry record per
+   conversion (or a filler when the ADC is silent). */
+extern "C" void TIM6_DAC_IRQHandler(void)
+{
+  HAL_TIM_IRQHandler(&htim6);
+}
+
+extern "C" void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef* htim)
+{
+  if (htim->Instance == TIM6) {
+    g_controller.produceRecord(HAL_GetTick());
+  }
+}
 
 /* DRDY (PE7) data-ready EXTI vector. The handler symbol is fixed by the pin
    group (EXTI lines 5-9), so it is board-specific and lives here; it dispatches
@@ -141,6 +151,7 @@ static void stmHalInit(void)
   MX_SPI6_Init();
   MX_TIM1_Init();   // Fill valve servo PWM (PE9 / TIM1_CH1)
   MX_TIM15_Init();  // Dump valve servo PWM (PE6 / TIM15_CH2)
+  MX_TIM6_Init();   // record-production cadence (drives g_controller.produceRecord)
 }
 
 /**
@@ -162,8 +173,8 @@ static void fcuInit(void)
 
   /* Bring up the ADS131M08 ADC. The board owns the DRDY (PE7) pin: configure it
      as a falling-edge EXTI input here, then let the driver arm it. CS is PE15.
-     The ADC then streams DRDY-paced conversions to the logic layer through
-     logic::communication::adc::samples(). */
+     Each DRDY-paced conversion is pushed into the driver's ring; the controller's
+     record timer drains it (see produceRecord). */
   GPIO_InitTypeDef drdy = {};
   drdy.Pin  = GPIO_PIN_7;
   drdy.Mode = GPIO_MODE_IT_FALLING;
@@ -202,10 +213,12 @@ static void fcuInit(void)
   g_dump_valve.init({
       .servo       = {.htim = &htim15, .channel = TIM_CHANNEL_2,
                       .min_pulse_ticks = 1000.0F, .max_pulse_ticks = 2000.0F},
-      .open_limit  = {.port = DUMP_SWITCH_OPENED_GPIO_Port, .pin = DUMP_SWITCH_OPENED_Pin},
+      // No physical open switch on the dump valve (no DUMP_SWITCH_OPENED pin): the
+      // descriptor is null and tick() never reads it (opened_switch_ignored).
+      .open_limit  = {.port = nullptr, .pin = 0},
       .close_limit = {.port = DUMP_SWITCH_CLOSED_GPIO_Port, .pin = DUMP_SWITCH_CLOSED_Pin},
       .max_transit_timeout_ms = 5000,
-      .opened_switch_ignored  = true,   // no physical open switch on the dump valve
+      .opened_switch_ignored  = true,
   });
 
   /* Safe boot state: drive both valves closed (no flow) before logic starts. */
@@ -215,11 +228,20 @@ static void fcuInit(void)
   /* Bring up the FCU controller (this also mounts the SD card via g_card.init()). */
   g_controller.init();
 
-  /* Connect the streaming ADC to the logic pipeline last: each conversion now
-     invokes g_controller.onAdcSample (via the trampoline) from the ADC ISR,
-     producing one telemetry record per sample. Wired after init() so the logic
-     and SD are ready first. */
-  g_ads131.set_sample_callback(&on_adc_sample);
+  /* Start the record-production timer last, so records only flow once the logic
+     and SD are ready. The 2 kHz (0.5 ms) cadence is owned HERE, not in CubeMX:
+     leave the generated TIM6 at its defaults and set the period in code so it
+     lives in one place. 100 MHz APB1 timer clock / (PSC 99 + 1) = 1 MHz tick;
+     ARR 499 -> 0.5 ms = 2 kHz. The UG event reloads PSC/ARR immediately. This is
+     the comms/save cadence, decoupled from the ADC's DRDY rate: each tick drains
+     the ADC ring and produces one record per queued conversion. */
+  __HAL_TIM_SET_PRESCALER(&htim6,  99);
+  __HAL_TIM_SET_AUTORELOAD(&htim6, 499);
+  htim6.Instance->EGR = TIM_EGR_UG;          // reload PSC/ARR now (no first-period glitch)
+  __HAL_TIM_CLEAR_FLAG(&htim6, TIM_FLAG_UPDATE);  // UG set the flag; clear so we don't fire immediately
+  HAL_NVIC_SetPriority(TIM6_DAC_IRQn, 6, 0);
+  HAL_NVIC_EnableIRQ(TIM6_DAC_IRQn);
+  HAL_TIM_Base_Start_IT(&htim6);
 }
 
 /**

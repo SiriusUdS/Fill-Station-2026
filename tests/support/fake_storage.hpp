@@ -5,14 +5,12 @@
  *
  * Injected into Controller<FakeStorage> in place of the SD card: captures every
  * write() block so tests can assert what was persisted, and exposes a scriptable
- * status() so tests can drive the storage-health telemetry flag. Because the
- * contract is structural, the controller template instantiates on this directly
- * — no separate link, no HAL/FatFs.
+ * info() so tests can drive the storage-health telemetry. Because the contract
+ * is structural, the controller template instantiates on this directly — no
+ * separate link, no HAL/FatFs.
  * ------------------------------------------------------------------------- */
 
-#include "storage/interfaces/storage.hpp"
-
-#include "sirius-headers-common/Storage/StorageState.h"   // STORAGE_STATE_* (to script status)
+#include "storage/interfaces/storage.hpp"   // logic::storage::Storage + StorageInfo
 
 #include <cstdint>
 #include <span>
@@ -21,7 +19,7 @@
 /** @brief In-memory stand-in for the backing store (models logic::storage::Storage). */
 struct FakeStorage {
     /* ---- inputs the test scripts ---- */
-    StorageStatus status_value{};   /**< Returned verbatim by status(); script .bits.state. */
+    StorageInfo info_value{};   /**< Returned verbatim by info(); script .state / .status. */
 
     /* ---- outputs the test inspects ---- */
     int                               init_calls = 0;
@@ -34,7 +32,7 @@ struct FakeStorage {
         writes.emplace_back(data.begin(), data.end());
     }
 
-    [[nodiscard]] StorageStatus status() const { return status_value; }
+    [[nodiscard]] StorageInfo info() const { return info_value; }
 };
 
 // Same compile-time guarantee the SD driver carries: the double really models

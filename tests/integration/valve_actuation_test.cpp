@@ -12,6 +12,7 @@
 #include "support/fakes.hpp"
 #include "support/fake_storage.hpp"
 #include "support/fake_valve.hpp"
+#include "support/fake_adc.hpp"
 
 #include "command/command.hpp"             // CommandType
 #include "command/set_valve_position.hpp"  // SetValvePositionFrame, ValveCommand
@@ -49,11 +50,13 @@ std::vector<uint8_t> makeValveCommand(FcuValves valve, ValveCommand action, uint
 
 class ValveActuation : public ::testing::Test {
 protected:
-    FakeStorage                                    storage_;
-    FakeValve                                      fill_valve_;
-    FakeValve                                      dump_valve_;
-    logic::fcu::Controller<FakeStorage, FakeValve> controller_{storage_, fill_valve_, dump_valve_};
-    uint32_t                                       now_ms_ = 0;
+    FakeStorage      storage_;
+    FakeValve        fill_valve_;
+    FakeValve        dump_valve_;
+    FakeStreamingAdc adc_;
+    logic::fcu::Controller<FakeStorage, FakeValve, FakeStreamingAdc>
+                     controller_{storage_, fill_valve_, dump_valve_, adc_};
+    uint32_t         now_ms_ = 0;
 
     void SetUp() override
     {

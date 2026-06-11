@@ -3,18 +3,17 @@
  * StreamingAdc).
  *
  * Demonstrates the refinement: generic logic templated on the BASE Adc works
- * against both a polled double and a streaming one (StreamingAdc subsumes Adc),
- * while logic that needs the high-rate PUSH is templated on StreamingAdc and can
- * only bind to a device that offers a callback. No HAL, no separate link.
+ * against both a polled double and a streaming one (StreamingAdc subsumes Adc) by
+ * reading info(), while logic that needs every conversion is templated on
+ * StreamingAdc and drains the ring through pop() — which the pull-only device does
+ * not offer, so it will not compile against it. No HAL, no separate link.
  * ------------------------------------------------------------------------- */
 
 #include "communication/interfaces/adc.hpp"
 #include "support/fake_adc.hpp"
 
-#include <array>
 #include <cstdint>
 #include <optional>
-#include <span>
 #include <vector>
 
 #include "gtest/gtest.h"
@@ -24,53 +23,60 @@ using logic::communication::StreamingAdc;
 
 namespace {
 
-/* Base-contract consumer: pull the latest first-channel reading from ANY ADC. */
-template <Adc A>
-std::optional<int32_t> firstChannel(A& adc)
+// Build an AdcInfo whose first channel carries `ch0` (the rest zero).
+AdcInfo make_info(int32_t ch0)
 {
-    if (auto s = adc.samples()) return (*s)[0];
-    return std::nullopt;
+    AdcInfo info{};
+    info.state              = AdcState::Streaming;
+    info.status.initialized = 1u;
+    info.status.data_valid  = 1u;
+    info.channels[0]        = ch0;
+    return info;
 }
 
-TEST(AdcSeam, BaseConsumerPullsFromAPolledAdc)
+/* Base-contract consumer: read the latest first-channel reading from ANY ADC. */
+template <Adc A>
+int32_t firstChannel(A& adc)
+{
+    return adc.info().channels[0];
+}
+
+TEST(AdcSeam, BaseConsumerReadsInfoFromAPolledAdc)
 {
     FakeAdc adc;
-    const std::array<int32_t, 4> conv{11, 22, 33, 44};
-    adc.push(conv);
+    adc.set(make_info(11));
 
     EXPECT_EQ(firstChannel(adc), 11);
-    EXPECT_EQ(firstChannel(adc), std::nullopt);  // consumed; nothing new
 }
 
 TEST(AdcSeam, BaseConsumerAlsoWorksOnAStreamingAdc)
 {
     // StreamingAdc subsumes Adc: the same generic code binds to it unchanged.
     FakeStreamingAdc adc;
-    const std::array<int32_t, 8> conv{7, 0, 0, 0, 0, 0, 0, 0};
-    adc.feed(conv);
+    adc.push(make_info(7));
 
     EXPECT_EQ(firstChannel(adc), 7);
 }
 
-/* Streaming-only consumer: register a per-sample sink. Constrained on
-   StreamingAdc, so it will not compile against a pull-only device. */
-std::vector<int32_t> g_sink;  // the test's stand-in for the telemetry pipeline
-void sampleSink(std::span<const int32_t> channels) { g_sink.push_back(channels[0]); }
-
+/* Streaming-only consumer: drain the ring. Constrained on StreamingAdc, so it
+   will not compile against a pull-only device. */
 template <StreamingAdc A>
-void attachSink(A& adc) { adc.set_sample_callback(&sampleSink); }
-
-TEST(AdcSeam, StreamingConsumerReceivesEveryPushedSample)
+std::vector<int32_t> drain(A& adc)
 {
-    g_sink.clear();
+    std::vector<int32_t> out;
+    while (auto s = adc.pop()) out.push_back(s->channels[0]);
+    return out;
+}
+
+TEST(AdcSeam, StreamingConsumerDrainsEveryQueuedConversion)
+{
     FakeStreamingAdc adc;
-    attachSink(adc);
+    adc.push(make_info(1));
+    adc.push(make_info(2));
+    adc.push(make_info(3));
 
-    adc.feed(std::array<int32_t, 8>{1, 0, 0, 0, 0, 0, 0, 0});
-    adc.feed(std::array<int32_t, 8>{2, 0, 0, 0, 0, 0, 0, 0});
-    adc.feed(std::array<int32_t, 8>{3, 0, 0, 0, 0, 0, 0, 0});
-
-    EXPECT_EQ(g_sink, (std::vector<int32_t>{1, 2, 3}));
+    EXPECT_EQ(drain(adc), (std::vector<int32_t>{1, 2, 3}));
+    EXPECT_EQ(drain(adc), std::vector<int32_t>{});  // ring emptied; nothing left
 }
 
 /* Compile-time guarantees that back the runtime behaviour above. */

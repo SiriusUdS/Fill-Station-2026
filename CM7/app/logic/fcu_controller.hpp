@@ -7,9 +7,9 @@
 #include <span>
 #include <type_traits>
 
-#include "storage/interfaces/storage.hpp"            // logic::storage::Storage (injected dependency)
+#include "storage/interfaces/storage.hpp"            // logic::storage::Storage + StorageInfo (injected dependency)
 #include "actuation/interfaces/valve.hpp"            // logic::actuation::Valve + ValveState (injected)
-#include "sirius-headers-common/Storage/StorageState.h"  // STORAGE_STATE_ACTIVE (storage-health flag)
+#include "communication/interfaces/adc.hpp"          // logic::communication::StreamingAdc (injected)
 #include "communication/interfaces/ethernet.hpp"     // logic::communication::udp + Endpoint
 #include "communication/interfaces/can.hpp"          // logic::communication::can + CanFrame
 #include "control/persistent_state.hpp"              // Backup-SRAM state snapshot
@@ -29,16 +29,16 @@
 /* ------------------------------------------------------------------------- *
  * FCU filling-station state machine (HAL-free), as a class template.
  *
- * Controller<S> is parameterised on the backing store S (any logic::storage::
- * Storage): it holds the store by reference and calls it directly (write/status),
- * so error handling is inline and the contract is explicit. Storage is the FCU's
- * one *held* peripheral; the streaming ADC pushes in through onAdcSample (wired
- * by bring-up as a callback), and valves are commanded over CAN - neither is a
- * template parameter, by design (held drivers are parameters, push/remote ones
- * are not).
+ * Controller<S, V, A> is parameterised on its held drivers: the backing store S
+ * (any logic::storage::Storage), the valve type V (logic::actuation::Valve, both
+ * Fill and Dump), and the streaming ADC A (logic::communication::StreamingAdc).
+ * It holds each by reference and calls it directly, so error handling is inline
+ * and the contract is explicit. The ADC's DRDY ISR fills its ring; the controller
+ * drains it on its own cadence in produceRecord() (driven by a dedicated record
+ * timer), so capture is decoupled from the save/comms rate.
  *
- * Bring-up owns the one instance (Controller<SdCard>) and the test owns
- * Controller<FakeStorage>; the implementation lives in fcu_controller.tpp.
+ * Bring-up owns the one instance (Controller<SdCard, BallValve, Ads131m08>) and
+ * the test owns Controller<Fake...>; the implementation lives in fcu_controller.tpp.
  *
  * The telemetry double buffer is a member (log_); in firmware the whole instance
  * is placed in D1 AXI-SRAM (see main.cpp) because the SD write hands a half
@@ -59,15 +59,9 @@ inline constexpr std::size_t REQUEST_STATE_OFFSET_BYTES = 15;  // requested stat
    to the GS while the producer fills the other half. */
 inline constexpr std::size_t LOG_HALF_BYTES = 4096;
 
-/* If no ADC sample arrives for this long, the ADC is presumed dead and the main
-   loop produces fallback records (flagged) so logging/telemetry keep flowing. */
-inline constexpr uint32_t ADC_TIMEOUT_MS     = 10;   // > worst-case main-loop stall (SD flush)
-inline constexpr uint32_t FALLBACK_PERIOD_MS = 1;    // fallback record cadence while ADC is down
-
-/* Channels the FCU's ADC streams into each telemetry record. The streaming ADC
-   (the ADS131M08) is an 8-channel part; onAdcSample clamps to the available
-   SystemState slots regardless, so this only guards the telemetry sizing. */
-inline constexpr std::size_t ADC_CHANNEL_COUNT = 8;
+/* If the ADC ring stays empty this long, the ADC is presumed silent and the
+   record timer emits filler records (flagged invalid) so the packet rate holds. */
+inline constexpr uint32_t ADC_TIMEOUT_MS = 10;   // > worst-case stall before declaring the ADC silent
 
 /* Records per UDP datagram (EthernetHeader + records + CRC <= the link's UDP
    payload limit; keep UDP_MAX_PAYLOAD_BYTES in sync with the platform stack). */
@@ -106,7 +100,6 @@ inline uint32_t crc32(const uint8_t* data, std::size_t length_bytes)
 struct FillStation {
     uint32_t current_tick_ms  = 0;
     uint32_t last_rx_ms       = 0;
-    uint32_t last_fallback_ms = 0;
     Endpoint gs;
 };
 
@@ -128,13 +121,14 @@ struct LogBuffer {
  * @tparam S A type modelling logic::storage::Storage (the SD card in firmware).
  * @tparam V A type modelling logic::actuation::Valve (a BallValve in firmware);
  *           both the Fill and Dump valves are of this type.
+ * @tparam A A type modelling logic::communication::StreamingAdc (the ADS131M08).
  */
-template <logic::storage::Storage S, logic::actuation::Valve V>
+template <logic::storage::Storage S, logic::actuation::Valve V, logic::communication::StreamingAdc A>
 class Controller {
 public:
     /** @brief Construct over the held drivers; does not touch hardware. Call init() next. */
-    Controller(S& storage, V& fill_valve, V& dump_valve)
-        : storage_(storage), fill_valve_(fill_valve), dump_valve_(dump_valve) {}
+    Controller(S& storage, V& fill_valve, V& dump_valve, A& adc)
+        : storage_(storage), fill_valve_(fill_valve), dump_valve_(dump_valve), adc_(adc) {}
 
     /**
      * @brief  Initialise the FCU logic: starting state, ground-station endpoint,
@@ -145,18 +139,22 @@ public:
 
     /**
      * @brief  Advance the FCU one step: drain CAN and UDP, run the state machine,
-     *         emit the heartbeat and service the receive / ADC watchdogs.
+     *         emit the heartbeat and service the receive watchdog. Record
+     *         production is on its own timer (produceRecord), not here.
      * @param  now_ms  Current millisecond tick (e.g. HAL_GetTick()).
      */
     void tick(uint32_t now_ms);
 
     /**
-     * @brief  Ingest one ADC conversion (one signed count per channel) into the
-     *         telemetry pipeline. Bring-up wires this as the streaming ADC's
-     *         per-sample callback (ISR context, ~2 kHz) - keep callers off the SD
-     *         and Ethernet paths. Connect it only after init().
+     * @brief  Produce telemetry record(s) — the comms/save cadence, driven by a
+     *         dedicated timer (NOT the ADC). Drains every conversion queued in the
+     *         ADC's ring (each a fresh record); if the ring is empty and the ADC
+     *         has timed out, emits one filler with the last-known data flagged
+     *         invalid (Faulted / !data_valid). Runs in the timer ISR — keep it off
+     *         the SD and Ethernet paths.
+     * @param  now_ms  Current millisecond tick (e.g. HAL_GetTick()).
      */
-    void onAdcSample(std::span<const int32_t> channels);
+    void produceRecord(uint32_t now_ms);
 
 private:
     void        sendValveCmd(uint8_t valve, uint8_t cmd);
@@ -165,22 +163,20 @@ private:
     void        handleSetValvePosition(std::span<const uint8_t> payload);
     void        handleDatagram(std::span<const uint8_t> payload);
     void        rxTick();
-    SystemState buildSystemState(std::span<const int32_t> channels, bool adc_ok);
+    SystemState buildSystemState(const AdcInfo& adc, uint32_t now_ms);
     void        logAppend(const SystemState& record);
     void        watchdogTick();
-    void        adcWatchdogTick();
     void        sendBatched(std::span<const uint8_t> records);
     void        drainTick();
 
     S&                  storage_;        // injected backing store, used as a Storage explicitly
     V&                  fill_valve_;      // injected Fill / Dump valves, read for telemetry
     V&                  dump_valve_;
+    A&                  adc_;            // injected streaming ADC; produceRecord() drains its ring
     detail::FillStation fill_{};
     detail::LogBuffer   log_;            // .axisram in firmware; left uninitialised until init()
-    volatile uint32_t   last_adc_ms_ = 0;  // set on every ADC sample; the ADC watchdog reads it
+    volatile uint32_t   last_adc_ms_ = 0;  // last tick a conversion was drained; gates the silent-ADC filler
 
-    static_assert(detail::ADC_CHANNEL_COUNT <= std::extent_v<decltype(SystemState::raw_adc_values)>,
-                  "more ADC channels than SystemState::raw_adc_values slots");
     static_assert(std::extent_v<decltype(SystemState::valve_info)> == 2,
                   "SystemState expects exactly two valves (Fill, Dump)");
 };

@@ -3,8 +3,9 @@
  * @file    storage/sd_card.cpp
  * @brief   FatFs-backed SD card driver: mounts the volume and opens a log file
  *          at init, then appends + syncs each record so writes stay cheap and
- *          power-loss safe. Status is reported through the shared StorageStatus
- *          protocol. C++ port of the original sd_card.c.
+ *          power-loss safe. The store owns its StorageInfo (state + status, the
+ *          status carrying the last error cause), exposed through info(). C++
+ *          port of the original sd_card.c.
  ******************************************************************************
  */
 
@@ -17,13 +18,13 @@ namespace platform::storage {
 SdCard::SdCard(SD_HandleTypeDef* handle, const char* drive)
     : handle_(handle), drive_(drive)
 {
-    status_.bits.state = STORAGE_STATE_INIT;
+    info_.state = StorageState::Init;
 }
 
 void SdCard::init()
 {
     if (f_mount(&fs_, drive_, 1) != FR_OK) {
-        fail(Error::MountFail);
+        fail(StorageError::MountFail);
         return;
     }
 
@@ -32,26 +33,28 @@ void SdCard::init()
     char path[32];
     std::snprintf(path, sizeof(path), "%sruntime.bin", drive_);
     if (f_open(&file_, path, FA_WRITE | FA_CREATE_ALWAYS) != FR_OK) {
-        fail(Error::FileOpenFail);
+        fail(StorageError::FileOpenFail);
         return;
     }
 
-    status_.bits.state = STORAGE_STATE_ACTIVE;
+    info_.status.initialized = 1u;             // mounted + log file open
+    info_.status.error       = StorageError::None;
+    info_.state              = StorageState::Active;
 }
 
 void SdCard::write(std::span<const uint8_t> data)
 {
-    if (status_.bits.state != STORAGE_STATE_ACTIVE) {
+    if (info_.state != StorageState::Active) {
         return;  // not ready (init() failed or never ran)
     }
-    if (status_.bits.writeEnabled == 0) {
-        return;  // writing disarmed (default) — intentional no-op, store stays ACTIVE
+    if (info_.status.write_enabled == 0) {
+        return;  // writing disarmed (default) — intentional no-op, store stays Active
     }
 
     const UINT len = static_cast<UINT>(data.size());
     UINT written = 0;
     if (f_write(&file_, data.data(), len, &written) != FR_OK || written != len) {
-        fail(Error::FileWriteFail);
+        fail(StorageError::FileWriteFail);
         return;
     }
 
@@ -59,10 +62,10 @@ void SdCard::write(std::span<const uint8_t> data)
     f_sync(&file_);
 }
 
-void SdCard::fail(Error code)
+void SdCard::fail(StorageError code)
 {
-    error_ = code;
-    status_.bits.state = STORAGE_STATE_ERROR;
+    info_.status.error = code;
+    info_.state        = StorageState::Error;
 }
 
 } // namespace platform::storage

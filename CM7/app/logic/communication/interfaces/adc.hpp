@@ -1,10 +1,9 @@
 #pragma once
 
 #include <concepts>
-#include <cstddef>
-#include <cstdint>
 #include <optional>
-#include <span>
+
+#include "communication/protocol/telemetry/adc_info.hpp"   // AdcInfo (the ADC's own info record)
 
 /* ------------------------------------------------------------------------- *
  * Class-based ADC contract for the logic layer (C++23 concepts).
@@ -14,59 +13,41 @@
  * bus/SPI/DMA/DRDY detail, appears here — acquisition mechanism is the driver's
  * concern, which is exactly what this seam hides.
  *
- * Two contracts, by acquisition model rather than by transport:
- *   - Adc           — the PULL baseline: ask for the latest conversion. Both a
- *                     continuous ADC and a polled one can honour it.
- *   - StreamingAdc  — a REFINEMENT of Adc that also PUSHES each conversion through
- *                     a callback. Only a continuous/DRDY-paced device offers this
- *                     (on this board, the ADS131M08 on SPI4). A polled device
- *                     (e.g. the SPI6 ADCs, ~10 Hz) models Adc but not StreamingAdc.
+ *   - Adc           — read the ADC's latest info (state + status + channels) via
+ *                     info(). Both a continuous and a polled ADC honour it.
+ *   - StreamingAdc  — a continuous ADC that also buffers EVERY conversion in a
+ *                     ring: pop() returns the next queued conversion (or nullopt
+ *                     if the ring is empty). The controller drains the ring on its
+ *                     own cadence, so no conversion is lost and the comms rate is
+ *                     never tied to the ADC's DRDY rate.
  *
- * Each device is an OBJECT that owns its own latest-sample storage, so a board
- * holds one instance per ADC instead of a hidden global. Logic that needs the
- * high-rate stream is templated on StreamingAdc and registers a callback; logic
- * that just wants the latest values is templated on Adc and pulls samples().
+ * Each device OWNS its AdcInfo and keeps it current as it converts.
  * ------------------------------------------------------------------------- */
 
 namespace logic::communication {
 
 /**
- * @brief  Per-sample callback type used by the StreamingAdc refinement.
+ * @brief The baseline ADC contract: read the ADC's latest info.
  *
- * Invoked with the freshly-parsed channel counts (one signed int32 per channel).
- * For a continuous/DRDY device this runs in interrupt context at the conversion
- * rate — keep it short (no blocking I/O). The span views driver-owned storage,
- * valid only for the duration of the call. nullptr disables it.
- */
-using SampleCallback = void (*)(std::span<const int32_t> channels);
-
-/**
- * @brief The baseline ADC contract: pull the latest conversion.
- *
- * A conforming type exposes:
- *   - static constexpr std::size_t channel_count — channels it streams.
- *   - samples() — the most recent conversion as a view over driver-owned storage
- *                 (one signed count per channel, valid only until the next call),
- *                 or std::nullopt if no new conversion has completed since the
- *                 last call.
+ * info() — the ADC's own AdcInfo (state + status + the latest per-channel counts),
+ * kept up to date by the device as it converts.
  */
 template <typename T>
-concept Adc = requires {
-    { T::channel_count } -> std::convertible_to<std::size_t>;
-} && requires(T adc) {
-    { adc.samples() } -> std::same_as<std::optional<std::span<const int32_t>>>;
+concept Adc = requires(T adc) {
+    { adc.info() } -> std::same_as<::AdcInfo>;
 };
 
 /**
- * @brief A continuous ADC that, on top of Adc, pushes every conversion.
+ * @brief A continuous ADC that buffers every conversion in a ring.
  *
- * Adds set_sample_callback(): register (or clear, with nullptr) a callback
- * invoked per conversion. Only event-driven devices (continuous, DRDY-paced)
- * can satisfy this; a polled device models Adc alone.
+ * pop() removes and returns the oldest queued conversion (a complete AdcInfo, with
+ * data_valid set), or std::nullopt when the ring is empty. The producer (the ADC's
+ * own DRDY ISR) pushes; the consumer (the controller's record timer) pops — one
+ * conversion is delivered exactly once, decoupling capture from the save cadence.
  */
 template <typename T>
-concept StreamingAdc = Adc<T> && requires(T adc, SampleCallback cb) {
-    { adc.set_sample_callback(cb) } -> std::same_as<void>;
+concept StreamingAdc = Adc<T> && requires(T adc) {
+    { adc.pop() } -> std::same_as<std::optional<::AdcInfo>>;
 };
 
 } // namespace logic::communication

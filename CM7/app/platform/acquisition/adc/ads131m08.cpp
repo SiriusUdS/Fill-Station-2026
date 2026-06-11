@@ -138,18 +138,38 @@ void Ads131m08::handle_frame(std::span<const uint8_t> frame)
     if (frame.size() < need) {
         return;  // short frame; leave the last good sample in place
     }
+    AdcInfo sample{};
+    sample.state             = AdcState::Streaming;
+    sample.status.initialized = 1u;
+    sample.status.data_valid  = 1u;
     for (std::size_t i = 0; i < channel_count; ++i) {
         const uint8_t* w = frame.data() + STATUS_BYTES + i * WORD_BYTES;
         const uint32_t raw = (static_cast<uint32_t>(w[0]) << 16) |
                              (static_cast<uint32_t>(w[1]) << 8) |
                               static_cast<uint32_t>(w[2]);
-        latest_[i] = sign_extend_24(raw);
+        sample.channels[i] = sign_extend_24(raw);
     }
-    new_ = true;
+    info_ = sample;  // latest, for info() / the controller's filler
 
-    if (sample_cb_ != nullptr) {
-        sample_cb_(std::span<const int32_t>(latest_.data(), latest_.size()));
+    // Push into the SPSC ring for the controller to drain. Drop on overflow (the
+    // consumer fell behind beyond RING_SIZE conversions).
+    const std::size_t next = (ring_head_ + 1) % RING_SIZE;
+    if (next != ring_tail_) {
+        ring_[ring_head_] = sample;
+        __DMB();               // publish the slot before advancing the head index
+        ring_head_ = next;
     }
+}
+
+std::optional<AdcInfo> Ads131m08::pop()
+{
+    if (ring_tail_ == ring_head_) {
+        return std::nullopt;   // empty
+    }
+    __DMB();                   // read the slot the producer published before the index
+    const AdcInfo out = ring_[ring_tail_];
+    ring_tail_ = (ring_tail_ + 1) % RING_SIZE;
+    return out;
 }
 
 void Ads131m08::handle_drdy(uint16_t gpio_pin)
@@ -167,9 +187,11 @@ void Ads131m08::write_register(uint8_t address, uint16_t value)
 
 void Ads131m08::init(const Config& config)
 {
-    cfg_         = config;
-    cs_ports_[0] = config.cs_port;
-    cs_pins_[0]  = config.cs_pin;
+    cfg_                     = config;
+    cs_ports_[0]             = config.cs_port;
+    cs_pins_[0]              = config.cs_pin;
+    info_                    = AdcInfo{};   // state Unknown, no channels yet
+    info_.status.initialized = 1u;
 
     // Bind the SPI bus to the ADS131M08 frame size and CS before issuing any
     // command. The driver drives CS low around each command and acquisition
@@ -217,6 +239,8 @@ void Ads131m08::start()
     // input; arm it. Each edge then kicks one frame via HAL_GPIO_EXTI_Callback.
     HAL_NVIC_SetPriority(cfg_.drdy_irqn, DRDY_IRQ_PRIO, 0);
     HAL_NVIC_EnableIRQ(cfg_.drdy_irqn);
+
+    info_.state = AdcState::Streaming;  // acquiring from here; handle_frame keeps it current
 }
 
 void Ads131m08::stop()
@@ -224,20 +248,6 @@ void Ads131m08::stop()
     HAL_NVIC_DisableIRQ(cfg_.drdy_irqn);
     spi::dma::set_frame_callback(nullptr);
     s_instance = nullptr;
-}
-
-std::optional<std::span<const int32_t>> Ads131m08::samples()
-{
-    if (!new_) {
-        return std::nullopt;
-    }
-    new_ = false;
-    return std::span<const int32_t>(latest_.data(), latest_.size());
-}
-
-void Ads131m08::set_sample_callback(logic::communication::SampleCallback cb)
-{
-    sample_cb_ = cb;
 }
 
 // DRDY edge dispatch. The board's EXTI vector handler calls

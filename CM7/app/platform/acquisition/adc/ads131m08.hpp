@@ -10,7 +10,7 @@
  *
  * init() binds the bus/CS and configures clock/OSR and per-channel gain;
  * start() begins DRDY-paced acquisition - each DRDY edge clocks one frame, which
- * is parsed and published through logic::communication::adc::samples().
+ * is parsed and pushed into the ring the controller drains through pop().
  *
  * The REG_* unions below mirror the on-chip register map (16-bit words); write
  * the bitfields, then hand reg.all to write_register().
@@ -434,9 +434,9 @@ struct Config {
  *         logic::communication::StreamingAdc contract.
  *
  * There is one instance per device (the FCU has exactly one, on SPI4); bring-up
- * holds it, init()/start() it, and wires its per-sample callback. The HAL-free
- * contract members (samples(), set_sample_callback()) are what the logic layer
- * consumes; init()/start()/stop()/write_register() are platform-only.
+ * holds it and init()/start() it. The HAL-free contract members (info(), pop())
+ * are what the logic layer consumes; init()/start()/stop()/write_register() are
+ * platform-only.
  *
  * Acquisition runs from interrupt context: each DRDY edge kicks one frame, and
  * the SPI/DMA completion lands in handle_frame(). Those ISR entry points are
@@ -446,7 +446,7 @@ struct Config {
 class Ads131m08 {
 public:
     /** @brief Channels the device streams (8-channel part). */
-    static constexpr std::size_t channel_count = 8;
+    static constexpr std::size_t channel_count = ADC_CHANNEL_COUNT;
 
     Ads131m08() = default;
 
@@ -481,16 +481,20 @@ public:
     /* ---- logic::communication::StreamingAdc contract --------------------- */
 
     /**
-     * @brief  The most recent conversion: one signed count per channel (24-bit
-     *         two's complement, sign-extended into int32).
-     * @return A view over this object's storage (valid only until the next
-     *         samples() call), or std::nullopt if no new conversion has completed
-     *         since the last call.
+     * @brief  The ADC's latest info record: state + status + the most recent
+     *         simultaneous conversion. Kept up to date by the device as it
+     *         converts; used for the controller's filler record when the ring is
+     *         empty (does NOT consume the ring).
      */
-    [[nodiscard]] std::optional<std::span<const int32_t>> samples();
+    [[nodiscard]] AdcInfo info() const { return info_; }
 
-    /** @brief Register (or clear, with nullptr) the per-sample callback. */
-    void set_sample_callback(logic::communication::SampleCallback cb);
+    /**
+     * @brief  Pop the oldest queued conversion from the ring (a complete AdcInfo,
+     *         data_valid set), or std::nullopt if the ring is empty. The DRDY ISR
+     *         pushes; the controller's record timer pops — every conversion is
+     *         delivered exactly once.
+     */
+    [[nodiscard]] std::optional<AdcInfo> pop();
 
     /* ---- ISR entry points (platform dispatch; not the contract) ---------- */
 
@@ -501,12 +505,17 @@ public:
     void handle_drdy(uint16_t gpio_pin);
 
 private:
+    static constexpr std::size_t RING_SIZE = 32;  // conversions buffered between drains (power of two)
+
     Config        cfg_{};
     GPIO_TypeDef* cs_ports_[1] = {};  /**< Backs BusConfig; instance-lived (instance is static). */
     uint16_t      cs_pins_[1]  = {};
-    std::array<int32_t, channel_count>   latest_{};
-    volatile bool                        new_       = false;
-    logic::communication::SampleCallback sample_cb_ = nullptr;
+    AdcInfo       info_{};            /**< Latest conversion; see info(). */
+
+    /* Single-producer (DRDY ISR push) / single-consumer (controller pop) ring. */
+    AdcInfo              ring_[RING_SIZE]{};
+    volatile std::size_t ring_head_ = 0;  // producer index (ISR)
+    volatile std::size_t ring_tail_ = 0;  // consumer index
 };
 
 // The driver is the logic seam: enforce conformance here so a contract drift is

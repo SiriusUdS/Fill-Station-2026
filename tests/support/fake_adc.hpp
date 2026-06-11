@@ -3,11 +3,12 @@
 /* ------------------------------------------------------------------------- *
  * Host test doubles for the logic ADC contracts.
  *
- * FakeAdc        models the base Adc (pull only)        — stands in for a polled
- *                device (e.g. the SPI6 ADCs).
- * FakeStreamingAdc models the StreamingAdc refinement   — stands in for the
- *                continuous ADS131M08: feed() simulates one hardware conversion,
- *                updating the latest sample AND firing the registered callback.
+ * FakeAdc          models the base Adc (info() only)      — stands in for a polled
+ *                  device (e.g. the SPI6 ADCs): the latest info is all it offers.
+ * FakeStreamingAdc models the StreamingAdc refinement     — stands in for the
+ *                  continuous ADS131M08: push() queues one conversion in the ring,
+ *                  pop() drains it (exactly as the driver's DRDY ISR / controller
+ *                  do), and info() returns the latest pushed conversion.
  *
  * Because the contracts are structural, neither needs inheritance and tests
  * instantiate logic templates on these directly — no separate link.
@@ -15,60 +16,42 @@
 
 #include "communication/interfaces/adc.hpp"
 
-#include <array>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <optional>
-#include <span>
 
 /** @brief Pull-only ADC double (models logic::communication::Adc). */
 struct FakeAdc {
-    static constexpr std::size_t channel_count = 4;
+    AdcInfo latest{};
 
-    std::array<int32_t, channel_count> latest{};
-    bool has_new = false;
+    [[nodiscard]] AdcInfo info() const { return latest; }
 
-    [[nodiscard]] std::optional<std::span<const int32_t>> samples()
-    {
-        if (!has_new) return std::nullopt;
-        has_new = false;
-        return std::span<const int32_t>(latest.data(), latest.size());
-    }
-
-    /** @brief Test helper: stage a conversion the next samples() call returns. */
-    void push(std::span<const int32_t> values)
-    {
-        const std::size_t n = values.size() < channel_count ? values.size() : channel_count;
-        for (std::size_t i = 0; i < n; ++i) latest[i] = values[i];
-        has_new = true;
-    }
+    /** @brief Test helper: set the info that info() returns. */
+    void set(const AdcInfo& info) { latest = info; }
 };
 
 /** @brief Continuous/streaming ADC double (models logic::communication::StreamingAdc). */
 struct FakeStreamingAdc {
-    static constexpr std::size_t channel_count = 8;
+    AdcInfo            latest{};
+    std::deque<AdcInfo> ring;
 
-    std::array<int32_t, channel_count> latest{};
-    bool has_new = false;
-    logic::communication::SampleCallback cb = nullptr;
+    [[nodiscard]] AdcInfo info() const { return latest; }
 
-    [[nodiscard]] std::optional<std::span<const int32_t>> samples()
+    [[nodiscard]] std::optional<AdcInfo> pop()
     {
-        if (!has_new) return std::nullopt;
-        has_new = false;
-        return std::span<const int32_t>(latest.data(), latest.size());
+        if (ring.empty()) return std::nullopt;
+        const AdcInfo out = ring.front();
+        ring.pop_front();
+        return out;
     }
 
-    void set_sample_callback(logic::communication::SampleCallback c) { cb = c; }
-
-    /** @brief Test helper: simulate one hardware conversion — update the latest
-     *         sample and fire the per-sample callback, exactly as the ISR would. */
-    void feed(std::span<const int32_t> values)
+    /** @brief Test helper: simulate one hardware conversion — queue it in the ring
+     *         and make it the latest, exactly as the driver's DRDY ISR would. */
+    void push(const AdcInfo& info)
     {
-        const std::size_t n = values.size() < channel_count ? values.size() : channel_count;
-        for (std::size_t i = 0; i < n; ++i) latest[i] = values[i];
-        has_new = true;
-        if (cb) cb(std::span<const int32_t>(latest.data(), latest.size()));
+        latest = info;
+        ring.push_back(info);
     }
 };
 

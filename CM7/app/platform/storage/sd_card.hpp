@@ -7,33 +7,22 @@
 #include "stm32h7xx_hal.h"   // SD_HandleTypeDef
 #include "fatfs.h"           // FATFS, SDPath, f_* (FatFs middleware)
 
-#include "sirius-headers-common/Storage/StorageState.h"   // STORAGE_STATE_*
-#include "sirius-headers-common/Storage/StorageStatus.h"  // StorageStatus
-
-#include "storage/interfaces/storage.hpp"   // logic::storage::Storage contract
+#include "storage/interfaces/storage.hpp"   // logic::storage::Storage contract + StorageInfo
 
 /* ------------------------------------------------------------------------- *
  * FatFs-backed SD card driver. One instance per physical card: bind a HAL SD
  * handle and a logical drive, then init() mounts the volume and opens a log
  * file that stays open for the driver's lifetime. write() appends a record and
  * syncs (flushes) it, so each save is power-loss safe without the cost of
- * reopening the file. The FatFs/HAL detail stays in the .cpp; coarse status is
- * reported through the shared StorageStatus protocol, the detailed failure
- * cause through Error.
+ * reopening the file. The FatFs/HAL detail stays in the .cpp; the store owns its
+ * StorageInfo (state + status), exposed through info(), and reports the detailed
+ * failure cause through Error.
  * ------------------------------------------------------------------------- */
 
 namespace platform::storage {
 
 class SdCard {
 public:
-    /** @brief Detailed failure cause, beyond the coarse StorageStatus state. */
-    enum class Error : uint8_t {
-        None = 0,
-        MountFail,
-        FileOpenFail,
-        FileWriteFail,
-    };
-
     /**
      * @brief  Bind to a HAL SD handle and a FatFs logical drive (e.g. "0:/").
      *         Does not touch hardware. Each card owns its own drive and FATFS,
@@ -65,19 +54,16 @@ public:
      * ready to log the instant it is armed, without churning the card (or the
      * log) during idle/testing.
      */
-    void setWriteEnabled(bool enabled) { status_.bits.writeEnabled = enabled ? 1 : 0; }
+    void setWriteEnabled(bool enabled) { info_.status.write_enabled = enabled ? 1 : 0; }
 
     /** @brief Whether writing is currently enabled (false until armed). */
-    bool writeEnabled() const { return status_.bits.writeEnabled != 0; }
+    bool writeEnabled() const { return info_.status.write_enabled != 0; }
 
-    /** @brief Coarse status (state + plugged-in) in the shared storage protocol. */
-    StorageStatus status() const { return status_; }
-
-    /** @brief Last detailed failure cause. */
-    Error error() const { return error_; }
+    /** @brief The store's own info record: state + status (incl. last error cause). */
+    StorageInfo info() const { return info_; }
 
 private:
-    void fail(Error code);
+    void fail(StorageError code);
 
     // Retained to identify the card; FatFs reaches the media through the linked
     // diskio driver, not this handle directly.
@@ -85,8 +71,7 @@ private:
     const char*       drive_;   // FatFs logical drive, e.g. "0:/"
     FATFS             fs_{};
     FIL               file_{};  // log file, opened by init() and kept open
-    StorageStatus     status_{};
-    Error             error_ = Error::None;
+    StorageInfo       info_{};  // state + status (incl. last error cause); see info()
 };
 
 // The driver is the logic seam: enforce conformance here so a contract drift is

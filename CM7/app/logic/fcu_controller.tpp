@@ -11,8 +11,8 @@ namespace logic::fcu {
 
 /* ---- CAN ----------------------------------------------------------------- */
 
-template <logic::storage::Storage S, logic::actuation::Valve V>
-void Controller<S, V>::sendValveCmd(uint8_t valve, uint8_t cmd)
+template <logic::storage::Storage S, logic::actuation::Valve V, logic::communication::StreamingAdc A>
+void Controller<S, V, A>::sendValveCmd(uint8_t valve, uint8_t cmd)
 {
     CANHeader header = {};
     header.frame.senderID    = FILLING_STATION_BOARD_ID;
@@ -32,8 +32,8 @@ void Controller<S, V>::sendValveCmd(uint8_t valve, uint8_t cmd)
 /* The FCU receives only status/telemetry from the ECU over CAN — never commands,
    which always arrive over Ethernet. Drain the RX ring each tick so it cannot
    back up; feeding ECU valve status into the state machine is a later step. */
-template <logic::storage::Storage S, logic::actuation::Valve V>
-void Controller<S, V>::canTick()
+template <logic::storage::Storage S, logic::actuation::Valve V, logic::communication::StreamingAdc A>
+void Controller<S, V, A>::canTick()
 {
     while (auto frame = logic::communication::can::receive()) {
         (void)frame;  // TODO: consume ECU valve status / telemetry
@@ -42,8 +42,8 @@ void Controller<S, V>::canTick()
 
 /* ---- UDP (ground-station commands) --------------------------------------- */
 
-template <logic::storage::Storage S, logic::actuation::Valve V>
-void Controller<S, V>::handleStateRequest(std::span<const uint8_t> payload)
+template <logic::storage::Storage S, logic::actuation::Valve V, logic::communication::StreamingAdc A>
+void Controller<S, V, A>::handleStateRequest(std::span<const uint8_t> payload)
 {
     if (payload.size() <= detail::REQUEST_STATE_OFFSET_BYTES) {
         return;
@@ -76,8 +76,8 @@ void Controller<S, V>::handleStateRequest(std::span<const uint8_t> payload)
     logic::control::persistent_state.saveState(static_cast<logic::control::State>(requested));
 }
 
-template <logic::storage::Storage S, logic::actuation::Valve V>
-void Controller<S, V>::handleDatagram(std::span<const uint8_t> payload)
+template <logic::storage::Storage S, logic::actuation::Valve V, logic::communication::StreamingAdc A>
+void Controller<S, V, A>::handleDatagram(std::span<const uint8_t> payload)
 {
     if (payload.size() < sizeof(UDPPacketHeader)) {
         return;
@@ -107,8 +107,8 @@ void Controller<S, V>::handleDatagram(std::span<const uint8_t> payload)
 
 // Drive one of the FCU's local valves from a SetValvePosition command. The frame
 // follows the 12-byte UDP header. Open/Close ignore value; SetOpenedPct uses it.
-template <logic::storage::Storage S, logic::actuation::Valve V>
-void Controller<S, V>::handleSetValvePosition(std::span<const uint8_t> payload)
+template <logic::storage::Storage S, logic::actuation::Valve V, logic::communication::StreamingAdc A>
+void Controller<S, V, A>::handleSetValvePosition(std::span<const uint8_t> payload)
 {
     constexpr std::size_t frame_offset = sizeof(UDPPacketHeader);
     if (payload.size() < frame_offset + sizeof(SetValvePositionFrame)) {
@@ -131,8 +131,8 @@ void Controller<S, V>::handleSetValvePosition(std::span<const uint8_t> payload)
     }
 }
 
-template <logic::storage::Storage S, logic::actuation::Valve V>
-void Controller<S, V>::rxTick()
+template <logic::storage::Storage S, logic::actuation::Valve V, logic::communication::StreamingAdc A>
+void Controller<S, V, A>::rxTick()
 {
     logic::communication::udp::tick();  // service the link so receive() can return inbound datagrams
     while (auto datagram = logic::communication::udp::receive()) {
@@ -142,32 +142,28 @@ void Controller<S, V>::rxTick()
 
 /* ---- Telemetry production (per ADC sample) -------------------------------- */
 
-// Build a SystemState from a set of channel counts. adc_ok == false (the
-// fallback path) leaves the channels zero and flags the ADC fault in erno.
-template <logic::storage::Storage S, logic::actuation::Valve V>
-SystemState Controller<S, V>::buildSystemState(std::span<const int32_t> channels, bool adc_ok)
+// Build a SystemState from the ADC's info record (a fresh conversion on the
+// sample path, or a synthesized Faulted record on the watchdog fallback path).
+template <logic::storage::Storage S, logic::actuation::Valve V, logic::communication::StreamingAdc A>
+SystemState Controller<S, V, A>::buildSystemState(const AdcInfo& adc, uint32_t now_ms)
 {
-    constexpr std::size_t SLOTS = std::extent_v<decltype(SystemState::raw_adc_values)>;
-
     SystemState state = {};
-    state.frameTs_MS         = fill_.current_tick_ms;
+    state.frameTs_MS         = now_ms;
     state.lastHandshakeTs_MS = fill_.last_rx_ms;
 
-    const std::size_t n = channels.size() < SLOTS ? channels.size() : SLOTS;
-    for (std::size_t i = 0; i < n; ++i) {
-        state.raw_adc_values[i] = static_cast<uint32_t>(channels[i]);  // bit-for-bit
-    }
+    // The ADC owns its record (state + status + channels) — the silent/fault
+    // condition now lives in adc_info, not in sdCardFlags.
+    state.adc_info = adc;
 
-    // Logging / data health into sdCardFlags so the GS sees it per record:
-    //   initialized  — SD mounted and ready
-    //   writingError — the double buffer overran, so some records were dropped
-    //   readingError — this record is a fallback (ADC silent; channels stale/zero)
-    // TODO: readingError is the ADC fault parked here for now; move it to a
-    // dedicated ADC/device flag set when InterfaceField gets per-device flags.
+    // The SD card owns its record too: state (Init/Active/Error) + status bits
+    // (incl. the last error cause). The GS reads health straight from here.
+    state.storage_info = storage_.info();
+
+    // The double-buffer overrun (a half filled before it could be flushed, so
+    // records were dropped) is a logging-pipeline fault, not the card's own —
+    // surface it as the sdCard interface's writingError.
     InterfaceFieldFlags sd = {};
-    sd.bits.initialized  = (storage_.status().bits.state == STORAGE_STATE_ACTIVE) ? 1 : 0;
     sd.bits.writingError = log_.overrun ? 1 : 0;
-    sd.bits.readingError = adc_ok ? 0 : 1;
     state.interfaces.frame.sdCardFlags = sd;
 
     // The FCU's own valves report their own info, indexed by the FcuValves SSOT.
@@ -177,12 +173,12 @@ SystemState Controller<S, V>::buildSystemState(std::span<const int32_t> channels
     return state;
 }
 
-// Append one record to the active half. Single-producer: the ADC ISR, or the
-// fallback while the ADC is down — never both at once. When a half fills it is
-// marked ready for drainTick(); if the other half is still unflushed the record
-// is dropped and overrun is flagged.
-template <logic::storage::Storage S, logic::actuation::Valve V>
-void Controller<S, V>::logAppend(const SystemState& record)
+// Append one record to the active half. Single-producer: every record comes from
+// produceRecord() in the record-timer ISR. When a half fills it is marked ready
+// for drainTick(); if the other half is still unflushed the record is dropped and
+// overrun is flagged.
+template <logic::storage::Storage S, logic::actuation::Valve V, logic::communication::StreamingAdc A>
+void Controller<S, V, A>::logAppend(const SystemState& record)
 {
     uint8_t a = log_.active;
     if (log_.used[a] + sizeof(SystemState) > detail::LOG_HALF_BYTES) {
@@ -202,8 +198,8 @@ void Controller<S, V>::logAppend(const SystemState& record)
 /* ---- Watchdogs ------------------------------------------------------------ */
 
 // Abort if the ground-station link goes quiet while armed.
-template <logic::storage::Storage S, logic::actuation::Valve V>
-void Controller<S, V>::watchdogTick()
+template <logic::storage::Storage S, logic::actuation::Valve V, logic::communication::StreamingAdc A>
+void Controller<S, V, A>::watchdogTick()
 {
     const uint8_t state = static_cast<uint8_t>(logic::control::persistent_state.fill_state);
     if (state == FILLING_STATION_STATE_UNSAFE || state == FILLING_STATION_STATE_IGNITE) {
@@ -213,27 +209,34 @@ void Controller<S, V>::watchdogTick()
     }
 }
 
-// If the ADC has gone silent, keep the pipeline alive: produce fallback records
-// (no fresh ADC data, ADC fault flagged) at a gated cadence from the main loop.
-template <logic::storage::Storage S, logic::actuation::Valve V>
-void Controller<S, V>::adcWatchdogTick()
+// The comms/save cadence — driven by the record timer, NOT the ADC. Drain every
+// conversion the ADC has queued (each a fresh record); if the ring is empty and
+// the ADC has timed out, emit one filler carrying the last-known data flagged
+// invalid, so the downstream packet rate is unchanged when the ADC is silent.
+template <logic::storage::Storage S, logic::actuation::Valve V, logic::communication::StreamingAdc A>
+void Controller<S, V, A>::produceRecord(uint32_t now_ms)
 {
-    if ((fill_.current_tick_ms - last_adc_ms_) <= detail::ADC_TIMEOUT_MS) {
-        return;  // ADC producing normally
+    bool produced = false;
+    while (auto sample = adc_.pop()) {     // every queued conversion, exactly once
+        last_adc_ms_ = now_ms;
+        logAppend(buildSystemState(*sample, now_ms));
+        produced = true;
     }
-    if ((fill_.current_tick_ms - fill_.last_fallback_ms) < detail::FALLBACK_PERIOD_MS) {
-        return;
+    if (!produced && (now_ms - last_adc_ms_) > detail::ADC_TIMEOUT_MS) {
+        // ADC silent: filler with the actual last-known record, flagged bogus.
+        AdcInfo info = adc_.info();
+        info.state             = AdcState::Faulted;
+        info.status.data_valid = 0u;
+        logAppend(buildSystemState(info, now_ms));
     }
-    fill_.last_fallback_ms = fill_.current_tick_ms;
-    logAppend(buildSystemState({}, /*adc_ok=*/false));
 }
 
 /* ---- Telemetry drain (SD + Ethernet) -------------------------------------- */
 
 // Split a run of records into UDP datagrams (EthernetHeader + records + CRC) and
 // send them to the GS.
-template <logic::storage::Storage S, logic::actuation::Valve V>
-void Controller<S, V>::sendBatched(std::span<const uint8_t> records)
+template <logic::storage::Storage S, logic::actuation::Valve V, logic::communication::StreamingAdc A>
+void Controller<S, V, A>::sendBatched(std::span<const uint8_t> records)
 {
     static std::array<uint8_t,
         sizeof(EthernetHeader) + detail::ETH_RECORDS_PER_PACKET * sizeof(SystemState) + sizeof(uint32_t)>
@@ -263,21 +266,14 @@ void Controller<S, V>::sendBatched(std::span<const uint8_t> records)
 
 // Flush any full half: write the 4096-byte block to SD (sector-aligned) and
 // stream its records to the GS, then release the half.
-template <logic::storage::Storage S, logic::actuation::Valve V>
-void Controller<S, V>::drainTick()
+template <logic::storage::Storage S, logic::actuation::Valve V, logic::communication::StreamingAdc A>
+void Controller<S, V, A>::drainTick()
 {
     for (uint8_t h = 0; h < 2; ++h) {
         if (!log_.ready[h]) {
             continue;
         }
         const uint16_t bytes = log_.used[h];
-
-        // TEMPORARY (remove later): stamp a marker in the tail of the 4096-byte
-        // block (past the records, so it is not in the Ethernet send) to make SD
-        // chunk boundaries easy to spot when reading runtime.bin.
-        static constexpr char SD_CHUNK_MARKER[] = "END_OF_SD_CHUNK";
-        constexpr std::size_t MARKER_LEN = sizeof(SD_CHUNK_MARKER) - 1;  // drop the NUL
-        std::memcpy(&log_.data[h][detail::LOG_HALF_BYTES - MARKER_LEN], SD_CHUNK_MARKER, MARKER_LEN);
 
         storage_.write(std::span<const uint8_t>(log_.data[h], detail::LOG_HALF_BYTES));
         sendBatched(std::span<const uint8_t>(log_.data[h], bytes));
@@ -287,8 +283,8 @@ void Controller<S, V>::drainTick()
 
 /* ---- Public surface ------------------------------------------------------- */
 
-template <logic::storage::Storage S, logic::actuation::Valve V>
-void Controller<S, V>::init()
+template <logic::storage::Storage S, logic::actuation::Valve V, logic::communication::StreamingAdc A>
+void Controller<S, V, A>::init()
 {
     fill_ = detail::FillStation{};
     fill_.gs.mac  = detail::GS_MAC;
@@ -313,28 +309,20 @@ void Controller<S, V>::init()
     logic::control::persistent_state.saveState(
         logic::control::persistent_state.loadState().value_or(logic::control::State::Init));
 
-    // Bring the backing store online. Platform bring-up connects onAdcSample to
-    // the streaming ADC after this init() returns, so records start flowing only
-    // once the logic (and SD) are ready.
+    // Bring the backing store online. Platform bring-up starts the record timer
+    // after this init() returns, so records start flowing only once the logic
+    // (and SD) are ready.
     storage_.init();
 }
 
-template <logic::storage::Storage S, logic::actuation::Valve V>
-void Controller<S, V>::onAdcSample(std::span<const int32_t> channels)
-{
-    last_adc_ms_ = fill_.current_tick_ms;
-    logAppend(buildSystemState(channels, /*adc_ok=*/true));
-}
-
-template <logic::storage::Storage S, logic::actuation::Valve V>
-void Controller<S, V>::tick(uint32_t now_ms)
+template <logic::storage::Storage S, logic::actuation::Valve V, logic::communication::StreamingAdc A>
+void Controller<S, V, A>::tick(uint32_t now_ms)
 {
     fill_.current_tick_ms = now_ms;
 
     canTick();
     rxTick();
-    adcWatchdogTick();   // fallback production if the ADC is silent
-    drainTick();         // flush full halves to SD + the GS
+    drainTick();         // flush full halves to SD + the GS (record production is on the timer)
     watchdogTick();      // GS-link abort watchdog
 
     if (logic::control::persistent_state.fill_state == logic::control::State::Init) {
