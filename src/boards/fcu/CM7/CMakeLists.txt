@@ -87,10 +87,10 @@ set_property(TARGET ${CMAKE_PROJECT_NAME} PROPERTY SOURCES "${MX_SOURCES}")
 
 # Add sources to executable
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
-    # Board entry point (FCU composition) — stays with the board until the
-    # wireDrivers()/run() composition seam is extracted.
-    app/platform/main.cpp
-    # FCU board-support: HAL/clock/MPU/peripheral bring-up (board::halInit).
+    # FCU board firmware (board-side, src/boards/fcu/): the handle-free app
+    # composition (object graph + tick loop) and the board-support .cpp
+    # (halInit + wireDrivers + ISRs). Both sit beside this board's CubeMX project.
+    ../main.cpp
     ../board.cpp
 
     # FCU policy — command handlers (src/app/logic/fcu). fcu_controller is header-only.

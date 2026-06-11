@@ -4,11 +4,12 @@
  *
  * Everything that differs between the two physical boards (system + peripheral
  * clocks, MPU, peripheral *instances*, pin assignments, and ISR vectors) is
- * implemented per board under boards/<board>/board.cpp. Shared application code
- * reaches the hardware ONLY through this interface: it names no pin macro, no HAL
- * handle (hspiN/htimN/…), no MX_*_Init, and no ISR vector symbol.
+ * implemented per board under src/boards/<board>/board.cpp. The handle-free app
+ * composition (main.cpp's object graph + tick loop) reaches the hardware ONLY
+ * through this interface: it names no pin macro, no HAL handle (hspiN/htimN/…), no
+ * MX_*_Init, and no ISR vector symbol.
  *
- * This is the seam that lets one firmware build for boards with entirely different
+ * This is the seam that lets the firmware build for boards with entirely different
  * pinouts — only the per-board board.cpp changes.
  */
 namespace board {
@@ -17,5 +18,11 @@ namespace board {
  * CubeMX-configured peripheral (the MX_*_Init list) for THIS board. Pure HAL
  * bring-up only — constructs no application object and touches no driver state. */
 void halInit();
+
+/* Bind each of THIS board's drivers to its HAL handles/pins, do the board-owned
+ * timer/GPIO/NVIC config, and bring the board's logic up on top. Runs after
+ * halInit(). Implemented per board, operating on that board's own object graph
+ * (which main.cpp defines). */
+void wireDrivers();
 
 }  // namespace board

@@ -1,17 +1,18 @@
 /**
   ******************************************************************************
   * @file           : board.cpp  (FCU)
-  * @brief          : FCU board-support: HAL/clock/MPU/peripheral bring-up.
+  * @brief          : FCU board-support: HAL bring-up + driver wiring + ISRs.
   *
-  * Implements the board:: contract (app/board.hpp) for the FCU board. This is the
-  * board-specific half of the firmware: clock tree, MPU regions, and the CubeMX
-  * MX_*_Init list. The peripheral *instances* and pin assignments named here belong
-  * to the FCU pinout; the ECU board provides its own boards/ecu/board.cpp.
+  * Implements the board:: contract (src/app/board.hpp) for the FCU. This is the
+  * board-specific half of the firmware and the ONLY place that names HAL handles,
+  * pin macros, peripheral instances, and ISR vectors. The handle-free application
+  * composition (the object graph + tick loop) lives in main.cpp; here we bring up
+  * the chip (halInit) and bind each driver to this board's hardware (wireDrivers).
   ******************************************************************************
   */
 #include "board.hpp"
 
-/* CubeMX-generated peripheral init declarations (resolved from CM7/Core/Inc). */
+/* CubeMX-generated peripheral init declarations + HAL handles (CM7/Core/Inc). */
 #include "main.h"
 #include "dma.h"
 #include "eth.h"
@@ -21,6 +22,15 @@
 #include "spi.h"
 #include "tim.h"
 #include "gpio.h"
+
+/* The FCU object graph (defined in main.cpp) + the bits wireDrivers() needs. */
+#include "fcu_objects.hpp"
+#include "memory/backup_ram.hpp"
+#include "dil/can_types.h"
+#include "sirius-headers-common/Telecommunication/PacketHeaderVariable.h"   // FILLING_STATION_BOARD_ID
+
+using namespace fcu_app;
+namespace backup_ram = platform::memory::backup_ram;
 
 static void SystemClock_Config(void);
 static void PeriphCommonClock_Config(void);
@@ -56,7 +66,146 @@ void halInit(void)
   MX_TIM6_Init();   // record-production cadence (drives g_controller.produceRecord)
 }
 
+void wireDrivers(void)
+{
+  /* Bring up the backup domain first, so the battery-backed Backup SRAM that
+     holds the persistent state is clocked, writable and retained on VBAT before
+     the FCU logic reads it. A regulator-timeout only means VBAT retention is
+     unconfirmed; the SRAM is still accessible, so we proceed. */
+  (void)backup_ram::init();
+
+  /* Bring up the CAN and Ethernet drivers, then the FCU logic. The board now
+     answers ARP and ICMP echo (ping) requests and exchanges UDP/CAN traffic
+     through the logic interfaces. */
+  (void)g_can.init(&hfdcan1, FILLING_STATION_BOARD_ID);
+  g_eth.init();
+
+  /* Bring up the ADS131M08 ADC. The board owns the DRDY (PE7) pin: configure it
+     as a falling-edge EXTI input here, then let the driver arm it. CS is PE15.
+     Each DRDY-paced conversion is pushed into the driver's ring; the controller's
+     record timer drains it (see produceRecord). */
+  GPIO_InitTypeDef drdy = {};
+  drdy.Pin  = GPIO_PIN_7;
+  drdy.Mode = GPIO_MODE_IT_FALLING;
+  drdy.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(GPIOE, &drdy);
+
+  g_ads131.init({
+      .hspi      = &hspi4,
+      .cs_port   = GPIOE,
+      .cs_pin    = GPIO_PIN_15,
+      .drdy_pin  = GPIO_PIN_7,
+      .drdy_irqn = EXTI9_5_IRQn,
+  });
+  g_ads131.start();
+
+  /* Bind the SD card to its HAL handle + FatFs drive (the app composition left it
+     unbound). It is mounted later by g_controller.init(). */
+  g_card.bind(&hsd2, "0:/");
+
+  /* Bring up the two local ball valves. The 333 Hz (3 ms) servo PWM frequency is
+     owned HERE, not in CubeMX: leave the generated timer at its defaults and set
+     the period in code so it lives in one place. 100 MHz APB2 clock / (PSC 99 + 1)
+     = 1 MHz tick; ARR 2999 -> 3 ms. The UG event reloads the prescaler immediately
+     so the first period is already correct. Servo pulse 1-2 ms = 1000-2000 ticks;
+     tune min/max for the valve's actual travel. */
+  __HAL_TIM_SET_PRESCALER(&htim1,   99);
+  __HAL_TIM_SET_AUTORELOAD(&htim1,  2999);
+  htim1.Instance->EGR = TIM_EGR_UG;   // reload PSC/ARR now (no first-period glitch)
+  __HAL_TIM_SET_PRESCALER(&htim15,  99);
+  __HAL_TIM_SET_AUTORELOAD(&htim15, 2999);
+  htim15.Instance->EGR = TIM_EGR_UG;
+
+  g_fill_valve.init({
+      .servo       = {.htim = &htim1, .channel = TIM_CHANNEL_1,
+                      .min_pulse_ticks = 1000.0F, .max_pulse_ticks = 2000.0F},
+      .open_limit  = {.port = FILL_SWITCH_OPENED_GPIO_Port, .pin = FILL_SWITCH_OPENED_Pin},
+      .close_limit = {.port = FILL_SWITCH_CLOSED_GPIO_Port, .pin = FILL_SWITCH_CLOSED_Pin},
+      .max_transit_timeout_ms = 5000,
+  });
+  g_dump_valve.init({
+      .servo       = {.htim = &htim15, .channel = TIM_CHANNEL_2,
+                      .min_pulse_ticks = 1000.0F, .max_pulse_ticks = 2000.0F},
+      // No physical open switch on the dump valve (no DUMP_SWITCH_OPENED pin): the
+      // descriptor is null and tick() never reads it (opened_switch_ignored).
+      .open_limit  = {.port = nullptr, .pin = 0},
+      .close_limit = {.port = DUMP_SWITCH_CLOSED_GPIO_Port, .pin = DUMP_SWITCH_CLOSED_Pin},
+      .max_transit_timeout_ms = 5000,
+      .opened_switch_ignored  = true,
+  });
+
+  /* Safe boot state: drive both valves closed (no flow) before logic starts. */
+  (void)g_fill_valve.close();
+  (void)g_dump_valve.close();
+
+  /* Bring up the FCU controller (this also mounts the SD card via g_card.init()). */
+  g_controller.init();
+
+  /* Start the record-production timer last, so records only flow once the logic
+     and SD are ready. The 2 kHz (0.5 ms) cadence is owned HERE, not in CubeMX:
+     leave the generated TIM6 at its defaults and set the period in code so it
+     lives in one place. 100 MHz APB1 timer clock / (PSC 99 + 1) = 1 MHz tick;
+     ARR 499 -> 0.5 ms = 2 kHz. The UG event reloads PSC/ARR immediately. This is
+     the comms/save cadence, decoupled from the ADC's DRDY rate: each tick drains
+     the ADC ring and produces one record per queued conversion. */
+  __HAL_TIM_SET_PRESCALER(&htim6,  99);
+  __HAL_TIM_SET_AUTORELOAD(&htim6, 499);
+  htim6.Instance->EGR = TIM_EGR_UG;          // reload PSC/ARR now (no first-period glitch)
+  __HAL_TIM_CLEAR_FLAG(&htim6, TIM_FLAG_UPDATE);  // UG set the flag; clear so we don't fire immediately
+  HAL_NVIC_SetPriority(TIM6_DAC_IRQn, 6, 0);
+  HAL_NVIC_EnableIRQ(TIM6_DAC_IRQn);
+  HAL_TIM_Base_Start_IT(&htim6);
+}
+
 }  // namespace board
+
+/* ---- Board ISR vectors (symbols fixed by the chosen timer / pin group) ---- */
+
+/* Record-production timer (TIM6) ISR -> controller. TIM6 fires at a fixed cadence
+   (set in wireDrivers), decoupled from the ADC's DRDY rate. */
+extern "C" void TIM6_DAC_IRQHandler(void)
+{
+  HAL_TIM_IRQHandler(&htim6);
+}
+
+extern "C" void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef* htim)
+{
+  if (htim->Instance == TIM6) {
+    fcu_app::g_controller.produceRecord(HAL_GetTick());
+  }
+}
+
+/* DRDY (PE7) data-ready EXTI vector. The handler symbol is fixed by the pin group
+   (EXTI lines 5-9); it dispatches through the HAL to the ADC driver's
+   HAL_GPIO_EXTI_Callback. */
+extern "C" void EXTI9_5_IRQHandler(void)
+{
+  HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_7);
+}
+
+/**
+  * @brief  This function is executed in case of error occurrence.
+  */
+extern "C" void Error_Handler(void)
+{
+  /* User can add his own implementation to report the HAL error return state */
+  __disable_irq();
+  while (1)
+  {
+  }
+}
+
+#ifdef USE_FULL_ASSERT
+/**
+  * @brief  Reports the name of the source file and the source line number
+  *         where the assert_param error has occurred.
+  */
+extern "C" void assert_failed(uint8_t *file, uint32_t line)
+{
+  (void)file;
+  (void)line;
+}
+#endif /* USE_FULL_ASSERT */
 
 /**
   * @brief System Clock Configuration

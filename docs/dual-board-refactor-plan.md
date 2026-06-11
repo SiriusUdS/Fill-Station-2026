@@ -209,9 +209,23 @@ The genuinely hard part. CubeMX is one-project-per-directory and regenerates `Co
         `boards/<board>/CM7` directly, anchoring shared-tree includes via a passed `REPO_ROOT`.
   - [x] Per-board ergonomics: `fcu-*`/`ecu-*` presets; `.clangd` indexes **both** boards at once
         (PathMatch per board); `.vscode/tasks.json` Configure/Build per board (Build FCU = default).
-  - [ ] **Still pending (next slice):** relocate shared *code* (drivers + logic) out of
-        `boards/fcu/CM7/app/` and `stm-2026-common/` into `src/`. Right now the shared code physically
-        lives under the FCU board dir; it must move to `src/` before ECU can share it.
+  - [x] **DONE:** shared code relocated into **`src/app/`** (`logic/{common,fcu}` + `platform/` + `board.hpp`);
+        board projects under **`src/boards/`**; `stm-2026-common/` fully folded in and deleted. Repo root now
+        holds a single code folder `src/`. Firmware builds byte-identical.
+  - [x] **Tests consolidated** into `src/app`: one harness (`src/app/tests/` — runner + shared fakes +
+        GoogleTest), co-located per-site test dirs `src/app/logic/<site>/tests/` (`common` + `fcu`; `ecu`
+        later). The obsolete `stm-2026-common` standalone-submodule test machinery is retired. **75 tests pass.**
+        Run via `cmake -P src/app/tests/run.cmake` (VS Code task: "Run logic tests").
+
+- [x] **Phase 2b — Composition seam** ✅ DONE. `main.cpp` (`src/boards/fcu/main.cpp`) is now the
+      **handle-free** app composition: it defines the object graph + tick loop and calls
+      `board::halInit(); board::wireDrivers();`. `board.cpp` owns **all** hardware naming —
+      `wireDrivers()` (the `hspi4`/`htim1`/pin binding + timer/NVIC config) and the ISR vectors.
+      `SdCard` gained a default ctor + `bind()` so the card is declared handle-free and bound in `board.cpp`.
+      **Layering correction vs the original plan:** the composition instantiates the HAL drivers, so it
+      cannot live in the HAL-free `src/app/logic/fcu`; it stays **board-side** under `src/boards/fcu/`
+      (with `fcu_objects.hpp` sharing the object graph between `main.cpp` and `board.cpp`). The HAL-free
+      FCU logic (Controller, handlers, states) remains in `src/app/logic/fcu`. Firmware builds, 75 tests pass.
 
 - [ ] **Phase 4 — Stand up the ECU CubeMX project**
   - [ ] Create `boards/ecu/ECU.ioc` for the ECU pinout (no Ethernet; CAN; its own peripheral instances).

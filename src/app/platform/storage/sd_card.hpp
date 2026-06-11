@@ -32,6 +32,18 @@ public:
      */
     SdCard(SD_HandleTypeDef* handle, const char* drive);
 
+    /** @brief  Default-construct unbound; call bind() before init(). Lets the app
+     *          composition declare the card without naming a board HAL handle. */
+    SdCard() = default;
+
+    /**
+     * @brief  Bind the HAL SD handle + FatFs drive after construction, so the
+     *         board layer owns the handle name and the app composition stays
+     *         handle-free. @p drive must outlive the instance. Does not touch
+     *         hardware; init() mounts.
+     */
+    void bind(SD_HandleTypeDef* handle, const char* drive) { handle_ = handle; drive_ = drive; }
+
     /**
      * @brief  Mount the volume and open the log file (kept open afterwards).
      *         Status becomes ACTIVE on success, ERROR otherwise.
@@ -67,8 +79,8 @@ private:
 
     // Retained to identify the card; FatFs reaches the media through the linked
     // diskio driver, not this handle directly.
-    SD_HandleTypeDef* handle_;
-    const char*       drive_;   // FatFs logical drive, e.g. "0:/"
+    SD_HandleTypeDef* handle_{};
+    const char*       drive_{};   // FatFs logical drive, e.g. "0:/"
     FATFS             fs_{};
     FIL               file_{};  // log file, opened by init() and kept open
     StorageInfo       info_{};  // state + status (incl. last error cause); see info()
