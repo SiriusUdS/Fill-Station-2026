@@ -15,3 +15,9 @@ src/app/tests/third_party/
 
 # IDE-generated C/C++ config (clangd/CMake drive include paths instead).
 .vscode/c_cpp_properties.json
+
+# CubeMX regenerates per-board toolchain/preset copies at the project root; we build
+# via the top-level selector + repo-root toolchain, so these board-root copies are unused.
+src/boards/*/gcc-arm-none-eabi.cmake
+src/boards/*/starm-clang.cmake
+src/boards/*/CMakePresets.json

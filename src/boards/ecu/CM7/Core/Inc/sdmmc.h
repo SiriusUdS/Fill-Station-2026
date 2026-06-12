@@ -27,19 +27,18 @@ extern "C" {
 
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
-#include "string.h"
 
 /* USER CODE BEGIN Includes */
 
 /* USER CODE END Includes */
 
-extern SD_HandleTypeDef hsd2;
+extern SD_HandleTypeDef hsd1;
 
 /* USER CODE BEGIN Private defines */
 
 /* USER CODE END Private defines */
 
-void MX_SDMMC2_SD_Init(void);
+void MX_SDMMC1_SD_Init(void);
 
 /* USER CODE BEGIN Prototypes */
 

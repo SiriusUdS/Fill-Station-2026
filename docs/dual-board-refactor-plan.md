@@ -236,9 +236,15 @@ The genuinely hard part. CubeMX is one-project-per-directory and regenerates `Co
         `halInit` (clocks/MPU/GPIO) + empty `wireDrivers()`; dropped `fcu_objects.hpp`; ecu `CM7/CMakeLists`
         compiles only `../main.cpp` + `../board.cpp` (no FCU drivers/logic). `src/app/logic/ecu/` placeholder
         added. Builds via `ecu-Debug` → `ecu_CM7.elf`, FLASH 2.21% (was 9.25%). FCU untouched & green.
-  - [ ] **Next — change peripherals (your CubeMX action):** regenerate `src/boards/ecu/ecu.ioc` with the
-        real ECU pinout (no Ethernet; CAN; its own SPI/timers/pins). Then build out `src/app/logic/ecu/`
-        and wire ecu's `board.cpp`/`main.cpp` to the real drivers.
+  - [x] **ECU pinout generated (CubeMX).** Real peripheral complement: 2 servo valves IPA(PE5)/NOS(PE6)
+        on TIM15, 4 limit switches (PF0-3), ADS131M08 ADC on **SPI1** (PA4-7, CS PC5), SD on **SDMMC1/hsd1**,
+        **FDCAN1** (telemetry→FCU), TIM6 (record timer), CRC. **No Ethernet, no I2C, no SPI6 (no TCs).**
+        Synced ecu `board.cpp` (dropped the FCU `PeriphCommonClock_Config` — ECU uses default kernel clocks).
+        Builds via `ecu-Debug` → `ecu_CM7.elf`, FLASH 0.94%. Vestigial CubeMX per-board toolchain/preset
+        copies gitignored. (NB: generated `Core/Src/main.c` carries leftover USER CODE — harmless, it's excluded.)
+  - [ ] **Next — build out the ECU:** decide `logic::ecu` (own controller/states/handlers + records→CAN→FCU
+        routing, reusing `logic/common`), then wire ecu's `board.cpp`/`main.cpp` to the shared drivers
+        (BallValve ×2 on TIM15, Ads131m08 on SPI1, SdCard on hsd1, Can on FDCAN1).
 
 - [ ] **Phase 5 — Author ECU logic policy (`app/logic/ecu/`)**
   - [ ] ECU controller composing `logic/common` mechanism.
