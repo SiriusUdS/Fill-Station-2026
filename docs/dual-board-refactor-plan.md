@@ -242,9 +242,16 @@ The genuinely hard part. CubeMX is one-project-per-directory and regenerates `Co
         Synced ecu `board.cpp` (dropped the FCU `PeriphCommonClock_Config` — ECU uses default kernel clocks).
         Builds via `ecu-Debug` → `ecu_CM7.elf`, FLASH 0.94%. Vestigial CubeMX per-board toolchain/preset
         copies gitignored. (NB: generated `Core/Src/main.c` carries leftover USER CODE — harmless, it's excluded.)
-  - [ ] **Next — build out the ECU:** decide `logic::ecu` (own controller/states/handlers + records→CAN→FCU
-        routing, reusing `logic/common`), then wire ecu's `board.cpp`/`main.cpp` to the shared drivers
-        (BallValve ×2 on TIM15, Ads131m08 on SPI1, SdCard on hsd1, Can on FDCAN1).
+  - [x] **ECU drivers wired (logic deferred).** ecu `main.cpp` defines the object graph (2 `BallValve`,
+        `Ads131m08`, `Can`, `SdCard`); `board.cpp` `halInit` brings up all peripherals and `wireDrivers`
+        binds them: CAN=`ENGINE_BOARD_ID`(0x01), ADS131M08 on SPI1 (DRDY PA4→`EXTI4`, CS PC5), SD on hsd1
+        (mounted), IPA valve=TIM15_CH1, NOS valve=TIM15_CH2 (both with open+close limit switches), valves
+        closed at boot. Loop ticks the valves; no controller yet. Builds → `ecu_CM7.elf`, FLASH 6.59%. FCU green.
+        Shared driver *interfaces* (adc/storage) still live in `logic/fcu` — ECU includes that for now
+        (**TODO: move shared interfaces to `logic/common`**).
+  - [ ] **Next — hardware test + logic::ecu:** verify on the bench (NB: confirm the `.ioc` has SPI1 RX DMA
+        for the ADS131M08, else the ADC won't acquire), then author `logic::ecu` (controller/states/handlers
+        + records→CAN→FCU routing).
 
 - [ ] **Phase 5 — Author ECU logic policy (`app/logic/ecu/`)**
   - [ ] ECU controller composing `logic/common` mechanism.

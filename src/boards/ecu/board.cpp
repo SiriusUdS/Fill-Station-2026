@@ -1,20 +1,33 @@
 /**
   ******************************************************************************
   * @file           : board.cpp  (ECU)
-  * @brief          : ECU board-support — minimal do-nothing stub.
+  * @brief          : ECU board-support: HAL bring-up + driver wiring + ISRs.
   *
-  * Implements the board:: contract (src/app/board.hpp) for the ECU. For now this
-  * is a stub cloned down from the FCU: it brings up the clocks/MPU/GPIO so the
-  * board boots and idles, and wireDrivers() is empty (no drivers). The peripheral
-  * MX_*_Init list, driver wiring, and ISR vectors are added back as the ECU's real
-  * pinout (regenerated in CubeMX) and logic::ecu are built out.
+  * Implements the board:: contract (src/app/board.hpp) for the ECU. The ONLY place
+  * that names HAL handles, pin macros, peripheral instances, and ISR vectors. The
+  * handle-free composition (the object graph + tick loop) lives in main.cpp; here we
+  * bring up the chip (halInit) and bind each driver to this board's hardware
+  * (wireDrivers). No controller yet — "wire drivers first, logic later".
   ******************************************************************************
   */
 #include "board.hpp"
 
-/* CubeMX-generated clock/GPIO bring-up + HAL handles (CM7/Core/Inc). */
+/* CubeMX-generated peripheral init declarations + HAL handles (CM7/Core/Inc). */
 #include "main.h"
 #include "gpio.h"
+#include "crc.h"
+#include "fdcan.h"
+#include "spi.h"
+#include "sdmmc.h"
+#include "fatfs.h"
+#include "tim.h"
+
+/* The ECU object graph (defined in main.cpp) + the bits wireDrivers() needs. */
+#include "ecu_objects.hpp"
+#include "dil/can_types.h"
+#include "sirius-headers-common/Telecommunication/PacketHeaderVariable.h"   // ENGINE_BOARD_ID
+
+using namespace ecu_app;
 
 static void SystemClock_Config(void);
 static void MPU_Config(void);
@@ -23,20 +36,85 @@ namespace board {
 
 void halInit(void)
 {
-  /* MPU + HAL + clock tree, then GPIO. The ECU stub brings up only what it needs
-     to boot and idle; peripheral MX_*_Init calls are added when drivers are wired. */
+  /* MPU + HAL + system clock (the ECU uses default kernel clocks — no
+     PeriphCommonClock_Config), then every CubeMX-configured peripheral. */
   MPU_Config();
   HAL_Init();
   SystemClock_Config();
+
   MX_GPIO_Init();
+  MX_CRC_Init();
+  MX_FDCAN1_Init();
+  MX_SPI1_Init();        // ADS131M08 ADC bus
+  MX_SDMMC1_SD_Init();   // SD card
+  MX_FATFS_Init();
+  MX_TIM15_Init();       // valve servo PWM (CH1=IPA/PE5, CH2=NOS/PE6)
+  MX_TIM6_Init();        // record-production cadence (unused until the controller lands)
 }
 
 void wireDrivers(void)
 {
-  /* ECU stub: no drivers wired yet. */
+  /* CAN node — the ECU downlinks telemetry over CAN to the FCU. */
+  (void)g_can.init(&hfdcan1, ENGINE_BOARD_ID);
+
+  /* ADS131M08 ADC on SPI1. The board owns the DRDY (PA4) pin: configure it as a
+     falling-edge EXTI input, then let the driver arm it. CS is PC5. */
+  GPIO_InitTypeDef drdy = {};
+  drdy.Pin  = ADS_DRDY_Pin;     // PA4
+  drdy.Mode = GPIO_MODE_IT_FALLING;
+  drdy.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(ADS_DRDY_GPIO_Port, &drdy);   // GPIOA
+
+  g_ads131.init({
+      .hspi      = &hspi1,
+      .cs_port   = ADS_CS_GPIO_Port,   // GPIOC
+      .cs_pin    = ADS_CS_Pin,         // PC5
+      .drdy_pin  = ADS_DRDY_Pin,       // PA4
+      .drdy_irqn = EXTI4_IRQn,
+  });
+  g_ads131.start();
+
+  /* Bind + mount the SD card on SDMMC1 (the app composition left it unbound). */
+  g_card.bind(&hsd1, "0:/");
+  g_card.init();
+
+  /* Two propellant ball valves on TIM15: IPA = CH1 (PE5), NOS = CH2 (PE6). 333 Hz
+     (3 ms) servo PWM owned here: 100 MHz / (PSC 99 + 1) = 1 MHz tick; ARR 2999 -> 3 ms.
+     Pulse 1-2 ms = 1000-2000 ticks; tune min/max for the valve's actual travel. */
+  __HAL_TIM_SET_PRESCALER(&htim15,  99);
+  __HAL_TIM_SET_AUTORELOAD(&htim15, 2999);
+  htim15.Instance->EGR = TIM_EGR_UG;   // reload PSC/ARR now (no first-period glitch)
+
+  g_ipa_valve.init({
+      .servo       = {.htim = &htim15, .channel = TIM_CHANNEL_1,
+                      .min_pulse_ticks = 1000.0F, .max_pulse_ticks = 2000.0F},
+      .open_limit  = {.port = SWITCH_VALVE_IPA_OPENED_GPIO_Port, .pin = SWITCH_VALVE_IPA_OPENED_Pin},
+      .close_limit = {.port = SWITCH_VALVE_IPA_CLOSED_GPIO_Port, .pin = SWITCH_VALVE_IPA_CLOSED_Pin},
+      .max_transit_timeout_ms = 5000,
+  });
+  g_nos_valve.init({
+      .servo       = {.htim = &htim15, .channel = TIM_CHANNEL_2,
+                      .min_pulse_ticks = 1000.0F, .max_pulse_ticks = 2000.0F},
+      .open_limit  = {.port = SWITCH_VALVE_NOS_OPENED_GPIO_Port, .pin = SWITCH_VALVE_NOS_OPENED_Pin},
+      .close_limit = {.port = SWITCH_VALVE_NOS_CLOSED_GPIO_Port, .pin = SWITCH_VALVE_NOS_CLOSED_Pin},
+      .max_transit_timeout_ms = 5000,
+  });
+
+  /* Safe boot state: drive both valves closed (no flow). */
+  (void)g_ipa_valve.close();
+  (void)g_nos_valve.close();
 }
 
 }  // namespace board
+
+/* ---- Board ISR vectors (symbols fixed by the chosen pin group) ---- */
+
+/* DRDY (PA4) data-ready EXTI vector. PA4 is EXTI line 4 -> EXTI4_IRQHandler; it
+   dispatches through the HAL to the ADC driver's HAL_GPIO_EXTI_Callback. */
+extern "C" void EXTI4_IRQHandler(void)
+{
+  HAL_GPIO_EXTI_IRQHandler(ADS_DRDY_Pin);   // GPIO_PIN_4
+}
 
 /**
   * @brief  This function is executed in case of error occurrence.
