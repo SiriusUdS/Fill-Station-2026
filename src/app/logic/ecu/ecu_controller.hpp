@@ -51,6 +51,10 @@ inline constexpr std::size_t LOG_HALF_BYTES = 4096;
    timer emits filler records (flagged invalid) so the downlink rate holds. */
 inline constexpr uint32_t ADC_TIMEOUT_MS = 10;
 
+/* Byte offset of the valve index in a CAN_ID_CMD_VALVE frame (mirrors the FCU's
+   sendValveCmd: data[0..3] = timestamp, data[4] = valve index). */
+inline constexpr std::size_t CMD_VALVE_INDEX_OFFSET = sizeof(uint32_t);
+
 /* Volatile per-boot bookkeeping (the state itself lives in Backup SRAM via
    logic::control::persistent_state, so it survives a reset). */
 struct Engine {
@@ -113,7 +117,10 @@ public:
     void produceRecord(uint32_t now_ms);
 
 private:
-    void        canTick();                                   // E2: parse FCU commands, actuate valves
+    void        canTick();                                   // drain CAN, dispatch FCU commands
+    void        handleCanFrame(const logic::communication::CanFrame& frame);
+    void        handleValveCmd(const logic::communication::CanFrame& frame, const CANHeader& header);
+    void        handlePing(const logic::communication::CanFrame& frame, const CANHeader& header);
     SystemState buildSystemState(const AdcInfo& adc, uint32_t now_ms);
     void        logAppend(const SystemState& record);
     void        drainTick();                                 // flush full halves to SD (+ CAN in E3)

@@ -10,16 +10,83 @@ namespace logic::ecu {
 
 /* ---- CAN (commands from the FCU) ----------------------------------------- */
 
-/* Drain the CAN RX ring every tick so it cannot back up. Parsing FCU commands
-   (CAN_ID_CMD_VALVE -> actuate IPA/NOS, ping -> pong, set-state) is E2. */
+/* Drain the CAN RX ring every tick (so it cannot back up) and dispatch each frame
+   addressed to us. The FCU sends CAN_ID_CMD_VALVE to drive the ECU's valves and may
+   ping; the ECU replies pong and actuates. */
 template <logic::storage::Storage S, logic::actuation::Valve V,
           logic::communication::StreamingAdc A, logic::communication::Can C>
 void Controller<S, V, A, C>::canTick()
 {
     while (auto frame = can_.receive()) {
         engine_.last_cmd_ms = engine_.current_tick_ms;
-        (void)frame;  // TODO(E2): dispatch CAN_ID_CMD_VALVE / ping / set-state
+        handleCanFrame(*frame);
     }
+}
+
+// Decode the 29-bit identifier into the shared CANHeader and route by messageID,
+// ignoring frames not addressed to this node (or broadcast).
+template <logic::storage::Storage S, logic::actuation::Valve V,
+          logic::communication::StreamingAdc A, logic::communication::Can C>
+void Controller<S, V, A, C>::handleCanFrame(const logic::communication::CanFrame& frame)
+{
+    CANHeader header;
+    header.code = frame.id;
+
+    if (header.frame.targetID != ENGINE_BOARD_ID &&
+        header.frame.targetID != BOARD_BROADCAST_ID) {
+        return;  // not for us
+    }
+
+    switch (header.frame.messageID) {
+        case CAN_ID_CMD_VALVE: handleValveCmd(frame, header); break;
+        case CAN_ID_COMM_PING: handlePing(frame, header);     break;
+        default:               break;
+    }
+}
+
+// Drive one of the ECU's valves from a CAN_ID_CMD_VALVE frame: the valve index is at
+// data[4] (CAN_VALVE_1 = IPA, CAN_VALVE_2 = NOS); the open/close action is in the
+// header's deviceState (CAN_CMD_OPEN / CAN_CMD_CLOSE).
+template <logic::storage::Storage S, logic::actuation::Valve V,
+          logic::communication::StreamingAdc A, logic::communication::Can C>
+void Controller<S, V, A, C>::handleValveCmd(const logic::communication::CanFrame& frame,
+                                            const CANHeader& header)
+{
+    if (frame.length <= detail::CMD_VALVE_INDEX_OFFSET) {
+        return;  // frame too short to carry a valve index
+    }
+    const uint8_t valve_idx = frame.data[detail::CMD_VALVE_INDEX_OFFSET];
+
+    V* valve = (valve_idx == CAN_VALVE_1) ? &ipa_valve_
+             : (valve_idx == CAN_VALVE_2) ? &nos_valve_
+             : nullptr;
+    if (valve == nullptr) {
+        return;  // unknown valve id
+    }
+
+    switch (header.frame.deviceState) {
+        case CAN_CMD_OPEN:  (void)valve->open();  break;
+        case CAN_CMD_CLOSE: (void)valve->close(); break;
+        default:            break;
+    }
+}
+
+// Reply to a ping with a pong back to the sender, echoing the payload.
+template <logic::storage::Storage S, logic::actuation::Valve V,
+          logic::communication::StreamingAdc A, logic::communication::Can C>
+void Controller<S, V, A, C>::handlePing(const logic::communication::CanFrame& frame,
+                                        const CANHeader& header)
+{
+    CANHeader reply  = {};
+    reply.frame.senderID  = ENGINE_BOARD_ID;
+    reply.frame.targetID  = header.frame.senderID;
+    reply.frame.messageID = CAN_ID_COMM_PONG;
+
+    logic::communication::CanFrame out;
+    out.id     = reply.code;
+    out.length = frame.length;
+    out.data   = frame.data;   // echo payload
+    (void)can_.send(out);
 }
 
 /* ---- Telemetry production (per ADC sample) -------------------------------- */
