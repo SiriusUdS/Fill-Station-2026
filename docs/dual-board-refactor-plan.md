@@ -232,9 +232,13 @@ The genuinely hard part. CubeMX is one-project-per-directory and regenerates `Co
         ProjectName=ecu, `ecu_CM7` build target). Builds via `cmake --preset ecu-Debug` → `ecu_CM7.elf`.
         Currently an **exact FCU clone** (same `Core/`; `board.cpp`/`main.cpp`/`fcu_objects.hpp` still
         reference `logic::fcu` and the FCU drivers). Both boards build side-by-side, isolated build dirs.
-  - [ ] **Next — thin + change peripherals:** strip FCU-only hardware (Ethernet, fill/dump valves), carve
-        `src/app/logic/ecu/`, repoint ecu's `board.cpp`/`main.cpp`/objects at it, and regenerate the ECU
-        pinout in CubeMX. Interim target: ECU builds and does "nothing" (no drivers wired).
+  - [x] **Thinned to a do-nothing stub (code track):** ecu's `main.cpp` = idle loop; `board.cpp` = minimal
+        `halInit` (clocks/MPU/GPIO) + empty `wireDrivers()`; dropped `fcu_objects.hpp`; ecu `CM7/CMakeLists`
+        compiles only `../main.cpp` + `../board.cpp` (no FCU drivers/logic). `src/app/logic/ecu/` placeholder
+        added. Builds via `ecu-Debug` → `ecu_CM7.elf`, FLASH 2.21% (was 9.25%). FCU untouched & green.
+  - [ ] **Next — change peripherals (your CubeMX action):** regenerate `src/boards/ecu/ecu.ioc` with the
+        real ECU pinout (no Ethernet; CAN; its own SPI/timers/pins). Then build out `src/app/logic/ecu/`
+        and wire ecu's `board.cpp`/`main.cpp` to the real drivers.
 
 - [ ] **Phase 5 — Author ECU logic policy (`app/logic/ecu/`)**
   - [ ] ECU controller composing `logic/common` mechanism.

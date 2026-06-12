@@ -12,3 +12,6 @@ tools/
 
 # GoogleTest is fetched on demand, not committed.
 src/app/tests/third_party/
+
+# IDE-generated C/C++ config (clangd/CMake drive include paths instead).
+.vscode/c_cpp_properties.json
