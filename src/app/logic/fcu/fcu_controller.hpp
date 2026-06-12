@@ -17,6 +17,7 @@
 
 #include "communication/protocol/ethernet/ethernet_header.hpp"  // EthernetHeader (downlink header)
 #include "communication/protocol/telemetry/system_state.hpp"    // SystemState, ValveInfo, InterfaceFieldFlags
+#include "communication/protocol/can/system_state_codec.hpp"    // SystemStateReassembler (ECU telemetry relay)
 #include "fcu_valves.hpp"                  // FcuValves (valve identity / array index SSOT)
 #include "command/command.hpp"            // CommandType (Ethernet payloadID)
 #include "command/set_valve_position.hpp" // SetValvePositionFrame, ValveCommand
@@ -171,7 +172,10 @@ private:
     SystemState buildSystemState(const AdcInfo& adc, uint32_t now_ms);
     void        logAppend(const SystemState& record);
     void        watchdogTick();
-    void        sendBatched(std::span<const uint8_t> records);
+    // Single GS egress: batch a run of SystemState records into UDP datagrams tagged
+    // with their source board id + state. Used for both the FCU's own records and the
+    // reassembled ECU records relayed off the CAN bus.
+    void        sendToGs(uint8_t sourceId, uint8_t sourceState, std::span<const uint8_t> records);
     void        drainTick();
 
     S&                  storage_;        // injected backing store, used as a Storage explicitly
@@ -183,6 +187,7 @@ private:
     detail::FillStation fill_{};
     detail::LogBuffer   log_;            // .axisram in firmware; left uninitialised until init()
     volatile uint32_t   last_adc_ms_ = 0;  // last tick a conversion was drained; gates the silent-ADC filler
+    logic::communication::can::SystemStateReassembler ecu_reassembler_;  // rebuilds ECU telemetry from CAN
 
     static_assert(std::extent_v<decltype(SystemState::valve_info)> == 2,
                   "SystemState expects exactly two valves (Fill, Dump)");

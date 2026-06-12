@@ -31,16 +31,21 @@ void Controller<S, V, A, E, C>::sendValveCmd(uint8_t valve, uint8_t cmd)
     (void)can_.send(frame);
 }
 
-/* The FCU receives only status/telemetry from the ECU over CAN — never commands,
-   which always arrive over Ethernet. Drain the RX ring each tick so it cannot
-   back up; feeding ECU valve status into the state machine is a later step. */
+/* The FCU receives ECU telemetry over CAN: SystemState records fragmented by the
+   shared codec. Reassemble each and relay it to the GS through the single egress,
+   tagged as ENGINE_BOARD_ID so the GS demuxes it from the FCU's own records. (The
+   FCU never receives commands over CAN — those always arrive over Ethernet.) */
 template <logic::storage::Storage S, logic::actuation::Valve V,
           logic::communication::StreamingAdc A, logic::communication::Ethernet E,
           logic::communication::Can C>
 void Controller<S, V, A, E, C>::canTick()
 {
     while (auto frame = can_.receive()) {
-        (void)frame;  // TODO: consume ECU valve status / telemetry
+        if (auto record = ecu_reassembler_.accept(*frame)) {
+            const SystemState ecu = *record;
+            sendToGs(ENGINE_BOARD_ID, /*sourceState (ECU state not yet in the record)*/ 0,
+                     std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(&ecu), sizeof(ecu)));
+        }
     }
 }
 
@@ -259,12 +264,15 @@ void Controller<S, V, A, E, C>::produceRecord(uint32_t now_ms)
 
 /* ---- Telemetry drain (SD + Ethernet) -------------------------------------- */
 
-// Split a run of records into UDP datagrams (EthernetHeader + records + CRC) and
-// send them to the GS.
+// The single GS egress: split a run of SystemState records into UDP datagrams
+// (EthernetHeader + records + CRC) tagged with their source board id + state, and
+// send them to the GS. Both the FCU's own records (drainTick) and the reassembled
+// ECU records (canTick) flow through here, distinguished by the header's deviceID.
 template <logic::storage::Storage S, logic::actuation::Valve V,
           logic::communication::StreamingAdc A, logic::communication::Ethernet E,
           logic::communication::Can C>
-void Controller<S, V, A, E, C>::sendBatched(std::span<const uint8_t> records)
+void Controller<S, V, A, E, C>::sendToGs(uint8_t sourceId, uint8_t sourceState,
+                                         std::span<const uint8_t> records)
 {
     static std::array<uint8_t,
         sizeof(EthernetHeader) + detail::ETH_RECORDS_PER_PACKET * sizeof(SystemState) + sizeof(uint32_t)>
@@ -276,10 +284,10 @@ void Controller<S, V, A, E, C>::sendBatched(std::span<const uint8_t> records)
             records.size() - off < batch_bytes ? records.size() - off : batch_bytes;
 
         EthernetHeader header = {};
-        header.deviceID      = FILLING_STATION_BOARD_ID;
+        header.deviceID      = sourceId;
         header.payloadID     = GET_SYSTEM;
         header.payloadLenght = static_cast<uint16_t>(chunk);
-        header.deviceState   = static_cast<uint8_t>(logic::control::persistent_state.fill_state);
+        header.deviceState   = sourceState;
         header.deviceTS_MS   = fill_.current_tick_ms;
 
         const uint32_t crc = detail::crc32(records.data() + off, chunk);
@@ -306,7 +314,9 @@ void Controller<S, V, A, E, C>::drainTick()
         const uint16_t bytes = log_.used[h];
 
         storage_.write(std::span<const uint8_t>(log_.data[h], detail::LOG_HALF_BYTES));
-        sendBatched(std::span<const uint8_t>(log_.data[h], bytes));
+        sendToGs(FILLING_STATION_BOARD_ID,
+                 static_cast<uint8_t>(logic::control::persistent_state.fill_state),
+                 std::span<const uint8_t>(log_.data[h], bytes));
         log_.ready[h] = false;
     }
 }

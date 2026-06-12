@@ -93,6 +93,14 @@ std::optional<CanError> Can::init(FDCAN_HandleTypeDef* hfdcan, uint8_t nodeId)
         return fail();
     }
 
+    /* ActivateNotification only unmasks the interrupt at the peripheral; the CPU
+       still won't vector unless the NVIC line is enabled. CubeMX does not emit this
+       (FDCAN1 is not ticked in the .ioc NVIC tab), so the driver owns it here — this
+       is what makes HAL_FDCAN_RxFifo0Callback (and thus receive()) fire. Both boards
+       wire FDCAN1, so line IT0 is the RX FIFO0 interrupt for each. */
+    HAL_NVIC_SetPriority(FDCAN1_IT0_IRQn, 5, 0);
+    HAL_NVIC_EnableIRQ(FDCAN1_IT0_IRQn);
+
     s_info.status.initialized = 1u;
     s_info.state              = CanState::Active;
     return std::nullopt;

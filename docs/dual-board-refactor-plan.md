@@ -266,11 +266,16 @@ The genuinely hard part. CubeMX is one-project-per-directory and regenerates `Co
         SD and downlinks that half's **latest** record over CAN to the FCU (downsampled — the bus can't carry
         the 2 kHz full-rate log). **5 round-trip codec tests** (exact / out-of-order / incomplete / seq-reset);
         80 tests pass. ECU FLASH 7.49%, FCU green.
-  - [ ] **Remaining:** (a) **FCU side** — `logic::fcu::Controller::canTick()` consumes the ECU telemetry via
-        `SystemStateReassembler` and relays to the GS (its current `canTick` is a drain-and-ignore TODO);
-        (b) optional **pipeline dedup** — lift `LogBuffer`/`produceRecord`/`logAppend` into `logic/common` so
-        both controllers share them (ECU currently duplicates them); (c) **E5** — ECU controller tests under
-        `logic/ecu/tests/`; (d) the deferred **engine state machine** (states beyond Init→Safe).
+  - [x] **FCU reassembly + single egress DONE.** `logic::fcu::Controller::canTick()` now feeds inbound CAN
+        through `SystemStateReassembler` and relays each completed ECU record to the GS. The FCU's UDP egress
+        was refactored `sendBatched`→**`sendToGs(sourceId, sourceState, records)`** — one path for both the FCU's
+        own records (tagged `FILLING_STATION_BOARD_ID`) and the reassembled ECU records (tagged
+        `ENGINE_BOARD_ID`); the GS demuxes by `deviceID`. **Full loop: ECU→CAN(frag)→FCU(reassemble)→Eth→GS.**
+        Both boards build, 80 tests pass.
+  - [ ] **Remaining:** (a) optional **pipeline dedup** — lift `LogBuffer`/`produceRecord`/`logAppend` into
+        `logic/common` so both controllers share them (ECU currently duplicates them); (b) **E5** — ECU
+        controller tests under `logic/ecu/tests/`; (c) the deferred **engine state machine** (beyond Init→Safe);
+        (d) carry the ECU's engine state in the relayed record's `sourceState` (currently 0).
 
 - [ ] **Phase 5 — Author ECU logic policy (`app/logic/ecu/`)**
   - [ ] ECU controller composing `logic/common` mechanism.
