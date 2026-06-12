@@ -24,10 +24,12 @@
 
 /* The ECU object graph (defined in main.cpp) + the bits wireDrivers() needs. */
 #include "ecu_objects.hpp"
+#include "memory/backup_ram.hpp"
 #include "dil/can_types.h"
 #include "sirius-headers-common/Telecommunication/PacketHeaderVariable.h"   // ENGINE_BOARD_ID
 
 using namespace ecu_app;
+namespace backup_ram = platform::memory::backup_ram;
 
 static void SystemClock_Config(void);
 static void MPU_Config(void);
@@ -54,6 +56,10 @@ void halInit(void)
 
 void wireDrivers(void)
 {
+  /* Bring up the backup domain first so the battery-backed Backup SRAM that holds
+     the persistent state is clocked + writable before the controller reads it. */
+  (void)backup_ram::init();
+
   /* CAN node — the ECU downlinks telemetry over CAN to the FCU. */
   (void)g_can.init(&hfdcan1, ENGINE_BOARD_ID);
 
@@ -74,9 +80,9 @@ void wireDrivers(void)
   });
   g_ads131.start();
 
-  /* Bind + mount the SD card on SDMMC1 (the app composition left it unbound). */
+  /* Bind the SD card on SDMMC1 (the app composition left it unbound). It is mounted
+     later by g_controller.init(). */
   g_card.bind(&hsd1, "0:/");
-  g_card.init();
 
   /* Two propellant ball valves on TIM15: IPA = CH1 (PE5), NOS = CH2 (PE6). 333 Hz
      (3 ms) servo PWM owned here: 100 MHz / (PSC 99 + 1) = 1 MHz tick; ARR 2999 -> 3 ms.
@@ -103,11 +109,40 @@ void wireDrivers(void)
   /* Safe boot state: drive both valves closed (no flow). */
   (void)g_ipa_valve.close();
   (void)g_nos_valve.close();
+
+  /* Bring up the engine controller (this also mounts the SD card via g_card.init()). */
+  g_controller.init();
+
+  /* Start the record-production timer last, so records only flow once the logic and
+     SD are ready. The 2 kHz (0.5 ms) cadence is owned HERE: 100 MHz APB1 timer clock
+     / (PSC 99 + 1) = 1 MHz tick; ARR 499 -> 0.5 ms = 2 kHz. Decoupled from the ADC's
+     DRDY rate: each tick drains the ADC ring and produces one record per conversion. */
+  __HAL_TIM_SET_PRESCALER(&htim6,  99);
+  __HAL_TIM_SET_AUTORELOAD(&htim6, 499);
+  htim6.Instance->EGR = TIM_EGR_UG;               // reload PSC/ARR now (no first-period glitch)
+  __HAL_TIM_CLEAR_FLAG(&htim6, TIM_FLAG_UPDATE);  // UG set the flag; clear so we don't fire immediately
+  HAL_NVIC_SetPriority(TIM6_DAC_IRQn, 6, 0);
+  HAL_NVIC_EnableIRQ(TIM6_DAC_IRQn);
+  HAL_TIM_Base_Start_IT(&htim6);
 }
 
 }  // namespace board
 
-/* ---- Board ISR vectors (symbols fixed by the chosen pin group) ---- */
+/* ---- Board ISR vectors (symbols fixed by the chosen timer / pin group) ---- */
+
+/* Record-production timer (TIM6) ISR -> controller. TIM6 fires at a fixed cadence
+   (set in wireDrivers), decoupled from the ADC's DRDY rate. */
+extern "C" void TIM6_DAC_IRQHandler(void)
+{
+  HAL_TIM_IRQHandler(&htim6);
+}
+
+extern "C" void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef* htim)
+{
+  if (htim->Instance == TIM6) {
+    ecu_app::g_controller.produceRecord(HAL_GetTick());
+  }
+}
 
 /* DRDY (PA4) data-ready EXTI vector. PA4 is EXTI line 4 -> EXTI4_IRQHandler; it
    dispatches through the HAL to the ADC driver's HAL_GPIO_EXTI_Callback. */

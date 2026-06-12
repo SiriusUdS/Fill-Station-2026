@@ -249,9 +249,18 @@ The genuinely hard part. CubeMX is one-project-per-directory and regenerates `Co
         closed at boot. Loop ticks the valves; no controller yet. Builds → `ecu_CM7.elf`, FLASH 6.59%. FCU green.
         Shared driver *interfaces* (adc/storage) still live in `logic/fcu` — ECU includes that for now
         (**TODO: move shared interfaces to `logic/common`**).
-  - [ ] **Next — hardware test + logic::ecu:** verify on the bench (NB: confirm the `.ioc` has SPI1 RX DMA
-        for the ADS131M08, else the ADC won't acquire), then author `logic::ecu` (controller/states/handlers
-        + records→CAN→FCU routing).
+  - [x] **Bench bring-up confirmed** (BOOT0/VTOR gotcha resolved — see [[ecu-boot0-vtor-gotcha]]; SDMMC flow
+        control enabled). Both boards flash + run; ECU has FCU/ECU debug launch configs.
+  - [~] **`logic::ecu` controller — E1 done (skeleton).** `logic::ecu::Controller<S,V,A,C>` (FCU mirror minus
+        Ethernet) in `src/app/logic/ecu/{ecu_controller.hpp/.tpp,ecu_valves.hpp}`: `init`→`Safe`, `tick`
+        (drain CAN + flush telemetry to SD + Init→Safe), `produceRecord` (TIM6 2 kHz → drain ADC → SystemState
+        log). Wired into ecu `main.cpp`/`board.cpp` (backup domain, `g_controller.init()`, TIM6 ISR). Builds
+        (`ecu_CM7.elf` FLASH 7.25%); FCU green; 75 tests pass. State stays minimal (Init→Safe); engine states later.
+  - [ ] **E2 — CAN command routing (next):** `canTick()` dispatches inbound CAN — `CAN_ID_CMD_VALVE`→actuate
+        IPA/NOS, ping→pong, set-state — via an ECU command-handler registry.
+  - [ ] **E3 — CAN telemetry sink:** `drainTick()` downlinks records over CAN to the FCU (fragment `SystemState`
+        or compact `STATUS_VALVE`); likely refactor the record pipeline (LogBuffer + produceRecord + a generic
+        sink) into `logic/common` so FCU/ECU share it. Then **E5** — ECU tests under `logic/ecu/tests/`.
 
 - [ ] **Phase 5 — Author ECU logic policy (`app/logic/ecu/`)**
   - [ ] ECU controller composing `logic/common` mechanism.

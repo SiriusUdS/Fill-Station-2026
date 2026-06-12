@@ -1,7 +1,7 @@
 {
     "configurations": [
         {
-            "name": "M7",
+            "name": "FCU (M7)",
             "type": "stlinkgdbtarget",
             "request": "launch",
             "serverReset": "Connect under reset", // Asserts NRST on connect -> device resets from a clean state
@@ -11,6 +11,21 @@
             "imagesAndSymbols": [
                 {
                     "imageFileName": "${workspaceFolder}/src/boards/fcu/CM7/build/fcu_CM7.elf"
+                }
+            ],
+            "verbose": false
+        },
+        {
+            "name": "ECU (M7)",
+            "type": "stlinkgdbtarget",
+            "request": "launch",
+            "serverReset": "Connect under reset", // Asserts NRST on connect -> device resets from a clean state
+            "cwd": "${workspaceFolder}",
+            "preLaunchTask": "Build ECU", // builds src/boards/ecu via the top-level ecu-Debug preset
+            "runEntry": "main",
+            "imagesAndSymbols": [
+                {
+                    "imageFileName": "${workspaceFolder}/src/boards/ecu/CM7/build/ecu_CM7.elf"
                 }
             ],
             "verbose": false

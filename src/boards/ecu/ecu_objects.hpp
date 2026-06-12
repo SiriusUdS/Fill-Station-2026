@@ -1,17 +1,16 @@
 #pragma once
 
-/* The ECU board's driver object graph (no controller yet — "wire drivers first").
- *
- * Declares the driver instances that make up the ECU's hardware bring-up. They are
- * *defined* in main.cpp (the handle-free composition) and *bound* to HAL handles/pins
- * in board.cpp (board::wireDrivers). A controller / logic::ecu is added later; for now
- * the loop just ticks the valves while the ADC/SD/CAN are exercised.
+/* The ECU board's application object graph: the drivers + the engine controller
+ * built over them. They are *defined* in main.cpp (the handle-free composition) and
+ * *bound* to HAL handles/pins in board.cpp (board::wireDrivers); the controller is
+ * brought up there too (g_controller.init()) and ticked from the main loop.
  */
 
 #include "communication/can/can_dil.hpp"
 #include "acquisition/adc/ads131m08.hpp"
 #include "storage/sd_card.hpp"
 #include "actuation/valve/ball_valve.hpp"
+#include "ecu_controller.hpp"
 
 namespace ecu_app {
 
@@ -19,12 +18,18 @@ namespace can       = platform::communication::can;
 namespace ads131m08 = platform::acquisition::adc::ads131m08;
 namespace valve     = platform::actuation::valve;
 
+/* The ECU's concrete controller type, instantiated over its real drivers. */
+using EcuController = logic::ecu::Controller<platform::storage::SdCard, valve::BallValve,
+                                             ads131m08::Ads131m08, can::Can>;
+
 /* Two propellant ball valves (IPA + NOS) on TIM15, the streaming ADC on SPI1, the
- * CAN node (telemetry -> FCU), and the SD card. Defined in main.cpp. */
+ * CAN node (telemetry -> FCU), the SD card, and the controller built over them all.
+ * Defined in main.cpp. */
 extern valve::BallValve          g_ipa_valve;
 extern valve::BallValve          g_nos_valve;
 extern ads131m08::Ads131m08      g_ads131;
 extern can::Can                  g_can;
 extern platform::storage::SdCard g_card;
+extern EcuController             g_controller;
 
 }  // namespace ecu_app

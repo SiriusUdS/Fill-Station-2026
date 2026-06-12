@@ -1,26 +1,25 @@
 /**
   ******************************************************************************
   * @file           : main.cpp  (ECU)
-  * @brief          : ECU application composition + entry point (drivers-only).
+  * @brief          : ECU application composition + entry point.
   *
-  * The handle-free half of the ECU board. It *defines* the driver object graph
-  * (two ball valves, the streaming ADC, the SD card, the CAN node) and runs the
-  * tick loop. It names no HAL handle/pin: bring-up is board::halInit() (chip) +
-  * board::wireDrivers() (binds drivers to this board's hardware), both in board.cpp.
-  *
-  * There is no controller / logic::ecu yet ("wire drivers first, logic later"): the
-  * loop ticks the valves while the ADC acquires and the SD/CAN are brought up, so
-  * the hardware is exercised end-to-end before the control logic is written.
+  * The handle-free half of the ECU board. It *defines* the application object graph
+  * (two ball valves, the streaming ADC, the SD card, the CAN node, and the engine
+  * controller built over them) and runs the tick loop. It names no HAL handle/pin:
+  * bring-up is board::halInit() (chip) + board::wireDrivers() (binds drivers to this
+  * board's hardware + g_controller.init()), both in board.cpp.
   ******************************************************************************
   */
 #include "stm32h7xx_hal.h"   // HAL_GetTick
 
 #include "board.hpp"         // board::halInit / board::wireDrivers
-#include "ecu_objects.hpp"   // the ECU driver graph (declared extern, defined here)
+#include "ecu_objects.hpp"   // the ECU object graph (declared extern, defined here)
 
-/* The ECU's driver object graph. g_card is pinned in D1 AXI-SRAM (SDMMC DMA cannot
- * reach DTCM). The drivers are constructed unbound here; board::wireDrivers() binds
- * them to the board's HAL handles/pins. */
+/* The ECU's application object graph. g_card and g_controller are pinned in D1
+ * AXI-SRAM (the controller's telemetry double buffer is handed straight to the
+ * SDMMC DMA, which cannot reach DTCM); g_card is defined before g_controller, which
+ * holds a reference to it. The drivers are constructed unbound; board::wireDrivers()
+ * binds them and brings the controller up. */
 namespace ecu_app {
 
 valve::BallValve     g_ipa_valve;
@@ -29,6 +28,8 @@ ads131m08::Ads131m08 g_ads131;
 can::Can             g_can;
 
 __attribute__((section(".axisram"))) platform::storage::SdCard g_card;
+__attribute__((section(".axisram")))
+EcuController g_controller{g_card, g_ipa_valve, g_nos_valve, g_ads131, g_can};
 
 }  // namespace ecu_app
 
@@ -46,6 +47,6 @@ int main(void)
     const uint32_t now = HAL_GetTick();
     ecu_app::g_ipa_valve.tick(now);  // advance each valve's open/close + limit-switch state machine
     ecu_app::g_nos_valve.tick(now);
-    // ADC acquires via the DRDY ISR; no controller drains it yet (logic later).
+    ecu_app::g_controller.tick(now); // drain CAN, flush telemetry; produceRecord is on the timer
   }
 }
