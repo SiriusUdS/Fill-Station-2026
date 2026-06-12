@@ -1,5 +1,5 @@
 /* ------------------------------------------------------------------------- *
- * Unit tests for the SystemState <-> CAN fragment codec (logic::communication::can).
+ * Unit tests for the EcuSystemState <-> CAN fragment codec (logic::communication::can).
  *
  * The codec is the agreed wire format between the ECU (packs + sends) and the FCU
  * (reassembles + relays), so the round-trip must be exact, order-independent, and
@@ -24,19 +24,19 @@ namespace codec = logic::communication::can;
 
 namespace {
 
-// A SystemState with a recognisable byte pattern (so a byte-exact round-trip is
+// A EcuSystemState with a recognisable byte pattern (so a byte-exact round-trip is
 // meaningful regardless of the struct's field layout).
-SystemState makeRecord(uint8_t seed)
+EcuSystemState makeRecord(uint8_t seed)
 {
-    SystemState s = {};
+    EcuSystemState s = {};
     auto* bytes = reinterpret_cast<uint8_t*>(&s);
-    for (std::size_t i = 0; i < sizeof(SystemState); ++i) {
+    for (std::size_t i = 0; i < sizeof(EcuSystemState); ++i) {
         bytes[i] = static_cast<uint8_t>(seed + i);
     }
     return s;
 }
 
-std::array<CanFrame, SYSTEM_STATE_FRAGMENTS> pack(const SystemState& s, uint8_t seq)
+std::array<CanFrame, SYSTEM_STATE_FRAGMENTS> pack(const EcuSystemState& s, uint8_t seq)
 {
     std::array<CanFrame, SYSTEM_STATE_FRAGMENTS> frames{};
     codec::packSystemState(s, BoardId::Engine, BoardId::FillingStation, seq,
@@ -44,20 +44,20 @@ std::array<CanFrame, SYSTEM_STATE_FRAGMENTS> pack(const SystemState& s, uint8_t 
     return frames;
 }
 
-bool bytesEqual(const SystemState& a, const SystemState& b)
+bool bytesEqual(const EcuSystemState& a, const EcuSystemState& b)
 {
-    return std::memcmp(&a, &b, sizeof(SystemState)) == 0;
+    return std::memcmp(&a, &b, sizeof(EcuSystemState)) == 0;
 }
 
 }  // namespace
 
 TEST(SystemStateCodec, RoundTripInOrder)
 {
-    const SystemState original = makeRecord(0x10);
+    const EcuSystemState original = makeRecord(0x10);
     const auto frames = pack(original, /*seq*/ 3);
 
     SystemStateReassembler rx;
-    std::optional<SystemState> out;
+    std::optional<EcuSystemState> out;
     for (const auto& f : frames) {
         if (auto r = rx.accept(f)) out = r;
     }
@@ -68,11 +68,11 @@ TEST(SystemStateCodec, RoundTripInOrder)
 
 TEST(SystemStateCodec, RoundTripOutOfOrder)
 {
-    const SystemState original = makeRecord(0x55);
+    const EcuSystemState original = makeRecord(0x55);
     auto frames = pack(original, /*seq*/ 7);
 
     SystemStateReassembler rx;
-    std::optional<SystemState> out;
+    std::optional<EcuSystemState> out;
     for (auto it = frames.rbegin(); it != frames.rend(); ++it) {  // reversed
         if (auto r = rx.accept(*it)) out = r;
     }
@@ -83,7 +83,7 @@ TEST(SystemStateCodec, RoundTripOutOfOrder)
 
 TEST(SystemStateCodec, IncompleteYieldsNothing)
 {
-    const SystemState original = makeRecord(0x20);
+    const EcuSystemState original = makeRecord(0x20);
     const auto frames = pack(original, /*seq*/ 1);
 
     SystemStateReassembler rx;
@@ -94,8 +94,8 @@ TEST(SystemStateCodec, IncompleteYieldsNothing)
 
 TEST(SystemStateCodec, NewSequenceResetsInProgressRecord)
 {
-    const SystemState a = makeRecord(0x01);
-    const SystemState b = makeRecord(0x99);
+    const EcuSystemState a = makeRecord(0x01);
+    const EcuSystemState b = makeRecord(0x99);
     const auto fa = pack(a, /*seq*/ 2);
     const auto fb = pack(b, /*seq*/ 3);
 
@@ -103,7 +103,7 @@ TEST(SystemStateCodec, NewSequenceResetsInProgressRecord)
     for (std::size_t i = 0; i < fa.size() / 2; ++i) {  // partial 'a'
         EXPECT_FALSE(rx.accept(fa[i]).has_value());
     }
-    std::optional<SystemState> out;
+    std::optional<EcuSystemState> out;
     for (const auto& f : fb) {                          // full 'b' (different seq)
         if (auto r = rx.accept(f)) out = r;
     }
@@ -115,7 +115,7 @@ TEST(SystemStateCodec, NewSequenceResetsInProgressRecord)
 TEST(SystemStateCodec, FragmentsCoverTheWholeRecord)
 {
     // The fixed fragment count must be enough to carry every byte.
-    EXPECT_GE(SYSTEM_STATE_FRAGMENTS * codec::FRAGMENT_PAYLOAD_BYTES, sizeof(SystemState));
+    EXPECT_GE(SYSTEM_STATE_FRAGMENTS * codec::FRAGMENT_PAYLOAD_BYTES, sizeof(EcuSystemState));
     // Each frame is index byte + payload; the last carries the remainder.
     const auto frames = pack(makeRecord(0), 0);
     EXPECT_EQ(frames.front().data[0], 0u);

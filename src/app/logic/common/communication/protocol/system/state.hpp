@@ -25,7 +25,8 @@ enum class State : uint8_t {
     Abort  = 0x03,  /**< Abort sequence engaged. */
     Error  = 0x04,  /**< Fault latched. */
     Ignite = 0x05,  /**< Ignition sequence. */
-    Test   = 0x06,  /**< Bench/diagnostics. */
+    Launch = 0x06,  /**< Launch sequence. */
+    Test   = 0x07,  /**< Bench/diagnostics. */
 };
 
 } // namespace logic::control

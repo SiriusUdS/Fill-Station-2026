@@ -16,16 +16,17 @@
 #include "framing/can_header.hpp"                           // HAL-free CAN protocol (CanHeader, enums)
 
 #include "communication/protocol/framing/ethernet_header.hpp"  // EthernetHeader (downlink header)
-#include "communication/protocol/telemetry/system_state.hpp"    // SystemState, ValveInfo, InterfaceFieldFlags
-#include "communication/protocol/framing/system_state_codec.hpp"    // SystemStateReassembler (ECU telemetry relay)
+#include "communication/protocol/telemetry/fcu_system_state.hpp"  // FcuSystemState (this board's own record)
+#include "communication/protocol/framing/system_state_codec.hpp"    // EcuSystemState + SystemStateReassembler (ECU telemetry relay)
 #include "system/valves/fcu.hpp"                  // FcuValves (valve identity / array index SSOT)
 #include "communication/command/command.hpp"            // CommandType (Ethernet payloadID)
 #include "command/set_valve_position.hpp" // SetValvePositionFrame, ValveCommand
 
 #include "framing/udp_frame.hpp"
-#include "system/board_ids.hpp"
+#include "system/board_id.hpp"
 #include "telemetry/telemetry_id.hpp"
 #include "system/state.hpp"
+#include "data_integrity/crc32.hpp"   // logic::data_integrity::crc32 (hardware-backed telemetry CRC seam)
 
 /* ------------------------------------------------------------------------- *
  * FCU filling-station state machine (HAL-free), as a class template.
@@ -55,7 +56,7 @@ using logic::communication::Endpoint;
 inline constexpr uint32_t    RX_WATCHDOG_MS            = 500;
 inline constexpr std::size_t REQUEST_STATE_OFFSET_BYTES = 15;  // requested state byte in the packet
 
-/* Telemetry double buffer: each SystemState (one per ADC sample) is appended to
+/* Telemetry double buffer: each FcuSystemState (one per ADC sample) is appended to
    the active 4096-byte half; when a half fills it is flushed to SD and streamed
    to the GS while the producer fills the other half. */
 inline constexpr std::size_t LOG_HALF_BYTES = 4096;
@@ -64,11 +65,11 @@ inline constexpr std::size_t LOG_HALF_BYTES = 4096;
    record timer emits filler records (flagged invalid) so the packet rate holds. */
 inline constexpr uint32_t ADC_TIMEOUT_MS = 10;   // > worst-case stall before declaring the ADC silent
 
-/* Records per UDP datagram (EthernetHeader + records + CRC <= the link's UDP
-   payload limit; keep UDP_MAX_PAYLOAD_BYTES in sync with the platform stack). */
+/* The link's UDP payload limit (EthernetHeader + records + CRC must fit; keep in
+   sync with the platform stack). sendToGs packs as many whole records as fit,
+   computed from the record size it is handed — the FCU's own FcuSystemState and
+   the relayed EcuSystemState have different sizes. */
 inline constexpr std::size_t UDP_MAX_PAYLOAD_BYTES = 1432;
-inline constexpr std::size_t ETH_RECORDS_PER_PACKET =
-    (UDP_MAX_PAYLOAD_BYTES - sizeof(EthernetHeader) - sizeof(uint32_t)) / sizeof(SystemState);
 
 /* Ground-station endpoint (heartbeat / telemetry destination). */
 inline constexpr std::array<uint8_t, 6> GS_MAC  = {0x00, 0xE0, 0x4C, 0x33, 0x0F, 0x98};
@@ -78,21 +79,6 @@ inline constexpr uint32_t make_ipv4(uint8_t b1, uint8_t b2, uint8_t b3, uint8_t 
 {
     return (static_cast<uint32_t>(b1) << 24) | (static_cast<uint32_t>(b2) << 16) |
            (static_cast<uint32_t>(b3) << 8) | static_cast<uint32_t>(b4);
-}
-
-/* CRC32 (HAL-free, reflected poly 0xEDB88320 / zlib variant).
-   TODO: confirm this matches the ground station's CRC32 variant. */
-inline uint32_t crc32(const uint8_t* data, std::size_t length_bytes)
-{
-    uint32_t crc = 0xFFFFFFFFU;
-    for (std::size_t i = 0; i < length_bytes; ++i) {
-        crc ^= data[i];
-        for (int bit = 0; bit < 8; ++bit) {
-            const uint32_t mask = ~(crc & 1U) + 1U;
-            crc = (crc >> 1) ^ (0xEDB88320U & mask);
-        }
-    }
-    return ~crc;
 }
 
 /* The state-machine state itself is NOT held here: it lives in battery-backed
@@ -169,13 +155,15 @@ private:
     void        handleSetValvePosition(std::span<const uint8_t> payload);
     void        handleDatagram(std::span<const uint8_t> payload);
     void        rxTick();
-    SystemState buildSystemState(const AdcInfo& adc, uint32_t now_ms);
-    void        logAppend(const SystemState& record);
+    FcuSystemState buildSystemState(const AdcInfo& adc, uint32_t now_ms);
+    void        logAppend(const FcuSystemState& record);
     void        watchdogTick();
-    // Single GS egress: batch a run of SystemState records into UDP datagrams tagged
-    // with their source board id + state. Used for both the FCU's own records and the
-    // reassembled ECU records relayed off the CAN bus.
-    void        sendToGs(uint8_t sourceId, uint8_t sourceState, std::span<const uint8_t> records);
+    // Single GS egress: batch a run of fixed-size telemetry records into UDP datagrams
+    // tagged with their source board id + state. Used for both the FCU's own records
+    // (record_size = sizeof(FcuSystemState)) and the reassembled ECU records relayed off
+    // the CAN bus (record_size = sizeof(EcuSystemState)) — hence the explicit stride.
+    void        sendToGs(BoardId sourceId, uint8_t sourceState,
+                         std::span<const uint8_t> records, std::size_t record_size);
     void        drainTick();
 
     S&                  storage_;        // injected backing store, used as a Storage explicitly
@@ -189,8 +177,8 @@ private:
     volatile uint32_t   last_adc_ms_ = 0;  // last tick a conversion was drained; gates the silent-ADC filler
     logic::communication::can::SystemStateReassembler ecu_reassembler_;  // rebuilds ECU telemetry from CAN
 
-    static_assert(std::extent_v<decltype(SystemState::valve_info)> == 2,
-                  "SystemState expects exactly two valves (Fill, Dump)");
+    static_assert(std::extent_v<decltype(SystemStateBase::valve_info)> == 2,
+                  "FcuSystemState expects exactly two valves (Fill, Dump)");
 };
 
 } // namespace logic::fcu

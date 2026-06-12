@@ -22,15 +22,18 @@
 #include "spi.h"
 #include "tim.h"
 #include "gpio.h"
+#include "crc.h"
 
 /* The FCU object graph (defined in main.cpp) + the bits wireDrivers() needs. */
 #include "fcu_objects.hpp"
 #include "memory/backup_ram.hpp"
+#include "data_integrity/crc/crc.hpp"
 #include "framing/can_header.hpp"
-#include "system/board_ids.hpp"   // BoardId::FillingStation
+#include "system/board_id.hpp"   // BoardId::FillingStation
 
 using namespace fcu_app;
 namespace backup_ram = platform::memory::backup_ram;
+namespace crc        = platform::data_integrity::crc;
 
 static void SystemClock_Config(void);
 static void PeriphCommonClock_Config(void);
@@ -55,6 +58,7 @@ void halInit(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_DMA_Init();
+  MX_CRC_Init();    // hardware CRC unit (telemetry frame CRC; configured by crc::init)
   MX_ETH_Init();
   MX_SDMMC2_SD_Init();
   MX_FATFS_Init();
@@ -74,10 +78,15 @@ void wireDrivers(void)
      unconfirmed; the SRAM is still accessible, so we proceed. */
   (void)backup_ram::init();
 
+  /* Configure the CRC peripheral for the zlib/reflected variant behind the
+     logic data-integrity seam (logic::data_integrity::crc32), used to stamp the
+     telemetry frame CRC. Must precede the first downlink (drainTick in tick()). */
+  crc::init(&hcrc);
+
   /* Bring up the CAN and Ethernet drivers, then the FCU logic. The board now
      answers ARP and ICMP echo (ping) requests and exchanges UDP/CAN traffic
      through the logic interfaces. */
-  (void)g_can.init(&hfdcan1, BoardId::FillingStation);
+  (void)g_can.init(&hfdcan1, static_cast<uint8_t>(BoardId::FillingStation));
   g_eth.init();
 
   /* Bring up the ADS131M08 ADC. The board owns the DRDY (PE7) pin: configure it

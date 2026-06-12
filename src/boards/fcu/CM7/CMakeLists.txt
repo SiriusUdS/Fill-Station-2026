@@ -115,6 +115,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${REPO_ROOT}/src/app/platform/acquisition/adc/ads131m08.cpp
     ${REPO_ROOT}/src/app/platform/storage/sd_card.cpp
     ${REPO_ROOT}/src/app/platform/communication/can/can_dil.cpp
+    ${REPO_ROOT}/src/app/platform/data_integrity/crc/crc.cpp
     # Fill/Dump servo-actuated ball valves: TIM1 (PE9) + TIM15 (PE6) PWM.
     ${REPO_ROOT}/src/app/platform/actuation/servomotor/hbl388.cpp
     ${REPO_ROOT}/src/app/platform/actuation/valve/ball_valve.cpp

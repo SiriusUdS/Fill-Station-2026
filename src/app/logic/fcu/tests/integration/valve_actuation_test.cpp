@@ -20,7 +20,7 @@
 #include "control/persistent_state.hpp"
 
 #include "framing/udp_frame.hpp"                 // UDPPacketHeader
-#include "system/board_ids.hpp"  // BoardId::FillingStation
+#include "system/board_id.hpp"  // BoardId::FillingStation
 
 #include <gtest/gtest.h>
 
@@ -37,7 +37,7 @@ namespace {
 std::vector<uint8_t> makeValveCommand(FcuValves valve, ValveCommand action, uint8_t value)
 {
     UDPPacketHeader header{};
-    header.frame.deviceID  = BoardId::FillingStation;
+    header.frame.deviceID  = static_cast<uint8_t>(BoardId::FillingStation);
     header.frame.payloadID = static_cast<uint8_t>(command::CommandType::SetValvePosition);
 
     const SetValvePositionFrame frame{valve, action, value};

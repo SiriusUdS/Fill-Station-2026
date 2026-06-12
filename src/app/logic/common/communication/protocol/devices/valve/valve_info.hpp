@@ -6,8 +6,8 @@
 #include "communication/protocol/devices/valve/valve_status.hpp"
 
 /* Telemetry unit for one valve: its state, status bits and commanded position,
- * packed into 24 bits. One per valve in SystemState; replaces the older 4-byte
- * ValveState (this is the complete per-valve record). */
+ * packed into 24 bits. One per valve in SystemStateBase::valve_info; replaces the
+ * older 4-byte ValveState (this is the complete per-valve record). */
 
 /** @brief One valve's reported state (24 bits). */
 struct ValveInfo {

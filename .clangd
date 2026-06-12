@@ -1,37 +1,15 @@
+# Default: route every source file to the FCU compilation database. The FCU build
+# compiles the shared trees (logic/common, platform, logic/fcu) too, so its
+# compile_commands.json carries the include flags for all of them.
 CompileFlags:
   CompilationDatabase: src/boards/fcu/CM7/build
 
 ---
 
+# ECU-only translation units (its board.cpp and the ECU controller) are never
+# compiled by the FCU build, so route them to the ECU database. This fragment is
+# last, so it overrides the default above for ECU paths.
 If:
-  PathMatch: src/boards/ecu/.*
+  PathMatch: (src/boards/ecu/.*|src/app/logic/ecu/.*)
 CompileFlags:
   CompilationDatabase: src/boards/ecu/CM7/build
-
----
-
-CompileFlags:
-  CompilationDatabase: boards/fcu/CM7/build
-If:
-  PathMatch: boards/.*
-
----
-
-CompileFlags:
-  CompilationDatabase: CM4/build
-If:
-  PathMatch: CM4/.*
-
----
-
-CompileFlags:
-  CompilationDatabase: CM7/build
-If:
-  PathMatch: CM7/.*
-
----
-
-CompileFlags:
-  CompilationDatabase: src/boards/fcu/CM7/build
-If:
-  PathMatch: src/.*

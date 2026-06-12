@@ -22,6 +22,7 @@ set(COMMAND_HANDLER_SOURCES
 add_executable(fcu_controller_test
     unit/logic/fcu_controller_test.cpp
     ${FAKES_SRC}
+    ${CRC_HOST_SRC}
     ${LOGIC_COMMON}/control/persistent_state.cpp
 )
 target_include_directories(fcu_controller_test PRIVATE ${FCU_INCLUDE_DIRS})
@@ -61,6 +62,7 @@ gtest_discover_tests(ethernet_state_change_test PROPERTIES LABELS "integration")
 add_executable(valve_actuation_test
     integration/valve_actuation_test.cpp
     ${FAKES_SRC}
+    ${CRC_HOST_SRC}
     ${LOGIC_COMMON}/control/persistent_state.cpp
 )
 target_include_directories(valve_actuation_test PRIVATE ${FCU_INCLUDE_DIRS})

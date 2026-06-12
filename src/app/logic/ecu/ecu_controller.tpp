@@ -32,12 +32,12 @@ void Controller<S, V, A, C>::handleCanFrame(const logic::communication::CanFrame
     CanHeader header;
     header.code = frame.id;
 
-    if (header.frame.targetID != BoardId::Engine &&
-        header.frame.targetID != BoardId::Broadcast) {
+    const auto target = static_cast<BoardId>(header.frame.targetID);
+    if (target != BoardId::Engine && target != BoardId::Broadcast) {
         return;  // not for us
     }
 
-    switch (header.frame.messageID) {
+    switch (static_cast<CommandType>(header.frame.messageID)) {
         case CommandType::SetValvePosition: handleValveCmd(frame, header); break;
         case CommandType::Ping: handlePing(frame, header);     break;
         default:               break;
@@ -55,16 +55,16 @@ void Controller<S, V, A, C>::handleValveCmd(const logic::communication::CanFrame
     if (frame.length <= detail::CMD_VALVE_INDEX_OFFSET) {
         return;  // frame too short to carry a valve index
     }
-    const uint8_t valve_idx = frame.data[detail::CMD_VALVE_INDEX_OFFSET];
+    const auto valve_id = static_cast<EcuValves>(frame.data[detail::CMD_VALVE_INDEX_OFFSET]);
 
-    V* valve = (valve_idx == EcuValves::IPA) ? &ipa_valve_
-             : (valve_idx == EcuValves::NOS) ? &nos_valve_
+    V* valve = (valve_id == EcuValves::IPA) ? &ipa_valve_
+             : (valve_id == EcuValves::NOS) ? &nos_valve_
              : nullptr;
     if (valve == nullptr) {
         return;  // unknown valve id
     }
 
-    switch (header.frame.deviceState) {
+    switch (static_cast<ValveCommand>(header.frame.deviceState)) {
         case ValveCommand::Open:  (void)valve->open();  break;
         case ValveCommand::Close: (void)valve->close(); break;
         default:            break;
@@ -78,9 +78,9 @@ void Controller<S, V, A, C>::handlePing(const logic::communication::CanFrame& fr
                                         const CanHeader& header)
 {
     CanHeader reply  = {};
-    reply.frame.senderID  = BoardId::Engine;
+    reply.frame.senderID  = static_cast<uint8_t>(BoardId::Engine);
     reply.frame.targetID  = header.frame.senderID;
-    reply.frame.messageID = CommandType::Pong;
+    reply.frame.messageID = static_cast<uint8_t>(CommandType::Pong);
 
     logic::communication::CanFrame out;
     out.id     = reply.code;
@@ -91,32 +91,29 @@ void Controller<S, V, A, C>::handlePing(const logic::communication::CanFrame& fr
 
 /* ---- Telemetry production (per ADC sample) -------------------------------- */
 
-// Build a SystemState from the ADC's info record (a fresh conversion on the sample
-// path, or a synthesized Faulted record on the silent-ADC fallback path).
+// Build an EcuSystemState from the ADC's info record (a fresh conversion on the
+// sample path, or a synthesized Faulted record on the silent-ADC fallback path).
 template <logic::storage::Storage S, logic::actuation::Valve V,
           logic::communication::StreamingAdc A, logic::communication::Can C>
-SystemState Controller<S, V, A, C>::buildSystemState(const AdcInfo& adc, uint32_t now_ms)
+EcuSystemState Controller<S, V, A, C>::buildSystemState(const AdcInfo& adc, uint32_t now_ms)
 {
-    SystemState state = {};
-    state.frameTs_MS         = now_ms;
-    state.lastHandshakeTs_MS = engine_.last_cmd_ms;   // last command from the FCU
+    EcuSystemState state = {};
+    state.base.creation_timestamp_ms = now_ms;
 
     // Each peripheral OWNS its telemetry record; the controller only reads it.
-    state.adc_info     = adc;
-    state.storage_info = storage_.info();
-    state.can_info     = can_.info();
-    // No Ethernet on the ECU: state.eth_info stays zero-initialised.
+    state.base.adc_info     = adc;
+    state.base.storage_info = storage_.info();
+    state.base.can_info     = can_.info();
+    // The ECU has no Ethernet peripheral, so EcuSystemState carries no eth_info.
 
     // The double-buffer overrun (a half filled before it could be flushed, so
-    // records were dropped) is a logging-pipeline fault — surface it as the
-    // sdCard interface's writingError.
-    InterfaceFieldFlags sd = {};
-    sd.bits.writingError = log_.overrun ? 1 : 0;
-    state.interfaces.frame.sdCardFlags = sd;
+    // records were dropped) is a logging-pipeline fault — surface it on the SD
+    // card's own status record (it owns its interface flags now).
+    state.base.storage_info.status.write_overrun = log_.overrun ? 1 : 0;
 
     // The ECU's two valves report their own info, indexed by the EcuValves SSOT.
-    state.valve_info[static_cast<std::size_t>(EcuValves::IPA)] = ipa_valve_.info();
-    state.valve_info[static_cast<std::size_t>(EcuValves::NOS)] = nos_valve_.info();
+    state.base.valve_info[static_cast<std::size_t>(EcuValves::IPA)] = ipa_valve_.info();
+    state.base.valve_info[static_cast<std::size_t>(EcuValves::NOS)] = nos_valve_.info();
 
     return state;
 }
@@ -126,10 +123,10 @@ SystemState Controller<S, V, A, C>::buildSystemState(const AdcInfo& adc, uint32_
 // other half is still unflushed the record is dropped and overrun is flagged.
 template <logic::storage::Storage S, logic::actuation::Valve V,
           logic::communication::StreamingAdc A, logic::communication::Can C>
-void Controller<S, V, A, C>::logAppend(const SystemState& record)
+void Controller<S, V, A, C>::logAppend(const EcuSystemState& record)
 {
     uint8_t a = log_.active;
-    if (log_.used[a] + sizeof(SystemState) > detail::LOG_HALF_BYTES) {
+    if (log_.used[a] + sizeof(EcuSystemState) > detail::LOG_HALF_BYTES) {
         log_.ready[a] = true;        // finalize this half
         a ^= 1;
         if (log_.ready[a]) {         // consumer hasn't drained it yet
@@ -139,8 +136,8 @@ void Controller<S, V, A, C>::logAppend(const SystemState& record)
         log_.active  = a;
         log_.used[a] = 0;
     }
-    std::memcpy(&log_.data[a][log_.used[a]], &record, sizeof(SystemState));
-    log_.used[a] = static_cast<uint16_t>(log_.used[a] + sizeof(SystemState));
+    std::memcpy(&log_.data[a][log_.used[a]], &record, sizeof(EcuSystemState));
+    log_.used[a] = static_cast<uint16_t>(log_.used[a] + sizeof(EcuSystemState));
 }
 
 // The comms/save cadence — driven by the record timer, NOT the ADC. Drain every
@@ -168,7 +165,7 @@ void Controller<S, V, A, C>::produceRecord(uint32_t now_ms)
 
 // Flush any full half: write the 4096-byte block to SD (sector-aligned), and
 // downlink the half's most recent record to the FCU over CAN. The SD gets the
-// full-rate log; the CAN bus cannot carry every record (a SystemState is many
+// full-rate log; the CAN bus cannot carry every record (a EcuSystemState is many
 // frames and the record rate is far above the bus), so the CAN downlink is a
 // downsampled live-telemetry stream (one record per drained half) alongside it.
 template <logic::storage::Storage S, logic::actuation::Valve V,
@@ -182,19 +179,19 @@ void Controller<S, V, A, C>::drainTick()
         const uint16_t bytes = log_.used[h];
 
         storage_.write(std::span<const uint8_t>(log_.data[h], detail::LOG_HALF_BYTES));
-        if (bytes >= sizeof(SystemState)) {
-            SystemState latest;
-            std::memcpy(&latest, &log_.data[h][bytes - sizeof(SystemState)], sizeof(SystemState));
+        if (bytes >= sizeof(EcuSystemState)) {
+            EcuSystemState latest;
+            std::memcpy(&latest, &log_.data[h][bytes - sizeof(EcuSystemState)], sizeof(EcuSystemState));
             sendRecordCan(latest);
         }
         log_.ready[h] = false;
     }
 }
 
-// Fragment one SystemState into CAN frames (shared codec) and send them to the FCU.
+// Fragment one EcuSystemState into CAN frames (shared codec) and send them to the FCU.
 template <logic::storage::Storage S, logic::actuation::Valve V,
           logic::communication::StreamingAdc A, logic::communication::Can C>
-void Controller<S, V, A, C>::sendRecordCan(const SystemState& record)
+void Controller<S, V, A, C>::sendRecordCan(const EcuSystemState& record)
 {
     namespace codec = logic::communication::can;
     std::array<logic::communication::CanFrame, codec::SYSTEM_STATE_FRAGMENTS> frames;

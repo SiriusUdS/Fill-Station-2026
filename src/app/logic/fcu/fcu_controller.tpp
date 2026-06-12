@@ -33,7 +33,7 @@ void Controller<S, V, A, E, C>::sendValveCmd(uint8_t valve, uint8_t cmd)
     (void)can_.send(frame);
 }
 
-/* The FCU receives ECU telemetry over CAN: SystemState records fragmented by the
+/* The FCU receives ECU telemetry over CAN: EcuSystemState records fragmented by the
    shared codec. Reassemble each and relay it to the GS through the single egress,
    tagged as BoardId::Engine so the GS demuxes it from the FCU's own records. (The
    FCU never receives commands over CAN — those always arrive over Ethernet.) */
@@ -44,9 +44,12 @@ void Controller<S, V, A, E, C>::canTick()
 {
     while (auto frame = can_.receive()) {
         if (auto record = ecu_reassembler_.accept(*frame)) {
-            const SystemState ecu = *record;
+            // One reassembled ECU record, relayed through the shared egress. Its byte
+            // span and the per-record stride are the same here (a single record).
+            const EcuSystemState ecu = *record;
+            const std::span<const uint8_t> one(reinterpret_cast<const uint8_t*>(&ecu), sizeof(ecu));
             sendToGs(BoardId::Engine, /*sourceState (ECU state not yet in the record)*/ 0,
-                     std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(&ecu), sizeof(ecu)));
+                     one, one.size());
         }
     }
 }
@@ -162,41 +165,39 @@ void Controller<S, V, A, E, C>::rxTick()
 
 /* ---- Telemetry production (per ADC sample) -------------------------------- */
 
-// Build a SystemState from the ADC's info record (a fresh conversion on the
+// Build an FcuSystemState from the ADC's info record (a fresh conversion on the
 // sample path, or a synthesized Faulted record on the watchdog fallback path).
 template <logic::storage::Storage S, logic::actuation::Valve V,
           logic::communication::StreamingAdc A, logic::communication::Ethernet E,
           logic::communication::Can C>
-SystemState Controller<S, V, A, E, C>::buildSystemState(const AdcInfo& adc, uint32_t now_ms)
+FcuSystemState Controller<S, V, A, E, C>::buildSystemState(const AdcInfo& adc, uint32_t now_ms)
 {
-    SystemState state = {};
-    state.frameTs_MS         = now_ms;
-    state.lastHandshakeTs_MS = fill_.last_rx_ms;
+    FcuSystemState state = {};
+    state.base.creation_timestamp_ms = now_ms;
 
     // The ADC owns its record (state + status + channels) — the silent/fault
     // condition now lives in adc_info, not in sdCardFlags.
-    state.adc_info = adc;
+    state.base.adc_info = adc;
 
     // The SD card owns its record too: state (Init/Active/Error) + status bits
     // (incl. the last error cause). The GS reads health straight from here.
-    state.storage_info = storage_.info();
-
-    // The Ethernet link likewise reports its own state + status + drop count.
-    state.eth_info = eth_.info();
+    state.base.storage_info = storage_.info();
 
     // The CAN bus too: state + status + dropped-frame count.
-    state.can_info = can_.info();
+    state.base.can_info = can_.info();
+
+    // The Ethernet link reports its own state + status + drop count. This is the
+    // FCU-specific field, alongside the common base (the ECU record has none).
+    state.eth_info = eth_.info();
 
     // The double-buffer overrun (a half filled before it could be flushed, so
     // records were dropped) is a logging-pipeline fault, not the card's own —
-    // surface it as the sdCard interface's writingError.
-    InterfaceFieldFlags sd = {};
-    sd.bits.writingError = log_.overrun ? 1 : 0;
-    state.interfaces.frame.sdCardFlags = sd;
+    // surface it on the SD card's status record (it owns its interface flags now).
+    state.base.storage_info.status.write_overrun = log_.overrun ? 1 : 0;
 
     // The FCU's own valves report their own info, indexed by the FcuValves SSOT.
-    state.valve_info[static_cast<std::size_t>(FcuValves::Fill)] = fill_valve_.info();
-    state.valve_info[static_cast<std::size_t>(FcuValves::Dump)] = dump_valve_.info();
+    state.base.valve_info[static_cast<std::size_t>(FcuValves::Fill)] = fill_valve_.info();
+    state.base.valve_info[static_cast<std::size_t>(FcuValves::Dump)] = dump_valve_.info();
 
     return state;
 }
@@ -208,10 +209,10 @@ SystemState Controller<S, V, A, E, C>::buildSystemState(const AdcInfo& adc, uint
 template <logic::storage::Storage S, logic::actuation::Valve V,
           logic::communication::StreamingAdc A, logic::communication::Ethernet E,
           logic::communication::Can C>
-void Controller<S, V, A, E, C>::logAppend(const SystemState& record)
+void Controller<S, V, A, E, C>::logAppend(const FcuSystemState& record)
 {
     uint8_t a = log_.active;
-    if (log_.used[a] + sizeof(SystemState) > detail::LOG_HALF_BYTES) {
+    if (log_.used[a] + sizeof(FcuSystemState) > detail::LOG_HALF_BYTES) {
         log_.ready[a] = true;        // finalize this half
         a ^= 1;
         if (log_.ready[a]) {         // consumer hasn't drained it yet
@@ -221,8 +222,8 @@ void Controller<S, V, A, E, C>::logAppend(const SystemState& record)
         log_.active  = a;
         log_.used[a] = 0;
     }
-    std::memcpy(&log_.data[a][log_.used[a]], &record, sizeof(SystemState));
-    log_.used[a] = static_cast<uint16_t>(log_.used[a] + sizeof(SystemState));
+    std::memcpy(&log_.data[a][log_.used[a]], &record, sizeof(FcuSystemState));
+    log_.used[a] = static_cast<uint16_t>(log_.used[a] + sizeof(FcuSystemState));
 }
 
 /* ---- Watchdogs ------------------------------------------------------------ */
@@ -267,21 +268,24 @@ void Controller<S, V, A, E, C>::produceRecord(uint32_t now_ms)
 
 /* ---- Telemetry drain (SD + Ethernet) -------------------------------------- */
 
-// The single GS egress: split a run of SystemState records into UDP datagrams
-// (EthernetHeader + records + CRC) tagged with their source board id + state, and
-// send them to the GS. Both the FCU's own records (drainTick) and the reassembled
-// ECU records (canTick) flow through here, distinguished by the header's deviceID.
+// The single GS egress: split a run of fixed-size telemetry records into UDP
+// datagrams (EthernetHeader + whole records + CRC) tagged with their source board
+// id + state, and send them to the GS. Both the FCU's own records (drainTick,
+// FcuSystemState) and the reassembled ECU records (canTick, EcuSystemState) flow
+// through here — the two differ in size, so the per-record stride is passed in and
+// datagrams are batched on record boundaries so the GS never sees a split record.
 template <logic::storage::Storage S, logic::actuation::Valve V,
           logic::communication::StreamingAdc A, logic::communication::Ethernet E,
           logic::communication::Can C>
 void Controller<S, V, A, E, C>::sendToGs(BoardId sourceId, uint8_t sourceState,
-                                         std::span<const uint8_t> records)
+                                         std::span<const uint8_t> records, std::size_t record_size)
 {
-    static std::array<uint8_t,
-        sizeof(EthernetHeader) + detail::ETH_RECORDS_PER_PACKET * sizeof(SystemState) + sizeof(uint32_t)>
-        packet;
+    static std::array<uint8_t, detail::UDP_MAX_PAYLOAD_BYTES> packet;
 
-    constexpr std::size_t batch_bytes = detail::ETH_RECORDS_PER_PACKET * sizeof(SystemState);
+    // Whole records per datagram, and the byte run they occupy.
+    const std::size_t per_packet =
+        (detail::UDP_MAX_PAYLOAD_BYTES - sizeof(EthernetHeader) - sizeof(uint32_t)) / record_size;
+    const std::size_t batch_bytes = per_packet * record_size;
     for (std::size_t off = 0; off < records.size(); off += batch_bytes) {
         const std::size_t chunk =
             records.size() - off < batch_bytes ? records.size() - off : batch_bytes;
@@ -293,7 +297,7 @@ void Controller<S, V, A, E, C>::sendToGs(BoardId sourceId, uint8_t sourceState,
         header.deviceState   = sourceState;
         header.deviceTS_MS   = fill_.current_tick_ms;
 
-        const uint32_t crc = detail::crc32(records.data() + off, chunk);
+        const uint32_t crc = logic::data_integrity::crc32(records.data() + off, chunk);
         std::memcpy(packet.data(), &header, sizeof(header));
         std::memcpy(packet.data() + sizeof(header), records.data() + off, chunk);
         std::memcpy(packet.data() + sizeof(header) + chunk, &crc, sizeof(crc));
@@ -319,7 +323,7 @@ void Controller<S, V, A, E, C>::drainTick()
         storage_.write(std::span<const uint8_t>(log_.data[h], detail::LOG_HALF_BYTES));
         sendToGs(BoardId::FillingStation,
                  static_cast<uint8_t>(logic::control::persistent_state.fill_state),
-                 std::span<const uint8_t>(log_.data[h], bytes));
+                 std::span<const uint8_t>(log_.data[h], bytes), sizeof(FcuSystemState));
         log_.ready[h] = false;
     }
 }

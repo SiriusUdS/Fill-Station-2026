@@ -14,11 +14,13 @@
 #include "control/persistent_state.hpp"          // Backup-SRAM state snapshot (shared with the FCU)
 #include "framing/can_header.hpp"                        // HAL-free CAN protocol (CanHeader, enums)
 
-#include "communication/protocol/telemetry/system_state.hpp"  // SystemState, ValveInfo, InterfaceFieldFlags
+#include "communication/protocol/telemetry/ecu_system_state.hpp"  // EcuSystemState (+ SystemStateBase, ValveInfo)
 #include "communication/protocol/framing/system_state_codec.hpp"  // SystemState <-> CAN fragment codec (shared)
 #include "system/valves/ecu.hpp"                          // EcuValves (valve identity / array index SSOT)
+#include "command/command_type.hpp"                       // CommandType (CAN messageID)
+#include "command/set_valve_position.hpp"                 // ValveCommand (Open/Close)
 
-#include "system/board_ids.hpp"  // BoardId::Engine, board ids
+#include "system/board_id.hpp"  // BoardId::Engine, board ids
 
 /* ------------------------------------------------------------------------- *
  * ECU engine controller (HAL-free), as a class template — the CAN-side sibling
@@ -42,6 +44,8 @@
  * ------------------------------------------------------------------------- */
 
 namespace logic::ecu {
+
+using logic::communication::command::CommandType;
 
 namespace detail {
 
@@ -122,10 +126,10 @@ private:
     void        handleCanFrame(const logic::communication::CanFrame& frame);
     void        handleValveCmd(const logic::communication::CanFrame& frame, const CanHeader& header);
     void        handlePing(const logic::communication::CanFrame& frame, const CanHeader& header);
-    SystemState buildSystemState(const AdcInfo& adc, uint32_t now_ms);
-    void        logAppend(const SystemState& record);
-    void        drainTick();                                 // flush full halves to SD + downlink over CAN
-    void        sendRecordCan(const SystemState& record);    // fragment one record over CAN to the FCU
+    EcuSystemState buildSystemState(const AdcInfo& adc, uint32_t now_ms);
+    void           logAppend(const EcuSystemState& record);
+    void           drainTick();                              // flush full halves to SD + downlink over CAN
+    void           sendRecordCan(const EcuSystemState& record);  // fragment one record over CAN to the FCU
 
     S&                storage_;     // injected backing store, used as a Storage explicitly
     V&                ipa_valve_;   // injected IPA / NOS valves, commanded over CAN + read for telemetry
@@ -137,8 +141,8 @@ private:
     volatile uint32_t last_adc_ms_   = 0;  // last tick a conversion was drained; gates the silent-ADC filler
     uint8_t           telemetry_seq_ = 0;  // 4-bit CAN telemetry record sequence (wraps)
 
-    static_assert(std::extent_v<decltype(SystemState::valve_info)> == 2,
-                  "SystemState expects exactly two valves (IPA, NOS)");
+    static_assert(std::extent_v<decltype(SystemStateBase::valve_info)> == 2,
+                  "EcuSystemState expects exactly two valves (IPA, NOS)");
 };
 
 } // namespace logic::ecu

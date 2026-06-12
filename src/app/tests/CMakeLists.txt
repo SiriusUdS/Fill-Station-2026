@@ -49,6 +49,7 @@ include(GoogleTest)
 set(APP_DIR      ${CMAKE_CURRENT_SOURCE_DIR}/..)        # src/app
 set(TEST_SUPPORT ${CMAKE_CURRENT_SOURCE_DIR})          # so #include "support/..." resolves
 set(FAKES_SRC    ${CMAKE_CURRENT_SOURCE_DIR}/support/fakes.cpp)   # the FakeBus impl
+set(CRC_HOST_SRC ${CMAKE_CURRENT_SOURCE_DIR}/support/crc32_host.cpp)  # software def of the data-integrity CRC seam
 set(LOGIC_COMMON ${APP_DIR}/logic/common)
 set(LOGIC_FCU    ${APP_DIR}/logic/fcu)
 set(LOGIC_COMMON_INCLUDE_DIRS

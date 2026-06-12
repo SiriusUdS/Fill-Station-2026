@@ -25,7 +25,8 @@
 #include "framing/udp_frame.hpp"
 #include "system/state.hpp"
 #include "telemetry/telemetry_id.hpp"
-#include "system/board_ids.hpp"
+#include "system/board_id.hpp"
+#include "command/command_type.hpp"
 
 #include <gtest/gtest.h>
 
@@ -34,6 +35,7 @@
 
 using logic::communication::CanFrame;
 using logic::communication::Endpoint;
+using logic::communication::command::CommandType;
 
 namespace {
 
@@ -42,24 +44,24 @@ namespace {
 constexpr std::size_t REQUEST_STATE_OFFSET = 15;
 
 /* Build a CommandType::SetState datagram addressed to `device`, asking for `requested`. */
-std::vector<uint8_t> makeStateRequest(uint8_t device, logic::control::State requested)
+std::vector<uint8_t> makeStateRequest(BoardId device, logic::control::State requested)
 {
     std::vector<uint8_t> payload(REQUEST_STATE_OFFSET + 1, 0);
     UDPPacketHeader header = {};
-    header.frame.deviceID  = device;
-    header.frame.payloadID = CommandType::SetState;
+    header.frame.deviceID  = static_cast<uint8_t>(device);
+    header.frame.payloadID = static_cast<uint8_t>(CommandType::SetState);
     std::memcpy(payload.data(), header.bytes, sizeof(UDPPacketHeader));
     payload[REQUEST_STATE_OFFSET] = static_cast<uint8_t>(requested);
     return payload;
 }
 
 /* Build a CAN frame with the given header fields and payload. */
-CanFrame makeCanFrame(uint8_t sender, uint8_t target, uint8_t messageId,
+CanFrame makeCanFrame(BoardId sender, BoardId target, uint8_t messageId,
                       std::array<uint8_t, 8> data = {})
 {
     CanHeader header        = {};
-    header.frame.senderID   = sender;
-    header.frame.targetID   = target;
+    header.frame.senderID   = static_cast<uint8_t>(sender);
+    header.frame.targetID   = static_cast<uint8_t>(target);
     header.frame.messageID  = messageId;
 
     CanFrame frame;
@@ -113,7 +115,7 @@ protected:
     }
 
     /* Send a CommandType::SetState command (addressed to us) and tick once. */
-    void requestState(logic::control::State requested, uint8_t device = BoardId::FillingStation)
+    void requestState(logic::control::State requested, BoardId device = BoardId::FillingStation)
     {
         const auto payload = makeStateRequest(device, requested);
         bus().push_udp(Endpoint{}, payload);
@@ -150,8 +152,8 @@ TEST_F(FcuControllerTest, FullTelemetryBufferDownlinksGetSystem)
     ASSERT_GE(payload.size(), sizeof(EthernetHeader));
     EthernetHeader header;
     std::memcpy(&header, payload.data(), sizeof(EthernetHeader));
-    EXPECT_EQ(header.deviceID, BoardId::FillingStation);
-    EXPECT_EQ(header.payloadID, TelemetryId::SystemState);
+    EXPECT_EQ(header.deviceID, static_cast<uint8_t>(BoardId::FillingStation));
+    EXPECT_EQ(header.payloadID, static_cast<uint8_t>(TelemetryId::SystemState));
 }
 
 TEST_F(FcuControllerTest, EveryTickServicesTheLink)

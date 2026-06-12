@@ -26,7 +26,7 @@
 #include "ecu_objects.hpp"
 #include "memory/backup_ram.hpp"
 #include "framing/can_header.hpp"
-#include "system/board_ids.hpp"   // BoardId::Engine
+#include "system/board_id.hpp"   // BoardId::Engine
 
 using namespace ecu_app;
 namespace backup_ram = platform::memory::backup_ram;
@@ -61,7 +61,7 @@ void wireDrivers(void)
   (void)backup_ram::init();
 
   /* CAN node — the ECU downlinks telemetry over CAN to the FCU. */
-  (void)g_can.init(&hfdcan1, BoardId::Engine);
+  (void)g_can.init(&hfdcan1, static_cast<uint8_t>(BoardId::Engine));
 
   /* ADS131M08 ADC on SPI1. The board owns the DRDY (PA4) pin: configure it as a
      falling-edge EXTI input, then let the driver arm it. CS is PC5. */
