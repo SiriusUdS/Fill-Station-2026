@@ -34,6 +34,7 @@ typedef union {
 typedef enum {
     CAN_ID_CMD_VALVE      = 0x01,   /* FCU → ECU : Change valve status        */
     CAN_ID_STATUS_VALVE   = 0x02,   /* ECU → FCU : Return valve status        */
+    CAN_ID_SYSTEM_STATE   = 0x03,   /* ECU → FCU : SystemState telemetry, fragmented */
     CAN_ID_COMM_PING      = 0x7E,   /* any → node     : communication test    */
     CAN_ID_COMM_PONG      = 0x7F,   /* node → sender  : reply, echoes payload  */
 } CanMsgId;

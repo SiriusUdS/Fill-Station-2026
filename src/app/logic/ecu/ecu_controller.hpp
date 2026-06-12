@@ -15,6 +15,7 @@
 #include "dil/can_types.h"                        // HAL-free CAN protocol (CANHeader, enums)
 
 #include "communication/protocol/telemetry/system_state.hpp"  // SystemState, ValveInfo, InterfaceFieldFlags
+#include "communication/protocol/can/system_state_codec.hpp"  // SystemState <-> CAN fragment codec (shared)
 #include "ecu_valves.hpp"                          // EcuValves (valve identity / array index SSOT)
 
 #include "sirius-headers-common/Telecommunication/PacketHeaderVariable.h"  // ENGINE_BOARD_ID, board ids
@@ -123,7 +124,8 @@ private:
     void        handlePing(const logic::communication::CanFrame& frame, const CANHeader& header);
     SystemState buildSystemState(const AdcInfo& adc, uint32_t now_ms);
     void        logAppend(const SystemState& record);
-    void        drainTick();                                 // flush full halves to SD (+ CAN in E3)
+    void        drainTick();                                 // flush full halves to SD + downlink over CAN
+    void        sendRecordCan(const SystemState& record);    // fragment one record over CAN to the FCU
 
     S&                storage_;     // injected backing store, used as a Storage explicitly
     V&                ipa_valve_;   // injected IPA / NOS valves, commanded over CAN + read for telemetry
@@ -132,7 +134,8 @@ private:
     C&                can_;         // injected CAN bus; rx in canTick(), telemetry tx in drainTick()
     detail::Engine    engine_{};
     detail::LogBuffer log_;         // .axisram in firmware; left uninitialised until init()
-    volatile uint32_t last_adc_ms_ = 0;  // last tick a conversion was drained; gates the silent-ADC filler
+    volatile uint32_t last_adc_ms_   = 0;  // last tick a conversion was drained; gates the silent-ADC filler
+    uint8_t           telemetry_seq_ = 0;  // 4-bit CAN telemetry record sequence (wraps)
 
     static_assert(std::extent_v<decltype(SystemState::valve_info)> == 2,
                   "SystemState expects exactly two valves (IPA, NOS)");

@@ -256,11 +256,21 @@ The genuinely hard part. CubeMX is one-project-per-directory and regenerates `Co
         (drain CAN + flush telemetry to SD + Init→Safe), `produceRecord` (TIM6 2 kHz → drain ADC → SystemState
         log). Wired into ecu `main.cpp`/`board.cpp` (backup domain, `g_controller.init()`, TIM6 ISR). Builds
         (`ecu_CM7.elf` FLASH 7.25%); FCU green; 75 tests pass. State stays minimal (Init→Safe); engine states later.
-  - [ ] **E2 — CAN command routing (next):** `canTick()` dispatches inbound CAN — `CAN_ID_CMD_VALVE`→actuate
-        IPA/NOS, ping→pong, set-state — via an ECU command-handler registry.
-  - [ ] **E3 — CAN telemetry sink:** `drainTick()` downlinks records over CAN to the FCU (fragment `SystemState`
-        or compact `STATUS_VALVE`); likely refactor the record pipeline (LogBuffer + produceRecord + a generic
-        sink) into `logic/common` so FCU/ECU share it. Then **E5** — ECU tests under `logic/ecu/tests/`.
+  - [x] **E2 — CAN command routing DONE.** `canTick()` decodes the `CANHeader` and dispatches frames
+        addressed to `ENGINE_BOARD_ID`/broadcast: `CAN_ID_CMD_VALVE` → actuate IPA/NOS (index at `data[4]`,
+        open/close in `deviceState`), `CAN_ID_COMM_PING` → reply pong. Builds (FLASH 7.40%).
+  - [x] **E3 — CAN telemetry (fragmented `SystemState`) DONE.** New shared codec
+        `logic::communication::can::{packSystemState, SystemStateReassembler}` in
+        `src/app/logic/common/communication/protocol/can/system_state_codec.hpp` (`CAN_ID_SYSTEM_STATE`,
+        `data[0]`=fragment index, 4-bit record seq in `deviceState`). ECU `drainTick()` writes the full half to
+        SD and downlinks that half's **latest** record over CAN to the FCU (downsampled — the bus can't carry
+        the 2 kHz full-rate log). **5 round-trip codec tests** (exact / out-of-order / incomplete / seq-reset);
+        80 tests pass. ECU FLASH 7.49%, FCU green.
+  - [ ] **Remaining:** (a) **FCU side** — `logic::fcu::Controller::canTick()` consumes the ECU telemetry via
+        `SystemStateReassembler` and relays to the GS (its current `canTick` is a drain-and-ignore TODO);
+        (b) optional **pipeline dedup** — lift `LogBuffer`/`produceRecord`/`logAppend` into `logic/common` so
+        both controllers share them (ECU currently duplicates them); (c) **E5** — ECU controller tests under
+        `logic/ecu/tests/`; (d) the deferred **engine state machine** (states beyond Init→Safe).
 
 - [ ] **Phase 5 — Author ECU logic policy (`app/logic/ecu/`)**
   - [ ] ECU controller composing `logic/common` mechanism.

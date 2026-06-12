@@ -164,10 +164,13 @@ void Controller<S, V, A, C>::produceRecord(uint32_t now_ms)
     }
 }
 
-/* ---- Telemetry drain (SD now; CAN downlink in E3) ------------------------- */
+/* ---- Telemetry drain (SD + CAN downlink) ---------------------------------- */
 
-// Flush any full half: write the 4096-byte block to SD (sector-aligned). The CAN
-// downlink of the records (fragmented to the FCU) is added in E3.
+// Flush any full half: write the 4096-byte block to SD (sector-aligned), and
+// downlink the half's most recent record to the FCU over CAN. The SD gets the
+// full-rate log; the CAN bus cannot carry every record (a SystemState is many
+// frames and the record rate is far above the bus), so the CAN downlink is a
+// downsampled live-telemetry stream (one record per drained half) alongside it.
 template <logic::storage::Storage S, logic::actuation::Valve V,
           logic::communication::StreamingAdc A, logic::communication::Can C>
 void Controller<S, V, A, C>::drainTick()
@@ -176,10 +179,32 @@ void Controller<S, V, A, C>::drainTick()
         if (!log_.ready[h]) {
             continue;
         }
+        const uint16_t bytes = log_.used[h];
+
         storage_.write(std::span<const uint8_t>(log_.data[h], detail::LOG_HALF_BYTES));
-        // TODO(E3): sendBatchedCan(std::span(log_.data[h], log_.used[h]));
+        if (bytes >= sizeof(SystemState)) {
+            SystemState latest;
+            std::memcpy(&latest, &log_.data[h][bytes - sizeof(SystemState)], sizeof(SystemState));
+            sendRecordCan(latest);
+        }
         log_.ready[h] = false;
     }
+}
+
+// Fragment one SystemState into CAN frames (shared codec) and send them to the FCU.
+template <logic::storage::Storage S, logic::actuation::Valve V,
+          logic::communication::StreamingAdc A, logic::communication::Can C>
+void Controller<S, V, A, C>::sendRecordCan(const SystemState& record)
+{
+    namespace codec = logic::communication::can;
+    std::array<logic::communication::CanFrame, codec::SYSTEM_STATE_FRAGMENTS> frames;
+    codec::packSystemState(
+        record, ENGINE_BOARD_ID, FILLING_STATION_BOARD_ID, telemetry_seq_,
+        std::span<logic::communication::CanFrame, codec::SYSTEM_STATE_FRAGMENTS>(frames));
+    for (auto& f : frames) {
+        (void)can_.send(f);
+    }
+    ++telemetry_seq_;
 }
 
 /* ---- Public surface ------------------------------------------------------- */

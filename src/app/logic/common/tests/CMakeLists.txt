@@ -26,3 +26,11 @@ add_executable(command_test
 target_include_directories(command_test PRIVATE ${TEST_SUPPORT} ${LOGIC_COMMON_INCLUDE_DIRS})
 target_link_libraries(command_test PRIVATE GTest::gtest_main)
 gtest_discover_tests(command_test PROPERTIES LABELS "unit")
+
+# Header-only SystemState <-> CAN fragment codec (shared by the FCU/ECU).
+add_executable(system_state_codec_test
+    unit/logic/communication/protocol/can/system_state_codec_test.cpp
+)
+target_include_directories(system_state_codec_test PRIVATE ${TEST_SUPPORT} ${LOGIC_COMMON_INCLUDE_DIRS})
+target_link_libraries(system_state_codec_test PRIVATE GTest::gtest_main)
+gtest_discover_tests(system_state_codec_test PROPERTIES LABELS "unit")
