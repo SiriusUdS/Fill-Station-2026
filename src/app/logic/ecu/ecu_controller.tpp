@@ -11,7 +11,7 @@ namespace logic::ecu {
 /* ---- CAN (commands from the FCU) ----------------------------------------- */
 
 /* Drain the CAN RX ring every tick (so it cannot back up) and dispatch each frame
-   addressed to us. The FCU sends CAN_ID_CMD_VALVE to drive the ECU's valves and may
+   addressed to us. The FCU sends CommandType::SetValvePosition to drive the ECU's valves and may
    ping; the ECU replies pong and actuates. */
 template <logic::storage::Storage S, logic::actuation::Valve V,
           logic::communication::StreamingAdc A, logic::communication::Can C>
@@ -23,50 +23,50 @@ void Controller<S, V, A, C>::canTick()
     }
 }
 
-// Decode the 29-bit identifier into the shared CANHeader and route by messageID,
+// Decode the 29-bit identifier into the shared CanHeader and route by messageID,
 // ignoring frames not addressed to this node (or broadcast).
 template <logic::storage::Storage S, logic::actuation::Valve V,
           logic::communication::StreamingAdc A, logic::communication::Can C>
 void Controller<S, V, A, C>::handleCanFrame(const logic::communication::CanFrame& frame)
 {
-    CANHeader header;
+    CanHeader header;
     header.code = frame.id;
 
-    if (header.frame.targetID != ENGINE_BOARD_ID &&
-        header.frame.targetID != BOARD_BROADCAST_ID) {
+    if (header.frame.targetID != BoardId::Engine &&
+        header.frame.targetID != BoardId::Broadcast) {
         return;  // not for us
     }
 
     switch (header.frame.messageID) {
-        case CAN_ID_CMD_VALVE: handleValveCmd(frame, header); break;
-        case CAN_ID_COMM_PING: handlePing(frame, header);     break;
+        case CommandType::SetValvePosition: handleValveCmd(frame, header); break;
+        case CommandType::Ping: handlePing(frame, header);     break;
         default:               break;
     }
 }
 
-// Drive one of the ECU's valves from a CAN_ID_CMD_VALVE frame: the valve index is at
-// data[4] (CAN_VALVE_1 = IPA, CAN_VALVE_2 = NOS); the open/close action is in the
-// header's deviceState (CAN_CMD_OPEN / CAN_CMD_CLOSE).
+// Drive one of the ECU's valves from a CommandType::SetValvePosition frame: the valve index is at
+// data[4] (EcuValves::IPA = IPA, EcuValves::NOS = NOS); the open/close action is in the
+// header's deviceState (ValveCommand::Open / ValveCommand::Close).
 template <logic::storage::Storage S, logic::actuation::Valve V,
           logic::communication::StreamingAdc A, logic::communication::Can C>
 void Controller<S, V, A, C>::handleValveCmd(const logic::communication::CanFrame& frame,
-                                            const CANHeader& header)
+                                            const CanHeader& header)
 {
     if (frame.length <= detail::CMD_VALVE_INDEX_OFFSET) {
         return;  // frame too short to carry a valve index
     }
     const uint8_t valve_idx = frame.data[detail::CMD_VALVE_INDEX_OFFSET];
 
-    V* valve = (valve_idx == CAN_VALVE_1) ? &ipa_valve_
-             : (valve_idx == CAN_VALVE_2) ? &nos_valve_
+    V* valve = (valve_idx == EcuValves::IPA) ? &ipa_valve_
+             : (valve_idx == EcuValves::NOS) ? &nos_valve_
              : nullptr;
     if (valve == nullptr) {
         return;  // unknown valve id
     }
 
     switch (header.frame.deviceState) {
-        case CAN_CMD_OPEN:  (void)valve->open();  break;
-        case CAN_CMD_CLOSE: (void)valve->close(); break;
+        case ValveCommand::Open:  (void)valve->open();  break;
+        case ValveCommand::Close: (void)valve->close(); break;
         default:            break;
     }
 }
@@ -75,12 +75,12 @@ void Controller<S, V, A, C>::handleValveCmd(const logic::communication::CanFrame
 template <logic::storage::Storage S, logic::actuation::Valve V,
           logic::communication::StreamingAdc A, logic::communication::Can C>
 void Controller<S, V, A, C>::handlePing(const logic::communication::CanFrame& frame,
-                                        const CANHeader& header)
+                                        const CanHeader& header)
 {
-    CANHeader reply  = {};
-    reply.frame.senderID  = ENGINE_BOARD_ID;
+    CanHeader reply  = {};
+    reply.frame.senderID  = BoardId::Engine;
     reply.frame.targetID  = header.frame.senderID;
-    reply.frame.messageID = CAN_ID_COMM_PONG;
+    reply.frame.messageID = CommandType::Pong;
 
     logic::communication::CanFrame out;
     out.id     = reply.code;
@@ -199,7 +199,7 @@ void Controller<S, V, A, C>::sendRecordCan(const SystemState& record)
     namespace codec = logic::communication::can;
     std::array<logic::communication::CanFrame, codec::SYSTEM_STATE_FRAGMENTS> frames;
     codec::packSystemState(
-        record, ENGINE_BOARD_ID, FILLING_STATION_BOARD_ID, telemetry_seq_,
+        record, BoardId::Engine, BoardId::FillingStation, telemetry_seq_,
         std::span<logic::communication::CanFrame, codec::SYSTEM_STATE_FRAGMENTS>(frames));
     for (auto& f : frames) {
         (void)can_.send(f);

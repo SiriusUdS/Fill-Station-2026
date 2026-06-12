@@ -3,7 +3,7 @@
 #include <cstdint>
 #include <optional>
 
-#include "control/states.hpp"             // logic::control::State
+#include "system/state.hpp"             // logic::control::State
 #include "control/persistent_state.hpp"   // logic::control::persistent_state
 #include "control/command_handlers/set_state_transitions/activate_igniter.hpp"
 

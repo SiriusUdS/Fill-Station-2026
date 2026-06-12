@@ -3,7 +3,7 @@
 #include <concepts>
 #include <optional>
 
-#include "communication/protocol/telemetry/adc_info.hpp"   // AdcInfo (the ADC's own info record)
+#include "communication/protocol/peripherals/adc/adc_info.hpp"   // AdcInfo (the ADC's own info record)
 
 /* ------------------------------------------------------------------------- *
  * Class-based ADC contract for the logic layer (C++23 concepts).

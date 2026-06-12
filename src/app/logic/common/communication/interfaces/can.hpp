@@ -6,7 +6,7 @@
 #include <cstdint>
 #include <optional>
 
-#include "communication/protocol/telemetry/can_info.hpp"   // CanInfo (the link's own info record)
+#include "communication/protocol/peripherals/can/can_info.hpp"   // CanInfo (the link's own info record)
 
 /* ------------------------------------------------------------------------- *
  * Class-based CAN contract for the logic layer (C++23 concept).

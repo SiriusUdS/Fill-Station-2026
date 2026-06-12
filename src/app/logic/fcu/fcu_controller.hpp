@@ -13,19 +13,19 @@
 #include "communication/interfaces/ethernet.hpp"     // logic::communication::udp + Endpoint
 #include "communication/interfaces/can.hpp"          // logic::communication::can + CanFrame
 #include "control/persistent_state.hpp"              // Backup-SRAM state snapshot
-#include "dil/can_types.h"                           // HAL-free CAN protocol (CANHeader, enums)
+#include "framing/can_header.hpp"                           // HAL-free CAN protocol (CanHeader, enums)
 
-#include "communication/protocol/ethernet/ethernet_header.hpp"  // EthernetHeader (downlink header)
+#include "communication/protocol/framing/ethernet_header.hpp"  // EthernetHeader (downlink header)
 #include "communication/protocol/telemetry/system_state.hpp"    // SystemState, ValveInfo, InterfaceFieldFlags
-#include "communication/protocol/can/system_state_codec.hpp"    // SystemStateReassembler (ECU telemetry relay)
-#include "fcu_valves.hpp"                  // FcuValves (valve identity / array index SSOT)
-#include "command/command.hpp"            // CommandType (Ethernet payloadID)
+#include "communication/protocol/framing/system_state_codec.hpp"    // SystemStateReassembler (ECU telemetry relay)
+#include "system/valves/fcu.hpp"                  // FcuValves (valve identity / array index SSOT)
+#include "communication/command/command.hpp"            // CommandType (Ethernet payloadID)
 #include "command/set_valve_position.hpp" // SetValvePositionFrame, ValveCommand
 
-#include "sirius-headers-common/Ethernet/UDPFrame.h"
-#include "sirius-headers-common/Telecommunication/PacketHeaderVariable.h"
-#include "sirius-headers-common/Telecommunication/BoardCommandV2.h"
-#include "sirius-headers-common/FillingStation/FillingStationState.h"
+#include "framing/udp_frame.hpp"
+#include "system/board_ids.hpp"
+#include "telemetry/telemetry_id.hpp"
+#include "system/state.hpp"
 
 /* ------------------------------------------------------------------------- *
  * FCU filling-station state machine (HAL-free), as a class template.

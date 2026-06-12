@@ -75,8 +75,7 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     ${REPO_ROOT}/src/app                                      # board:: contract (board.hpp)
     ${REPO_ROOT}/src/app/logic/fcu                            # FCU policy: controller + handlers + interfaces
     ${REPO_ROOT}/src/app/logic/common                         # shared logic mechanism (HAL-free C++)
-    ${REPO_ROOT}/src/app/logic/common/Inc                     # CAN protocol defs (dil/can_types.h)
-    ${REPO_ROOT}/src/app/logic/common/communication/protocol  # command/, can/, ethernet/, telemetry/, sirius-headers-common/
+    ${REPO_ROOT}/src/app/logic/common/communication/protocol  # wire formats: peripherals/, devices/, framing/, command/, system/, telemetry/
     ${REPO_ROOT}/src/app/platform                             # shared board-agnostic drivers
 )
 

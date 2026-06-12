@@ -4,7 +4,7 @@
 #include <cstdint>
 #include <span>
 
-#include "communication/protocol/telemetry/storage_info.hpp"   // StorageInfo (the store's own info record)
+#include "communication/protocol/peripherals/storage/storage_info.hpp"   // StorageInfo (the store's own info record)
 
 /* ------------------------------------------------------------------------- *
  * Class-based storage contract for the logic layer (C++23 concept).

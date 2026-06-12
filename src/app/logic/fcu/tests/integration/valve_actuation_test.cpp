@@ -14,13 +14,13 @@
 #include "support/fake_valve.hpp"
 #include "support/fake_adc.hpp"
 
-#include "command/command.hpp"             // CommandType
+#include "communication/command/command.hpp"             // CommandType
 #include "command/set_valve_position.hpp"  // SetValvePositionFrame, ValveCommand
-#include "fcu_valves.hpp"                   // FcuValves
+#include "system/valves/fcu.hpp"                   // FcuValves
 #include "control/persistent_state.hpp"
 
-#include "sirius-headers-common/Ethernet/UDPFrame.h"                 // UDPPacketHeader
-#include "sirius-headers-common/Telecommunication/PacketHeaderVariable.h"  // FILLING_STATION_BOARD_ID
+#include "framing/udp_frame.hpp"                 // UDPPacketHeader
+#include "system/board_ids.hpp"  // BoardId::FillingStation
 
 #include <gtest/gtest.h>
 
@@ -37,7 +37,7 @@ namespace {
 std::vector<uint8_t> makeValveCommand(FcuValves valve, ValveCommand action, uint8_t value)
 {
     UDPPacketHeader header{};
-    header.frame.deviceID  = FILLING_STATION_BOARD_ID;
+    header.frame.deviceID  = BoardId::FillingStation;
     header.frame.payloadID = static_cast<uint8_t>(command::CommandType::SetValvePosition);
 
     const SetValvePositionFrame frame{valve, action, value};

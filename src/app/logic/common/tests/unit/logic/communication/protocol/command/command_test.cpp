@@ -7,11 +7,11 @@
 
 #include <gtest/gtest.h>
 
-#include "command/command.hpp"
-#include "command/parser/command_can_parser.hpp"
-#include "command/parser/command_ethernet_parser.hpp"
-#include "can/can_header.hpp"
-#include "ethernet/ethernet_header.hpp"
+#include "communication/command/command.hpp"
+#include "communication/command/parser/command_can_parser.hpp"
+#include "communication/command/parser/command_ethernet_parser.hpp"
+#include "framing/can_header.hpp"
+#include "framing/ethernet_header.hpp"
 
 #include <array>
 #include <bit>
@@ -33,12 +33,12 @@ CanFrame makeCanFrame(uint8_t sender, uint8_t target, uint8_t messageId,
                       std::span<const uint8_t> data = {})
 {
     CanHeader header{};
-    header.senderID  = sender;
-    header.targetID  = target;
-    header.messageID = messageId;
+    header.frame.senderID  = sender;
+    header.frame.targetID  = target;
+    header.frame.messageID = messageId;
 
     CanFrame frame{};
-    frame.id     = std::bit_cast<uint32_t>(header);
+    frame.id     = header.code;
     frame.length = static_cast<uint8_t>(data.size());
     std::memcpy(frame.data.data(), data.data(),
                 data.size() < frame.data.size() ? data.size() : frame.data.size());

@@ -7,7 +7,7 @@
 #include <optional>
 #include <span>
 
-#include "communication/protocol/telemetry/ethernet_info.hpp"   // EthernetInfo (the link's own info record)
+#include "communication/protocol/peripherals/ethernet/ethernet_info.hpp"   // EthernetInfo (the link's own info record)
 
 /* ------------------------------------------------------------------------- *
  * Class-based UDP-over-Ethernet contract for the FCU logic layer (C++23 concept).

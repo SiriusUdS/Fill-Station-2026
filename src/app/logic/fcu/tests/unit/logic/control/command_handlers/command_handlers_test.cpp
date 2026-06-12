@@ -12,9 +12,9 @@
 
 #include "control/command_handlers/command_handlers.hpp"
 
-#include "command/command.hpp"
+#include "communication/command/command.hpp"
 #include "control/persistent_state.hpp"
-#include "control/states.hpp"
+#include "system/state.hpp"
 
 #include <gtest/gtest.h>
 

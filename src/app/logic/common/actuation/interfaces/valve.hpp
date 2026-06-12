@@ -4,7 +4,7 @@
 #include <cstdint>
 #include <optional>
 
-#include "communication/protocol/telemetry/valve_info.hpp"   // ValveInfo (the valve's own info record)
+#include "communication/protocol/devices/valve/valve_info.hpp"   // ValveInfo (the valve's own info record)
 
 /* ------------------------------------------------------------------------- *
  * Class-based valve contract for the logic layer (C++23 concept).

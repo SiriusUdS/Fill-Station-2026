@@ -53,8 +53,7 @@ set(LOGIC_COMMON ${APP_DIR}/logic/common)
 set(LOGIC_FCU    ${APP_DIR}/logic/fcu)
 set(LOGIC_COMMON_INCLUDE_DIRS
     ${LOGIC_COMMON}                        # interfaces + control/ + communication/
-    ${LOGIC_COMMON}/Inc                    # CAN protocol defs (dil/can_types.h)
-    ${LOGIC_COMMON}/communication/protocol # command/, can/, ethernet/, telemetry/, sirius-headers-common/
+    ${LOGIC_COMMON}/communication/protocol # wire formats: peripherals/, devices/, framing/, command/, system/, telemetry/
 )
 
 # --- Test sites (one per board + common) ----------------------------------

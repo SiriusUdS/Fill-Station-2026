@@ -2,7 +2,7 @@
 
 #include <cstdint>
 
-#include "fcu_valves.hpp"   // FcuValves — the SSOT for which valve
+#include "system/valves/fcu.hpp"   // FcuValves — the SSOT for which valve
 
 /* Payload for CommandType::SetValvePosition — drive a valve to a position. */
 

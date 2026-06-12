@@ -50,7 +50,7 @@ gtest_discover_tests(command_handlers_test PROPERTIES LABELS "unit")
 add_executable(ethernet_state_change_test
     integration/ethernet_state_change_test.cpp
     ${COMMAND_HANDLER_SOURCES}
-    ${LOGIC_COMMON}/communication/protocol/command/parser/command_ethernet_parser.cpp
+    ${LOGIC_COMMON}/communication/command/parser/command_ethernet_parser.cpp
     ${LOGIC_COMMON}/control/persistent_state.cpp
 )
 target_include_directories(ethernet_state_change_test PRIVATE ${FCU_INCLUDE_DIRS})

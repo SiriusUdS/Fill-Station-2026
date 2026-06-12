@@ -2,13 +2,13 @@
 
 #include <cstdint>
 
-#include "sirius-headers-common/Telecommunication/InterfaceField.h"
-#include "communication/protocol/telemetry/adc_info.hpp"
-#include "communication/protocol/telemetry/valve_info.hpp"
-#include "communication/protocol/telemetry/storage_info.hpp"
-#include "communication/protocol/telemetry/ethernet_info.hpp"
-#include "communication/protocol/telemetry/can_info.hpp"
-#include "communication/protocol/ethernet/ethernet_header.hpp"
+#include "communication/protocol/peripherals/interface_field.hpp"
+#include "communication/protocol/peripherals/adc/adc_info.hpp"
+#include "communication/protocol/devices/valve/valve_info.hpp"
+#include "communication/protocol/peripherals/storage/storage_info.hpp"
+#include "communication/protocol/peripherals/ethernet/ethernet_info.hpp"
+#include "communication/protocol/peripherals/can/can_info.hpp"
+#include "communication/protocol/framing/ethernet_header.hpp"
 
 /* Periodic downlink telemetry: the board's full live state sent to the ground
  * station — timestamps, interface flags, the streaming ADC, the valves, the SD
@@ -37,7 +37,7 @@ static_assert(sizeof(SystemState) == 2 * sizeof(uint32_t)    // frameTs_MS + las
                                    + sizeof(CanInfo),         // can_info
               "SystemState has implicit padding — add explicit reserved bytes");
 
-/* The GET_SYSTEM downlink packet on the wire: the 12-byte EthernetHeader, the
+/* The TelemetryId::SystemState downlink packet on the wire: the 12-byte EthernetHeader, the
  * SystemState payload, then a trailing CRC32 over the payload. Both the board
  * (sender) and the ground station (which reinterprets the received datagram)
  * use this struct, so it must be padding-free. */

@@ -11,12 +11,12 @@
 
 #include <gtest/gtest.h>
 
-#include "command/command.hpp"
-#include "command/parser/command_ethernet_parser.hpp"
+#include "communication/command/command.hpp"
+#include "communication/command/parser/command_ethernet_parser.hpp"
 #include "control/command_handlers/command_handlers.hpp"   // handleCommand
 #include "control/persistent_state.hpp"
-#include "control/states.hpp"
-#include "ethernet/ethernet_header.hpp"
+#include "system/state.hpp"
+#include "framing/ethernet_header.hpp"
 
 #include <cstddef>
 #include <cstdint>

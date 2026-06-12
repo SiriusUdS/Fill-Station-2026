@@ -8,7 +8,7 @@
  * ------------------------------------------------------------------------- */
 
 #include "control/persistent_state.hpp"
-#include "control/states.hpp"
+#include "system/state.hpp"
 
 #include <gtest/gtest.h>
 

@@ -26,8 +26,8 @@
 /* The FCU object graph (defined in main.cpp) + the bits wireDrivers() needs. */
 #include "fcu_objects.hpp"
 #include "memory/backup_ram.hpp"
-#include "dil/can_types.h"
-#include "sirius-headers-common/Telecommunication/PacketHeaderVariable.h"   // FILLING_STATION_BOARD_ID
+#include "framing/can_header.hpp"
+#include "system/board_ids.hpp"   // BoardId::FillingStation
 
 using namespace fcu_app;
 namespace backup_ram = platform::memory::backup_ram;
@@ -77,7 +77,7 @@ void wireDrivers(void)
   /* Bring up the CAN and Ethernet drivers, then the FCU logic. The board now
      answers ARP and ICMP echo (ping) requests and exchanges UDP/CAN traffic
      through the logic interfaces. */
-  (void)g_can.init(&hfdcan1, FILLING_STATION_BOARD_ID);
+  (void)g_can.init(&hfdcan1, BoardId::FillingStation);
   g_eth.init();
 
   /* Bring up the ADS131M08 ADC. The board owns the DRDY (PE7) pin: configure it

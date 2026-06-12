@@ -6,7 +6,7 @@
  * robust to dropped fragments / record boundaries.
  * ------------------------------------------------------------------------- */
 
-#include "communication/protocol/can/system_state_codec.hpp"
+#include "communication/protocol/framing/system_state_codec.hpp"
 
 #include <gtest/gtest.h>
 
@@ -39,7 +39,7 @@ SystemState makeRecord(uint8_t seed)
 std::array<CanFrame, SYSTEM_STATE_FRAGMENTS> pack(const SystemState& s, uint8_t seq)
 {
     std::array<CanFrame, SYSTEM_STATE_FRAGMENTS> frames{};
-    codec::packSystemState(s, /*sender*/ 0x01, /*target*/ 0x02, seq,
+    codec::packSystemState(s, BoardId::Engine, BoardId::FillingStation, seq,
                            std::span<CanFrame, SYSTEM_STATE_FRAGMENTS>(frames));
     return frames;
 }

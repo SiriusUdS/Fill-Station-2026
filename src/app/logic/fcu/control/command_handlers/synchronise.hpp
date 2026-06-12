@@ -1,6 +1,6 @@
 #pragma once
 
-#include "command/command.hpp"   // logic::communication::command::Command
+#include "communication/command/command.hpp"   // logic::communication::command::Command
 
 /* ------------------------------------------------------------------------- *
  * Synchronise command handler.

@@ -1,7 +1,7 @@
 #pragma once
 
-#include "command/command.hpp"   // Command + CommandType
-#include "control/states.hpp"     // logic::control::State
+#include "communication/command/command.hpp"   // Command + CommandType
+#include "system/state.hpp"     // logic::control::State
 
 /* ------------------------------------------------------------------------- *
  * Main command handler — the single entry point for an inbound command.

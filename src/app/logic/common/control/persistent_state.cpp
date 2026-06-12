@@ -10,7 +10,7 @@
 
 #include "control/persistent_state.hpp"
 
-#include "data_integrity/crc32_polynomial.hpp"  // CRC32_POLYNOMIAL[_REFLECTED]
+#include "system/crc32_polynomial.hpp"  // CRC32_POLYNOMIAL[_REFLECTED]
 
 #include <cstddef>
 

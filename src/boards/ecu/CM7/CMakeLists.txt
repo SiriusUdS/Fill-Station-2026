@@ -75,8 +75,7 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     ${REPO_ROOT}/src/app/logic/ecu                            # ECU controller + EcuValves
     ${REPO_ROOT}/src/app/logic/fcu                            # shared driver interfaces (adc/storage) — TODO: move shared ones to common
     ${REPO_ROOT}/src/app/logic/common                         # shared logic mechanism (interfaces etc.)
-    ${REPO_ROOT}/src/app/logic/common/Inc                     # CAN protocol defs (dil/can_types.h)
-    ${REPO_ROOT}/src/app/logic/common/communication/protocol  # telemetry/, can/, sirius-headers-common/
+    ${REPO_ROOT}/src/app/logic/common/communication/protocol  # wire formats: peripherals/, devices/, framing/, command/, system/, telemetry/
     ${REPO_ROOT}/src/app/platform                             # shared board-agnostic drivers
 )
 

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "command/command.hpp"   // logic::communication::command::Command
+#include "communication/command/command.hpp"   // logic::communication::command::Command
 
 /* ------------------------------------------------------------------------- *
  * SetState command handler — the most complex command. It does not just decide

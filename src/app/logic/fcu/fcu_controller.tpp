@@ -9,6 +9,8 @@
 
 namespace logic::fcu {
 
+using logic::communication::command::CommandType;
+
 /* ---- CAN ----------------------------------------------------------------- */
 
 template <logic::storage::Storage S, logic::actuation::Valve V,
@@ -16,11 +18,11 @@ template <logic::storage::Storage S, logic::actuation::Valve V,
           logic::communication::Can C>
 void Controller<S, V, A, E, C>::sendValveCmd(uint8_t valve, uint8_t cmd)
 {
-    CANHeader header = {};
-    header.frame.senderID    = FILLING_STATION_BOARD_ID;
-    header.frame.targetID    = ENGINE_BOARD_ID;
+    CanHeader header = {};
+    header.frame.senderID    = static_cast<uint8_t>(BoardId::FillingStation);
+    header.frame.targetID    = static_cast<uint8_t>(BoardId::Engine);
     header.frame.deviceState = cmd;
-    header.frame.messageID   = CAN_ID_CMD_VALVE;
+    header.frame.messageID   = static_cast<uint8_t>(CommandType::SetValvePosition);
 
     logic::communication::CanFrame frame;
     frame.id     = header.code;
@@ -33,7 +35,7 @@ void Controller<S, V, A, E, C>::sendValveCmd(uint8_t valve, uint8_t cmd)
 
 /* The FCU receives ECU telemetry over CAN: SystemState records fragmented by the
    shared codec. Reassemble each and relay it to the GS through the single egress,
-   tagged as ENGINE_BOARD_ID so the GS demuxes it from the FCU's own records. (The
+   tagged as BoardId::Engine so the GS demuxes it from the FCU's own records. (The
    FCU never receives commands over CAN — those always arrive over Ethernet.) */
 template <logic::storage::Storage S, logic::actuation::Valve V,
           logic::communication::StreamingAdc A, logic::communication::Ethernet E,
@@ -43,7 +45,7 @@ void Controller<S, V, A, E, C>::canTick()
     while (auto frame = can_.receive()) {
         if (auto record = ecu_reassembler_.accept(*frame)) {
             const SystemState ecu = *record;
-            sendToGs(ENGINE_BOARD_ID, /*sourceState (ECU state not yet in the record)*/ 0,
+            sendToGs(BoardId::Engine, /*sourceState (ECU state not yet in the record)*/ 0,
                      std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(&ecu), sizeof(ecu)));
         }
     }
@@ -59,32 +61,33 @@ void Controller<S, V, A, E, C>::handleStateRequest(std::span<const uint8_t> payl
     if (payload.size() <= detail::REQUEST_STATE_OFFSET_BYTES) {
         return;
     }
-    const uint8_t requested = payload[detail::REQUEST_STATE_OFFSET_BYTES];
+    const auto requested =
+        static_cast<logic::control::State>(payload[detail::REQUEST_STATE_OFFSET_BYTES]);
 
-    switch (static_cast<uint8_t>(logic::control::persistent_state.fill_state)) {
-        case FILLING_STATION_STATE_SAFE:
-            if (requested != FILLING_STATION_STATE_TEST &&
-                requested != FILLING_STATION_STATE_UNSAFE) return;
+    switch (logic::control::persistent_state.fill_state) {
+        case logic::control::State::Safe:
+            if (requested != logic::control::State::Test &&
+                requested != logic::control::State::Unsafe) return;
             break;
-        case FILLING_STATION_STATE_TEST:
-            if (requested != FILLING_STATION_STATE_SAFE) return;
+        case logic::control::State::Test:
+            if (requested != logic::control::State::Safe) return;
             break;
-        case FILLING_STATION_STATE_UNSAFE:
-            if (requested != FILLING_STATION_STATE_SAFE &&
-                requested != FILLING_STATION_STATE_IGNITE &&
-                requested != FILLING_STATION_STATE_ABORT) return;
+        case logic::control::State::Unsafe:
+            if (requested != logic::control::State::Safe &&
+                requested != logic::control::State::Ignite &&
+                requested != logic::control::State::Abort) return;
             break;
-        case FILLING_STATION_STATE_IGNITE:
-            if (requested != FILLING_STATION_STATE_SAFE &&
-                requested != FILLING_STATION_STATE_ABORT) return;
+        case logic::control::State::Ignite:
+            if (requested != logic::control::State::Safe &&
+                requested != logic::control::State::Abort) return;
             break;
-        case FILLING_STATION_STATE_ABORT:
-            if (requested != FILLING_STATION_STATE_SAFE) return;
+        case logic::control::State::Abort:
+            if (requested != logic::control::State::Safe) return;
             break;
         default:
             return;
     }
-    logic::control::persistent_state.saveState(static_cast<logic::control::State>(requested));
+    logic::control::persistent_state.saveState(requested);
 }
 
 template <logic::storage::Storage S, logic::actuation::Valve V,
@@ -100,17 +103,17 @@ void Controller<S, V, A, E, C>::handleDatagram(std::span<const uint8_t> payload)
     std::memcpy(header.bytes, payload.data(), sizeof(UDPPacketHeader));
     fill_.last_rx_ms = fill_.current_tick_ms;
 
-    const uint8_t device = header.frame.deviceID;
-    if (device != FILLING_STATION_BOARD_ID && device != BOARD_BROADCAST_ID) {
+    const auto device = static_cast<BoardId>(header.frame.deviceID);
+    if (device != BoardId::FillingStation && device != BoardId::Broadcast) {
         return;  /* not addressed to us (CAN-bridge routing TODO) */
     }
 
     // Dispatch on the payloadID so exactly the matching handler runs.
-    switch (header.frame.payloadID) {
-        case REQUEST_STATE:
+    switch (static_cast<CommandType>(header.frame.payloadID)) {
+        case CommandType::SetState:
             handleStateRequest(payload);
             break;
-        case static_cast<uint8_t>(logic::communication::command::CommandType::SetValvePosition):
+        case CommandType::SetValvePosition:
             handleSetValvePosition(payload);
             break;
         default:
@@ -230,8 +233,8 @@ template <logic::storage::Storage S, logic::actuation::Valve V,
           logic::communication::Can C>
 void Controller<S, V, A, E, C>::watchdogTick()
 {
-    const uint8_t state = static_cast<uint8_t>(logic::control::persistent_state.fill_state);
-    if (state == FILLING_STATION_STATE_UNSAFE || state == FILLING_STATION_STATE_IGNITE) {
+    const auto state = logic::control::persistent_state.fill_state;
+    if (state == logic::control::State::Unsafe || state == logic::control::State::Ignite) {
         if ((fill_.current_tick_ms - fill_.last_rx_ms) >= detail::RX_WATCHDOG_MS) {
             logic::control::persistent_state.saveState(logic::control::State::Abort);
         }
@@ -271,7 +274,7 @@ void Controller<S, V, A, E, C>::produceRecord(uint32_t now_ms)
 template <logic::storage::Storage S, logic::actuation::Valve V,
           logic::communication::StreamingAdc A, logic::communication::Ethernet E,
           logic::communication::Can C>
-void Controller<S, V, A, E, C>::sendToGs(uint8_t sourceId, uint8_t sourceState,
+void Controller<S, V, A, E, C>::sendToGs(BoardId sourceId, uint8_t sourceState,
                                          std::span<const uint8_t> records)
 {
     static std::array<uint8_t,
@@ -284,8 +287,8 @@ void Controller<S, V, A, E, C>::sendToGs(uint8_t sourceId, uint8_t sourceState,
             records.size() - off < batch_bytes ? records.size() - off : batch_bytes;
 
         EthernetHeader header = {};
-        header.deviceID      = sourceId;
-        header.payloadID     = GET_SYSTEM;
+        header.deviceID      = static_cast<uint8_t>(sourceId);
+        header.payloadID     = static_cast<uint8_t>(TelemetryId::SystemState);
         header.payloadLenght = static_cast<uint16_t>(chunk);
         header.deviceState   = sourceState;
         header.deviceTS_MS   = fill_.current_tick_ms;
@@ -314,7 +317,7 @@ void Controller<S, V, A, E, C>::drainTick()
         const uint16_t bytes = log_.used[h];
 
         storage_.write(std::span<const uint8_t>(log_.data[h], detail::LOG_HALF_BYTES));
-        sendToGs(FILLING_STATION_BOARD_ID,
+        sendToGs(BoardId::FillingStation,
                  static_cast<uint8_t>(logic::control::persistent_state.fill_state),
                  std::span<const uint8_t>(log_.data[h], bytes));
         log_.ready[h] = false;

@@ -17,7 +17,7 @@ target_include_directories(valve_test PRIVATE ${TEST_SUPPORT} ${LOGIC_COMMON_INC
 target_link_libraries(valve_test PRIVATE GTest::gtest_main)
 gtest_discover_tests(valve_test PROPERTIES LABELS "unit")
 
-set(COMMAND_DIR ${LOGIC_COMMON}/communication/protocol/command)
+set(COMMAND_DIR ${LOGIC_COMMON}/communication/command)
 add_executable(command_test
     unit/logic/communication/protocol/command/command_test.cpp
     ${COMMAND_DIR}/parser/command_can_parser.cpp

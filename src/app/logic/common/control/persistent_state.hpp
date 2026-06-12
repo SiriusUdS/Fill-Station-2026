@@ -4,7 +4,7 @@
 #include <cstdint>
 #include <optional>
 
-#include "control/states.hpp"  // logic::control::State
+#include "system/state.hpp"  // logic::control::State
 
 /* ------------------------------------------------------------------------- *
  * Persistent state — a snapshot of the global filling-station state machine

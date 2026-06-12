@@ -12,13 +12,13 @@
 #include "communication/interfaces/adc.hpp"      // logic::communication::StreamingAdc (injected)
 #include "communication/interfaces/can.hpp"      // logic::communication::Can + CanFrame (injected)
 #include "control/persistent_state.hpp"          // Backup-SRAM state snapshot (shared with the FCU)
-#include "dil/can_types.h"                        // HAL-free CAN protocol (CANHeader, enums)
+#include "framing/can_header.hpp"                        // HAL-free CAN protocol (CanHeader, enums)
 
 #include "communication/protocol/telemetry/system_state.hpp"  // SystemState, ValveInfo, InterfaceFieldFlags
-#include "communication/protocol/can/system_state_codec.hpp"  // SystemState <-> CAN fragment codec (shared)
-#include "ecu_valves.hpp"                          // EcuValves (valve identity / array index SSOT)
+#include "communication/protocol/framing/system_state_codec.hpp"  // SystemState <-> CAN fragment codec (shared)
+#include "system/valves/ecu.hpp"                          // EcuValves (valve identity / array index SSOT)
 
-#include "sirius-headers-common/Telecommunication/PacketHeaderVariable.h"  // ENGINE_BOARD_ID, board ids
+#include "system/board_ids.hpp"  // BoardId::Engine, board ids
 
 /* ------------------------------------------------------------------------- *
  * ECU engine controller (HAL-free), as a class template — the CAN-side sibling
@@ -52,7 +52,7 @@ inline constexpr std::size_t LOG_HALF_BYTES = 4096;
    timer emits filler records (flagged invalid) so the downlink rate holds. */
 inline constexpr uint32_t ADC_TIMEOUT_MS = 10;
 
-/* Byte offset of the valve index in a CAN_ID_CMD_VALVE frame (mirrors the FCU's
+/* Byte offset of the valve index in a CommandType::SetValvePosition frame (mirrors the FCU's
    sendValveCmd: data[0..3] = timestamp, data[4] = valve index). */
 inline constexpr std::size_t CMD_VALVE_INDEX_OFFSET = sizeof(uint32_t);
 
@@ -120,8 +120,8 @@ public:
 private:
     void        canTick();                                   // drain CAN, dispatch FCU commands
     void        handleCanFrame(const logic::communication::CanFrame& frame);
-    void        handleValveCmd(const logic::communication::CanFrame& frame, const CANHeader& header);
-    void        handlePing(const logic::communication::CanFrame& frame, const CANHeader& header);
+    void        handleValveCmd(const logic::communication::CanFrame& frame, const CanHeader& header);
+    void        handlePing(const logic::communication::CanFrame& frame, const CanHeader& header);
     SystemState buildSystemState(const AdcInfo& adc, uint32_t now_ms);
     void        logAppend(const SystemState& record);
     void        drainTick();                                 // flush full halves to SD + downlink over CAN

@@ -4,7 +4,7 @@
  * The logic is exercised purely through its public surface (init/tick) and the
  * communication interfaces, which the FakeBus stands in for. The state machine
  * keeps its state in battery-backed persistent_state; telemetry is no longer a
- * per-tick heartbeat (the GET_SYSTEM SystemState packet is now produced on the
+ * per-tick heartbeat (the TelemetryId::SystemState SystemState packet is now produced on the
  * record timer, see produceRecord), so the state-machine tests read the current
  * state straight from persistent_state via currentState().
  * ------------------------------------------------------------------------- */
@@ -17,15 +17,15 @@
 
 #include "communication/interfaces/can.hpp"
 #include "communication/interfaces/ethernet.hpp"
-#include "communication/protocol/ethernet/ethernet_header.hpp"   // EthernetHeader (downlink header)
+#include "communication/protocol/framing/ethernet_header.hpp"   // EthernetHeader (downlink header)
 #include "control/persistent_state.hpp"
-#include "control/states.hpp"
-#include "dil/can_types.h"
+#include "system/state.hpp"
+#include "framing/can_header.hpp"
 
-#include "sirius-headers-common/Ethernet/UDPFrame.h"
-#include "sirius-headers-common/FillingStation/FillingStationState.h"
-#include "sirius-headers-common/Telecommunication/BoardCommandV2.h"
-#include "sirius-headers-common/Telecommunication/PacketHeaderVariable.h"
+#include "framing/udp_frame.hpp"
+#include "system/state.hpp"
+#include "telemetry/telemetry_id.hpp"
+#include "system/board_ids.hpp"
 
 #include <gtest/gtest.h>
 
@@ -38,18 +38,18 @@ using logic::communication::Endpoint;
 namespace {
 
 /* Byte offset, within the UDP payload, of the requested-state field of a
-   REQUEST_STATE command. Mirrors REQUEST_STATE_OFFSET_BYTES in the logic. */
+   CommandType::SetState command. Mirrors REQUEST_STATE_OFFSET_BYTES in the logic. */
 constexpr std::size_t REQUEST_STATE_OFFSET = 15;
 
-/* Build a REQUEST_STATE datagram addressed to `device`, asking for `requested`. */
-std::vector<uint8_t> makeStateRequest(uint8_t device, uint8_t requested)
+/* Build a CommandType::SetState datagram addressed to `device`, asking for `requested`. */
+std::vector<uint8_t> makeStateRequest(uint8_t device, logic::control::State requested)
 {
     std::vector<uint8_t> payload(REQUEST_STATE_OFFSET + 1, 0);
     UDPPacketHeader header = {};
     header.frame.deviceID  = device;
-    header.frame.payloadID = REQUEST_STATE;
+    header.frame.payloadID = CommandType::SetState;
     std::memcpy(payload.data(), header.bytes, sizeof(UDPPacketHeader));
-    payload[REQUEST_STATE_OFFSET] = requested;
+    payload[REQUEST_STATE_OFFSET] = static_cast<uint8_t>(requested);
     return payload;
 }
 
@@ -57,7 +57,7 @@ std::vector<uint8_t> makeStateRequest(uint8_t device, uint8_t requested)
 CanFrame makeCanFrame(uint8_t sender, uint8_t target, uint8_t messageId,
                       std::array<uint8_t, 8> data = {})
 {
-    CANHeader header        = {};
+    CanHeader header        = {};
     header.frame.senderID   = sender;
     header.frame.targetID   = target;
     header.frame.messageID  = messageId;
@@ -98,22 +98,22 @@ protected:
 
     /* The controller's current state, read straight from the persisted snapshot
        (the state machine commits every transition there). */
-    uint8_t currentState() const
+    logic::control::State currentState() const
     {
-        return static_cast<uint8_t>(logic::control::persistent_state.fill_state);
+        return logic::control::persistent_state.fill_state;
     }
 
     /* Drive the machine into SAFE and clear recorded traffic. */
     void reachSafe()
     {
         step();  // first tick moves INIT -> SAFE
-        ASSERT_EQ(currentState(), FILLING_STATION_STATE_SAFE);
+        ASSERT_EQ(currentState(), logic::control::State::Safe);
         bus().udp_tx.clear();
         bus().can_tx.clear();
     }
 
-    /* Send a REQUEST_STATE command (addressed to us) and tick once. */
-    void requestState(uint8_t requested, uint8_t device = FILLING_STATION_BOARD_ID)
+    /* Send a CommandType::SetState command (addressed to us) and tick once. */
+    void requestState(logic::control::State requested, uint8_t device = BoardId::FillingStation)
     {
         const auto payload = makeStateRequest(device, requested);
         bus().push_udp(Endpoint{}, payload);
@@ -125,15 +125,15 @@ protected:
 
 TEST_F(FcuControllerTest, StartsAtInitAndFirstTickEntersSafe)
 {
-    EXPECT_EQ(currentState(), FILLING_STATION_STATE_INIT);  // right after init(), before any tick
+    EXPECT_EQ(currentState(), logic::control::State::Init);  // right after init(), before any tick
     step();
-    EXPECT_EQ(currentState(), FILLING_STATION_STATE_SAFE);  // first tick moves INIT -> SAFE
+    EXPECT_EQ(currentState(), logic::control::State::Safe);  // first tick moves INIT -> SAFE
 }
 
 /* Telemetry is no longer a per-tick heartbeat: SystemState records are produced
-   on the record timer (produceRecord) and batched into GET_SYSTEM datagrams when
+   on the record timer (produceRecord) and batched into TelemetryId::SystemState datagrams when
    a 4096-byte half fills and drains. Pump records until that happens and check
-   the downlinked packet is a well-formed GET_SYSTEM frame. */
+   the downlinked packet is a well-formed TelemetryId::SystemState frame. */
 TEST_F(FcuControllerTest, FullTelemetryBufferDownlinksGetSystem)
 {
     reachSafe();  // also clears udp_tx
@@ -150,8 +150,8 @@ TEST_F(FcuControllerTest, FullTelemetryBufferDownlinksGetSystem)
     ASSERT_GE(payload.size(), sizeof(EthernetHeader));
     EthernetHeader header;
     std::memcpy(&header, payload.data(), sizeof(EthernetHeader));
-    EXPECT_EQ(header.deviceID, FILLING_STATION_BOARD_ID);
-    EXPECT_EQ(header.payloadID, GET_SYSTEM);
+    EXPECT_EQ(header.deviceID, BoardId::FillingStation);
+    EXPECT_EQ(header.payloadID, TelemetryId::SystemState);
 }
 
 TEST_F(FcuControllerTest, EveryTickServicesTheLink)
@@ -167,57 +167,57 @@ TEST_F(FcuControllerTest, EveryTickServicesTheLink)
 TEST_F(FcuControllerTest, SafeToTest)
 {
     reachSafe();
-    requestState(FILLING_STATION_STATE_TEST);
-    EXPECT_EQ(currentState(), FILLING_STATION_STATE_TEST);
+    requestState(logic::control::State::Test);
+    EXPECT_EQ(currentState(), logic::control::State::Test);
 }
 
 TEST_F(FcuControllerTest, SafeToUnsafe)
 {
     reachSafe();
-    requestState(FILLING_STATION_STATE_UNSAFE);
-    EXPECT_EQ(currentState(), FILLING_STATION_STATE_UNSAFE);
+    requestState(logic::control::State::Unsafe);
+    EXPECT_EQ(currentState(), logic::control::State::Unsafe);
 }
 
 TEST_F(FcuControllerTest, TestBackToSafe)
 {
     reachSafe();
-    requestState(FILLING_STATION_STATE_TEST);
-    requestState(FILLING_STATION_STATE_SAFE);
-    EXPECT_EQ(currentState(), FILLING_STATION_STATE_SAFE);
+    requestState(logic::control::State::Test);
+    requestState(logic::control::State::Safe);
+    EXPECT_EQ(currentState(), logic::control::State::Safe);
 }
 
 TEST_F(FcuControllerTest, UnsafeToIgnite)
 {
     reachSafe();
-    requestState(FILLING_STATION_STATE_UNSAFE);
-    requestState(FILLING_STATION_STATE_IGNITE);
-    EXPECT_EQ(currentState(), FILLING_STATION_STATE_IGNITE);
+    requestState(logic::control::State::Unsafe);
+    requestState(logic::control::State::Ignite);
+    EXPECT_EQ(currentState(), logic::control::State::Ignite);
 }
 
 TEST_F(FcuControllerTest, UnsafeToAbort)
 {
     reachSafe();
-    requestState(FILLING_STATION_STATE_UNSAFE);
-    requestState(FILLING_STATION_STATE_ABORT);
-    EXPECT_EQ(currentState(), FILLING_STATION_STATE_ABORT);
+    requestState(logic::control::State::Unsafe);
+    requestState(logic::control::State::Abort);
+    EXPECT_EQ(currentState(), logic::control::State::Abort);
 }
 
 TEST_F(FcuControllerTest, IgniteToAbort)
 {
     reachSafe();
-    requestState(FILLING_STATION_STATE_UNSAFE);
-    requestState(FILLING_STATION_STATE_IGNITE);
-    requestState(FILLING_STATION_STATE_ABORT);
-    EXPECT_EQ(currentState(), FILLING_STATION_STATE_ABORT);
+    requestState(logic::control::State::Unsafe);
+    requestState(logic::control::State::Ignite);
+    requestState(logic::control::State::Abort);
+    EXPECT_EQ(currentState(), logic::control::State::Abort);
 }
 
 TEST_F(FcuControllerTest, AbortBackToSafe)
 {
     reachSafe();
-    requestState(FILLING_STATION_STATE_UNSAFE);
-    requestState(FILLING_STATION_STATE_ABORT);
-    requestState(FILLING_STATION_STATE_SAFE);
-    EXPECT_EQ(currentState(), FILLING_STATION_STATE_SAFE);
+    requestState(logic::control::State::Unsafe);
+    requestState(logic::control::State::Abort);
+    requestState(logic::control::State::Safe);
+    EXPECT_EQ(currentState(), logic::control::State::Safe);
 }
 
 /* ---- Rejected state transitions ----------------------------------------- */
@@ -225,37 +225,37 @@ TEST_F(FcuControllerTest, AbortBackToSafe)
 TEST_F(FcuControllerTest, SafeRejectsIgnite)
 {
     reachSafe();
-    requestState(FILLING_STATION_STATE_IGNITE);
-    EXPECT_EQ(currentState(), FILLING_STATION_STATE_SAFE);
+    requestState(logic::control::State::Ignite);
+    EXPECT_EQ(currentState(), logic::control::State::Safe);
 }
 
 TEST_F(FcuControllerTest, SafeRejectsAbort)
 {
     reachSafe();
-    requestState(FILLING_STATION_STATE_ABORT);
-    EXPECT_EQ(currentState(), FILLING_STATION_STATE_SAFE);
+    requestState(logic::control::State::Abort);
+    EXPECT_EQ(currentState(), logic::control::State::Safe);
 }
 
 TEST_F(FcuControllerTest, UnsafeRejectsTest)
 {
     reachSafe();
-    requestState(FILLING_STATION_STATE_UNSAFE);
-    requestState(FILLING_STATION_STATE_TEST);
-    EXPECT_EQ(currentState(), FILLING_STATION_STATE_UNSAFE);
+    requestState(logic::control::State::Unsafe);
+    requestState(logic::control::State::Test);
+    EXPECT_EQ(currentState(), logic::control::State::Unsafe);
 }
 
 TEST_F(FcuControllerTest, CommandForAnotherBoardIsIgnored)
 {
     reachSafe();
-    requestState(FILLING_STATION_STATE_UNSAFE, ENGINE_BOARD_ID);
-    EXPECT_EQ(currentState(), FILLING_STATION_STATE_SAFE);
+    requestState(logic::control::State::Unsafe, BoardId::Engine);
+    EXPECT_EQ(currentState(), logic::control::State::Safe);
 }
 
 TEST_F(FcuControllerTest, BroadcastCommandIsAccepted)
 {
     reachSafe();
-    requestState(FILLING_STATION_STATE_UNSAFE, BOARD_BROADCAST_ID);
-    EXPECT_EQ(currentState(), FILLING_STATION_STATE_UNSAFE);
+    requestState(logic::control::State::Unsafe, BoardId::Broadcast);
+    EXPECT_EQ(currentState(), logic::control::State::Unsafe);
 }
 
 /* ---- Receive watchdog ---------------------------------------------------- */
@@ -263,29 +263,29 @@ TEST_F(FcuControllerTest, BroadcastCommandIsAccepted)
 TEST_F(FcuControllerTest, WatchdogAbortsUnsafeAfterSilence)
 {
     reachSafe();
-    requestState(FILLING_STATION_STATE_UNSAFE);  // last_rx updated at this tick
-    ASSERT_EQ(currentState(), FILLING_STATION_STATE_UNSAFE);
+    requestState(logic::control::State::Unsafe);  // last_rx updated at this tick
+    ASSERT_EQ(currentState(), logic::control::State::Unsafe);
 
     stepTo(now_ms_ + 500);  // 500 ms with no inbound datagram
-    EXPECT_EQ(currentState(), FILLING_STATION_STATE_ABORT);
+    EXPECT_EQ(currentState(), logic::control::State::Abort);
 }
 
 TEST_F(FcuControllerTest, WatchdogDoesNotAbortSafe)
 {
     reachSafe();
     stepTo(now_ms_ + 5000);  // long silence, but SAFE has no watchdog
-    EXPECT_EQ(currentState(), FILLING_STATION_STATE_SAFE);
+    EXPECT_EQ(currentState(), logic::control::State::Safe);
 }
 
 TEST_F(FcuControllerTest, TrafficKeepsUnsafeAlive)
 {
     reachSafe();
-    requestState(FILLING_STATION_STATE_UNSAFE);
+    requestState(logic::control::State::Unsafe);
     /* Keep feeding (irrelevant) datagrams so last_rx stays fresh. */
     for (int i = 0; i < 600; ++i) {
-        requestState(FILLING_STATION_STATE_UNSAFE);  // self-transition keeps rx alive
+        requestState(logic::control::State::Unsafe);  // self-transition keeps rx alive
     }
-    EXPECT_EQ(currentState(), FILLING_STATION_STATE_UNSAFE);
+    EXPECT_EQ(currentState(), logic::control::State::Unsafe);
 }
 
 /* ---- CAN ------------------------------------------------------------------ *
@@ -296,16 +296,16 @@ TEST_F(FcuControllerTest, TrafficKeepsUnsafeAlive)
 
 TEST_F(FcuControllerTest, IncomingCanFrameProducesNoReply)
 {
-    bus().push_can(makeCanFrame(ENGINE_BOARD_ID, FILLING_STATION_BOARD_ID, CAN_ID_STATUS_VALVE));
+    bus().push_can(makeCanFrame(BoardId::Engine, BoardId::FillingStation, static_cast<uint8_t>(TelemetryId::SystemState)));
     step();
     EXPECT_TRUE(bus().can_tx.empty());
 }
 
 TEST_F(FcuControllerTest, AllQueuedCanFramesAreDrainedInOneTick)
 {
-    bus().push_can(makeCanFrame(ENGINE_BOARD_ID, FILLING_STATION_BOARD_ID, CAN_ID_STATUS_VALVE));
-    bus().push_can(makeCanFrame(ENGINE_BOARD_ID, FILLING_STATION_BOARD_ID, CAN_ID_STATUS_VALVE));
-    bus().push_can(makeCanFrame(ENGINE_BOARD_ID, FILLING_STATION_BOARD_ID, CAN_ID_STATUS_VALVE));
+    bus().push_can(makeCanFrame(BoardId::Engine, BoardId::FillingStation, static_cast<uint8_t>(TelemetryId::SystemState)));
+    bus().push_can(makeCanFrame(BoardId::Engine, BoardId::FillingStation, static_cast<uint8_t>(TelemetryId::SystemState)));
+    bus().push_can(makeCanFrame(BoardId::Engine, BoardId::FillingStation, static_cast<uint8_t>(TelemetryId::SystemState)));
     step();
     EXPECT_TRUE(bus().can_rx.empty());  // all drained in one tick
     EXPECT_TRUE(bus().can_tx.empty());  // and never answered
@@ -316,7 +316,7 @@ TEST_F(FcuControllerTest, AllQueuedCanFramesAreDrainedInOneTick)
 TEST_F(FcuControllerTest, StateTransitionIsPersisted)
 {
     reachSafe();
-    requestState(FILLING_STATION_STATE_UNSAFE);
+    requestState(logic::control::State::Unsafe);
 
     const auto loaded = logic::control::persistent_state.loadState();
     ASSERT_TRUE(loaded.has_value());
@@ -329,7 +329,7 @@ TEST_F(FcuControllerTest, ResumesPersistedStateOnInit)
     logic::control::persistent_state.saveState(logic::control::State::Unsafe);
 
     controller_.init();  // reboot resumes the persisted state (before any tick advances it)
-    EXPECT_EQ(currentState(), FILLING_STATION_STATE_UNSAFE);
+    EXPECT_EQ(currentState(), logic::control::State::Unsafe);
 }
 
 TEST_F(FcuControllerTest, ColdBootWithInvalidBlobStartsAtInit)
@@ -338,7 +338,7 @@ TEST_F(FcuControllerTest, ColdBootWithInvalidBlobStartsAtInit)
     logic::control::persistent_state.magic = 0;  // corrupt => looks like cold garbage
 
     controller_.init();  // cold/corrupt boot starts at INIT (before any tick advances it)
-    EXPECT_EQ(currentState(), FILLING_STATION_STATE_INIT);
+    EXPECT_EQ(currentState(), logic::control::State::Init);
 }
 
 } // namespace
