@@ -21,6 +21,10 @@
         {
             "name": "STM32_src",
             "compileCommands": "${workspaceFolder}/src/boards/fcu/CM7/build/compile_commands.json"
+        },
+        {
+            "name": "STM32_src",
+            "compileCommands": "${workspaceFolder}/src/boards/fcu/CM7/build/compile_commands.json"
         }
     ],
     "version": 4

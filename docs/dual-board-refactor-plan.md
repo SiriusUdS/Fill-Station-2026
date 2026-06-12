@@ -227,10 +227,14 @@ The genuinely hard part. CubeMX is one-project-per-directory and regenerates `Co
       (with `fcu_objects.hpp` sharing the object graph between `main.cpp` and `board.cpp`). The HAL-free
       FCU logic (Controller, handlers, states) remains in `src/app/logic/fcu`. Firmware builds, 75 tests pass.
 
-- [ ] **Phase 4 — Stand up the ECU CubeMX project**
-  - [ ] Create `boards/ecu/ECU.ioc` for the ECU pinout (no Ethernet; CAN; its own peripheral instances).
-  - [ ] Generate into `boards/ecu/CM7|CM4` with isolated `mx-generated.cmake`. Confirm it regenerates
-        without touching `boards/fcu/`.
+- [~] **Phase 4 — Stand up the ECU board** *(clone builds; thinning next)*
+  - [x] Created `src/boards/ecu/` by copying `src/boards/fcu/` and renaming the project (`ecu.ioc`
+        ProjectName=ecu, `ecu_CM7` build target). Builds via `cmake --preset ecu-Debug` → `ecu_CM7.elf`.
+        Currently an **exact FCU clone** (same `Core/`; `board.cpp`/`main.cpp`/`fcu_objects.hpp` still
+        reference `logic::fcu` and the FCU drivers). Both boards build side-by-side, isolated build dirs.
+  - [ ] **Next — thin + change peripherals:** strip FCU-only hardware (Ethernet, fill/dump valves), carve
+        `src/app/logic/ecu/`, repoint ecu's `board.cpp`/`main.cpp`/objects at it, and regenerate the ECU
+        pinout in CubeMX. Interim target: ECU builds and does "nothing" (no drivers wired).
 
 - [ ] **Phase 5 — Author ECU logic policy (`app/logic/ecu/`)**
   - [ ] ECU controller composing `logic/common` mechanism.
