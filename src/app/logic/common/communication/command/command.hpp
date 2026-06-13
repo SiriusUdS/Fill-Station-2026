@@ -33,6 +33,9 @@ struct Command {
     CommandType type{};
     uint8_t  source{};                 /**< Origin node/device id. */
     uint8_t  target{};                 /**< Destination node/device id (or broadcast). */
+    uint8_t  seq{};                    /**< Reliability sequence the originator (the GS) stamped; it
+                                            is propagated through the relay and echoed in the response
+                                            so the originator can match + retry. 4-bit on the CAN hop. */
     uint32_t timestamp_ms{};           /**< Transport timestamp / fill tick. */
     std::array<uint8_t, 8> payload{};  /**< Raw payload bytes; reinterpret per @ref type. */
 };

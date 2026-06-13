@@ -46,6 +46,7 @@ std::optional<Command> fromEthernet(std::span<const uint8_t> frame)
     cmd.type         = *type;
     cmd.source       = static_cast<uint8_t>(header.sender_id);  // from the header — not assumed
     cmd.target       = static_cast<uint8_t>(header.target_id);
+    cmd.seq          = static_cast<uint8_t>(header.seq);        // GS-stamped; propagated + echoed back
     cmd.timestamp_ms = header.sender_timestamp_ms;
     std::memcpy(cmd.payload.data(), body.data(), need);
     return cmd;

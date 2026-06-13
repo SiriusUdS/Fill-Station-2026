@@ -50,7 +50,7 @@ constexpr uint32_t RX_WATCHDOG_MS = 500;
 /* Build a UDP datagram: a 12-byte EthernetHeader (a command addressed to `target`)
    followed by `body`. */
 std::vector<uint8_t> makeCommand(command::CommandType type, BoardId target,
-                                 const uint8_t* body, std::size_t bodyLen)
+                                 const uint8_t* body, std::size_t bodyLen, uint8_t seq = 0)
 {
     EthernetHeader header{};
     header.sender_id          = static_cast<uint8_t>(BoardId::GsControl);
@@ -58,6 +58,7 @@ std::vector<uint8_t> makeCommand(command::CommandType type, BoardId target,
     header.payload_type       = static_cast<uint8_t>(PayloadType::Command);
     header.payload_id         = static_cast<uint8_t>(type);
     header.payload_size_bytes = static_cast<uint16_t>(bodyLen);
+    header.seq                = seq;   // the GS-stamped sequence
 
     std::vector<uint8_t> buf(sizeof(EthernetHeader) + bodyLen);
     std::memcpy(buf.data(), &header, sizeof(EthernetHeader));
@@ -81,9 +82,9 @@ std::vector<uint8_t> makeSetValve(FcuValves valve, ValveCommand action, uint8_t 
                        reinterpret_cast<const uint8_t*>(&body), sizeof(body));
 }
 
-std::vector<uint8_t> makePing()
+std::vector<uint8_t> makePing(uint8_t seq = 0)
 {
-    return makeCommand(command::CommandType::Ping, BoardId::FillingStation, nullptr, 0);
+    return makeCommand(command::CommandType::Ping, BoardId::FillingStation, nullptr, 0, seq);
 }
 
 class ControlTest : public ::testing::Test {
@@ -135,6 +136,25 @@ TEST_F(ControlTest, PingIsForwardedToEcuOverCan)
     EXPECT_EQ(static_cast<PayloadType>(header.frame.payload_type), PayloadType::Command);
     EXPECT_EQ(static_cast<command::CommandType>(header.frame.payload_id), command::CommandType::Ping);
     EXPECT_EQ(bus().can_tx.front().length, 0);
+}
+
+TEST_F(ControlTest, PropagatesGsSeqOntoTheCanPingAndBackOnTheRelayedPong)
+{
+    setCurrent(State::Safe);
+    deliver(makePing(/*seq=*/9));   // the GS stamped seq 9
+
+    // Forwarded to the ECU carrying the GS's seq (4-bit on CAN).
+    ASSERT_EQ(bus().can_tx.size(), 1u);
+    CanHeader fwd;
+    fwd.code = bus().can_tx.front().id;
+    EXPECT_EQ(fwd.frame.seq, 9u);
+
+    // The ECU's Pong (echoing seq 9) is relayed to the GS still carrying seq 9.
+    control_.onPong(/*seq=*/9, ++now_ms_);
+    ASSERT_EQ(bus().udp_tx.size(), 1u);
+    EthernetHeader relayed;
+    std::memcpy(&relayed, bus().udp_tx.front().payload.data(), sizeof(EthernetHeader));
+    EXPECT_EQ(relayed.seq, 9u);
 }
 
 /* ---- Reliable command (retry until the response echoes the seq) ----------- */

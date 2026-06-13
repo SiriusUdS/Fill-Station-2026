@@ -38,6 +38,7 @@ std::optional<Command> fromCan(const CanFrame& frame)
     cmd.type   = *type;
     cmd.source = static_cast<uint8_t>(header.frame.sender_id);
     cmd.target = static_cast<uint8_t>(header.frame.target_id);
+    cmd.seq    = static_cast<uint8_t>(header.frame.seq);
 
     std::size_t n = payloadSize(*type);
     if (n > frame.data.size()) {

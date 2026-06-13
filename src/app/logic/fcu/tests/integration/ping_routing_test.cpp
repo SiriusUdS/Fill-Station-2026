@@ -38,28 +38,32 @@ namespace command = logic::communication::command;
 
 namespace {
 
-/* A UDP datagram carrying a no-payload Ping command addressed to the FCU. */
-std::vector<uint8_t> makePingCommand()
+/* A UDP datagram carrying a no-payload Ping command addressed to the FCU, stamped
+   with the GS's sequence @p seq. */
+std::vector<uint8_t> makePingCommand(uint8_t seq = 0)
 {
     EthernetHeader header{};
     header.sender_id    = static_cast<uint8_t>(BoardId::GsControl);
     header.target_id    = static_cast<uint8_t>(BoardId::FillingStation);
     header.payload_type = static_cast<uint8_t>(PayloadType::Command);
     header.payload_id   = static_cast<uint8_t>(command::CommandType::Ping);
+    header.seq          = seq;
 
     std::vector<uint8_t> datagram(sizeof(EthernetHeader));
     std::memcpy(datagram.data(), &header, sizeof(EthernetHeader));
     return datagram;
 }
 
-/* A CAN frame carrying a no-payload Pong from the ECU addressed to the FCU. */
-logic::communication::CanFrame makePongFrame()
+/* A CAN frame carrying a no-payload Pong from the ECU addressed to the FCU, echoing
+   the command sequence @p seq. */
+logic::communication::CanFrame makePongFrame(uint8_t seq = 0)
 {
     CanHeader header{};
     header.frame.sender_id    = static_cast<uint8_t>(BoardId::Engine);
     header.frame.target_id    = static_cast<uint8_t>(BoardId::FillingStation);
     header.frame.payload_type = static_cast<uint8_t>(PayloadType::Response);
     header.frame.payload_id   = static_cast<uint8_t>(ResponseType::Pong);
+    header.frame.seq          = seq;
 
     logic::communication::CanFrame frame;
     frame.id     = header.code;
@@ -138,6 +142,25 @@ TEST_F(PingRouting, NonPongCanFrameDoesNotRelayToGs)
     logic::communication::CanFrame telemetry{};  // payload_type 0 (unset) — not a Pong
     deliverCan(telemetry);
     EXPECT_TRUE(bus().udp_tx.empty());
+}
+
+/* ---- End-to-end seq propagation (Gs -> Fcu -> Ecu -> Fcu -> Gs) ----------- */
+
+TEST_F(PingRouting, GsSeqIsPropagatedThroughTheWholeChain)
+{
+    deliverUdp(makePingCommand(/*seq=*/5));    // GS pings with seq 5
+
+    ASSERT_EQ(bus().can_tx.size(), 1u);
+    CanHeader forwarded;
+    forwarded.code = bus().can_tx.front().id;
+    EXPECT_EQ(forwarded.frame.seq, 5u);        // forwarded to the ECU carrying seq 5
+
+    deliverCan(makePongFrame(/*seq=*/5));      // ECU answers, echoing seq 5
+
+    ASSERT_EQ(bus().udp_tx.size(), 1u);
+    EthernetHeader relayed;
+    std::memcpy(&relayed, bus().udp_tx.front().payload.data(), sizeof(EthernetHeader));
+    EXPECT_EQ(relayed.seq, 5u);                // relayed back to the GS still carrying seq 5
 }
 
 } // namespace

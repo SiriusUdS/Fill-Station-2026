@@ -168,7 +168,7 @@ private:
                 records.size() - off < batch_bytes ? records.size() - off : batch_bytes;
             comm_.sendToGs(sourceId, PayloadType::Telemetry,
                            static_cast<uint8_t>(TelemetryType::SystemState),
-                           sourceState, records.subspan(off, chunk), now_ms);
+                           sourceState, /*seq=*/0, records.subspan(off, chunk), now_ms);
         }
     }
 

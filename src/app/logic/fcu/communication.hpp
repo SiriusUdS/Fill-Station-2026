@@ -93,13 +93,14 @@ public:
     /**
      * @brief Frame @p payload for the ground station and send it: an EthernetHeader
      *        (from @p sourceId to GsControl, tagged @p payloadType / @p payloadId /
-     *        @p sourceState / @p now_ms) + the payload + a CRC over the payload.
+     *        @p sourceState / @p seq / @p now_ms) + the payload + a CRC over the payload.
      *
-     * @p payloadId is opaque here — a TelemetryType, ResponseType, etc. The caller
-     * owns its meaning; this layer only routes and frames.
+     * @p payloadId is opaque here — a TelemetryType, ResponseType, etc. @p seq is the
+     * GS's command sequence echoed back on a relayed response (0 for telemetry). The
+     * caller owns their meaning; this layer only routes and frames.
      */
     void sendToGs(BoardId sourceId, PayloadType payloadType, uint8_t payloadId,
-                  uint8_t sourceState, std::span<const uint8_t> payload, uint32_t now_ms)
+                  uint8_t sourceState, uint8_t seq, std::span<const uint8_t> payload, uint32_t now_ms)
     {
         static std::array<uint8_t, detail::UDP_MAX_PAYLOAD_BYTES> packet;
 
@@ -113,6 +114,7 @@ public:
         header.payload_id          = payloadId;
         header.payload_size_bytes  = static_cast<uint16_t>(chunk);
         header.sender_state        = sourceState;
+        header.seq                 = seq;
         header.sender_timestamp_ms = now_ms;
 
         std::memcpy(packet.data(), &header, sizeof(header));
