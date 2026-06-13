@@ -1,7 +1,7 @@
 #pragma once
 
-#include "communication/protocol/telemetry/system_state_base.hpp"
-#include "communication/protocol/peripherals/ethernet/ethernet_info.hpp"
+#include "telemetry/system_state_base.hpp"
+#include "peripherals/ethernet/ethernet_info.hpp"
 
 /* Periodic FCU telemetry record — the filling-station board's live state,
  * downlinked over Ethernet to the ground station. Adds the Ethernet link's info

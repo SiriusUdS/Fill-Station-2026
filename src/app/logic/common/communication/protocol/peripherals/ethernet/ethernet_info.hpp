@@ -2,8 +2,8 @@
 
 #include <cstdint>
 
-#include "communication/protocol/peripherals/ethernet/ethernet_state.hpp"
-#include "communication/protocol/peripherals/ethernet/ethernet_status.hpp"
+#include "peripherals/ethernet/ethernet_state.hpp"
+#include "peripherals/ethernet/ethernet_status.hpp"
 
 /* Telemetry unit for the Ethernet link: its state, status bits and a dropped-
  * datagram counter, owned and kept current by the Ethernet driver. */

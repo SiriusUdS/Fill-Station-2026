@@ -2,8 +2,8 @@
 
 #include <cstdint>
 
-#include "communication/protocol/peripherals/adc/adc_state.hpp"
-#include "communication/protocol/peripherals/adc/adc_status.hpp"
+#include "peripherals/adc/adc_state.hpp"
+#include "peripherals/adc/adc_status.hpp"
 
 /* Telemetry unit for one ADC: its state, status and the latest simultaneous
  * conversion (one count per channel), owned and produced by the ADC driver. */

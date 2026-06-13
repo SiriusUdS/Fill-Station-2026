@@ -13,7 +13,7 @@
 #include "communication/interfaces/can.hpp"      // logic::communication::CanFrame
 
 #include "communication/protocol/telemetry/ecu_system_state.hpp"  // EcuSystemState (+ SystemStateBase)
-#include "communication/protocol/framing/system_state_codec.hpp"  // packSystemState (CAN fragments)
+#include "communication/system_state_codec.hpp"  // packSystemState (CAN fragments)
 #include "system/valves/ecu.hpp"                                  // EcuValves (valve identity / array index SSOT)
 #include "system/board_id.hpp"
 

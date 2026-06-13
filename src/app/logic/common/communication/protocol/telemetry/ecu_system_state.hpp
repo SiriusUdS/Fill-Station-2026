@@ -1,6 +1,6 @@
 #pragma once
 
-#include "communication/protocol/telemetry/system_state_base.hpp"
+#include "telemetry/system_state_base.hpp"
 
 /* Periodic ECU telemetry record — the engine board's live state, downlinked over
  * CAN to the FCU (which relays it to the ground station).

@@ -9,8 +9,8 @@
 
 #include "communication/interfaces/can.hpp"                     // logic::communication::CanFrame
 #include "communication/protocol/telemetry/ecu_system_state.hpp"  // EcuSystemState (the record fragmented over CAN)
-#include "framing/can_header.hpp"                               // CanHeader
-#include "framing/payload_type.hpp"                             // PayloadType::Telemetry
+#include "communication/protocol/framing/can_header.hpp"                               // CanHeader
+#include "communication/protocol/framing/payload_type.hpp"                             // PayloadType::Telemetry
 #include "communication/protocol/telemetry/telemetry_type.hpp"  // TelemetryType::SystemState
 #include "communication/protocol/system/board_id.hpp"          // BoardId
 

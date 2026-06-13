@@ -2,8 +2,8 @@
 
 #include <cstdint>
 
-#include "communication/protocol/peripherals/storage/storage_state.hpp"
-#include "communication/protocol/peripherals/storage/storage_status.hpp"
+#include "peripherals/storage/storage_state.hpp"
+#include "peripherals/storage/storage_status.hpp"
 
 /* Telemetry unit for one backing store (SD card): its state and status bits,
  * owned and kept current by the store driver. The store has no per-record value

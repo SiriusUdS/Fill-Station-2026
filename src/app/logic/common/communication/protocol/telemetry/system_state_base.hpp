@@ -2,10 +2,10 @@
 
 #include <cstdint>
 
-#include "communication/protocol/peripherals/adc/adc_info.hpp"
-#include "communication/protocol/devices/valve/valve_info.hpp"
-#include "communication/protocol/peripherals/storage/storage_info.hpp"
-#include "communication/protocol/peripherals/can/can_info.hpp"
+#include "peripherals/adc/adc_info.hpp"
+#include "devices/valve/valve_info.hpp"
+#include "peripherals/storage/storage_info.hpp"
+#include "peripherals/can/can_info.hpp"
 
 /* The fields common to every board's periodic telemetry record. Both
  * FcuSystemState and EcuSystemState embed this as their leading `base` member, so

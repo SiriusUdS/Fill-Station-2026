@@ -27,7 +27,7 @@
 #include "telemetry/telemetry_type.hpp"
 #include "system/board_id.hpp"
 #include "command/command_type.hpp"
-#include "communication/protocol/framing/system_state_codec.hpp"   // packSystemState (ECU telemetry fragments)
+#include "communication/system_state_codec.hpp"   // packSystemState (ECU telemetry fragments)
 #include "communication/protocol/telemetry/ecu_system_state.hpp"   // EcuSystemState
 
 #include <array>

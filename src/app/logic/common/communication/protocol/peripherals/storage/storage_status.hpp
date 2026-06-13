@@ -2,7 +2,7 @@
 
 #include <cstdint>
 
-#include "communication/protocol/peripherals/storage/storage_error.hpp"   // StorageError (the 2-bit error field)
+#include "peripherals/storage/storage_error.hpp"   // StorageError (the 2-bit error field)
 
 /** @brief Backing-store status register (8-bit), the Status half of StorageInfo. */
 struct StorageStatus {

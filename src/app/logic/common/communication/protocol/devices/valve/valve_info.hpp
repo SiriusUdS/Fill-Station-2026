@@ -2,8 +2,8 @@
 
 #include <cstdint>
 
-#include "communication/protocol/devices/valve/valve_state.hpp"
-#include "communication/protocol/devices/valve/valve_status.hpp"
+#include "devices/valve/valve_state.hpp"
+#include "devices/valve/valve_status.hpp"
 
 /* Telemetry unit for one valve: its state, status bits and commanded position,
  * packed into 24 bits. One per valve in SystemStateBase::valve_info; replaces the

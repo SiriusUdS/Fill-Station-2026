@@ -14,7 +14,7 @@
 
 #include "communication/protocol/framing/payload_type.hpp"        // PayloadType
 #include "communication/protocol/telemetry/fcu_system_state.hpp"  // FcuSystemState
-#include "communication/protocol/framing/system_state_codec.hpp"  // EcuSystemState + SystemStateReassembler
+#include "communication/system_state_codec.hpp"  // EcuSystemState + SystemStateReassembler
 #include "system/valves/fcu.hpp"                                  // FcuValves (valve identity / array index SSOT)
 #include "system/board_id.hpp"
 #include "system/state.hpp"

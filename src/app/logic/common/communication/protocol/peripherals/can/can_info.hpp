@@ -2,8 +2,8 @@
 
 #include <cstdint>
 
-#include "communication/protocol/peripherals/can/can_state.hpp"
-#include "communication/protocol/peripherals/can/can_status.hpp"
+#include "peripherals/can/can_state.hpp"
+#include "peripherals/can/can_status.hpp"
 
 /* Telemetry unit for the CAN interface: its state, status bits and a dropped-
  * frame counter, owned and kept current by the CAN driver. */

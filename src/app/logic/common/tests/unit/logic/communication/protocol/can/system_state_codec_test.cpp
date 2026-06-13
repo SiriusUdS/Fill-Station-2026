@@ -6,7 +6,7 @@
  * robust to dropped fragments / record boundaries.
  * ------------------------------------------------------------------------- */
 
-#include "communication/protocol/framing/system_state_codec.hpp"
+#include "communication/system_state_codec.hpp"
 
 #include "framing/can_header.hpp"
 #include "framing/payload_type.hpp"
