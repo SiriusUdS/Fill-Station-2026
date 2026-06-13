@@ -11,7 +11,8 @@
  * same names and meanings as EthernetHeader so the two transports stay uniform:
  * sender_id/target_id carry BoardId values, payload_type is a PayloadType, and
  * payload_id carries a CommandType (commands) or a TelemetryType (telemetry/
- * responses). error_ctrl/error_code are CAN-only sender diagnostics.
+ * responses). seq tags a command so its reply can be matched + retried (mirrors
+ * EthernetHeader::seq); error_code is a CAN-only sender diagnostic.
  * ------------------------------------------------------------------------- */
 
 struct FrameCanHeader {
@@ -20,8 +21,10 @@ struct FrameCanHeader {
     uint32_t sender_state:4;  /**< Sender's device state / command sub-field. */
     uint32_t payload_type:2;  /**< Command vs telemetry vs response class (PayloadType). */
     uint32_t payload_id:6;    /**< A CommandType or a TelemetryType. */
-    uint32_t error_ctrl:2;    /**< Error-control flags. */
-    uint32_t error_code:7;    /**< Error code reported by the sender. */
+    uint32_t seq:4;           /**< Command/response sequence: tags a command so its reply
+                                   (e.g. Pong) is matched to it and retried; the receiver echoes
+                                   it. 0 for telemetry. Mirrors EthernetHeader::seq. */
+    uint32_t error_code:5;    /**< Error code reported by the sender (CAN-only diagnostic). */
     uint32_t reserved:3;      /**< Unused; pads the 29-bit id to 32 bits. */
 };
 

@@ -127,10 +127,12 @@ public:
 
     /**
      * @brief Frame @p payload as a message to the ECU over CAN (from FillingStation
-     *        to Engine, tagged @p payloadType / @p payloadId / @p senderState) and send.
-     *        A classic CAN frame carries at most 8 bytes; longer payloads are clipped.
+     *        to Engine, tagged @p payloadType / @p payloadId / @p senderState / @p seq)
+     *        and send. @p seq tags a reliable command so the reply can be matched + retried
+     *        (4-bit, wraps). A classic CAN frame carries at most 8 bytes; longer payloads
+     *        are clipped.
      */
-    void sendToEcu(PayloadType payloadType, uint8_t payloadId, uint8_t senderState,
+    void sendToEcu(PayloadType payloadType, uint8_t payloadId, uint8_t senderState, uint8_t seq,
                    std::span<const uint8_t> payload)
     {
         CanHeader header = {};
@@ -139,6 +141,7 @@ public:
         header.frame.sender_state = senderState;
         header.frame.payload_type = static_cast<uint8_t>(payloadType);
         header.frame.payload_id   = payloadId;
+        header.frame.seq          = static_cast<uint8_t>(seq & 0x0F);
 
         logic::communication::CanFrame frame;
         frame.id = header.code;

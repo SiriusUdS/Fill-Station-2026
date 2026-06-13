@@ -41,11 +41,12 @@ public:
 
     /**
      * @brief Frame @p payload as a single message to the FCU (from Engine to
-     *        FillingStation, tagged @p payloadType / @p payloadId / @p senderState)
-     *        and send. Used for replies (Pong) — @p payloadId is opaque here.
+     *        FillingStation, tagged @p payloadType / @p payloadId / @p senderState / @p seq)
+     *        and send. Used for replies (Pong) — @p payloadId is opaque here, and @p seq is
+     *        echoed from the command being answered so the FCU can match + stop retrying.
      *        A classic CAN frame carries at most 8 bytes; longer payloads are clipped.
      */
-    void sendToFcu(PayloadType payloadType, uint8_t payloadId, uint8_t senderState,
+    void sendToFcu(PayloadType payloadType, uint8_t payloadId, uint8_t senderState, uint8_t seq,
                    std::span<const uint8_t> payload)
     {
         CanHeader header = {};
@@ -54,6 +55,7 @@ public:
         header.frame.sender_state = senderState;
         header.frame.payload_type = static_cast<uint8_t>(payloadType);
         header.frame.payload_id   = payloadId;
+        header.frame.seq          = static_cast<uint8_t>(seq & 0x0F);
 
         logic::communication::CanFrame frame;
         frame.id = header.code;

@@ -137,6 +137,52 @@ TEST_F(ControlTest, PingIsForwardedToEcuOverCan)
     EXPECT_EQ(bus().can_tx.front().length, 0);
 }
 
+/* ---- Reliable command (retry until the response echoes the seq) ----------- */
+
+TEST_F(ControlTest, ReliablePingRetransmitsUntilGivingUp)
+{
+    setCurrent(State::Safe);
+    deliver(makePing());                          // original send
+    ASSERT_EQ(bus().can_tx.size(), 1u);
+
+    // No Pong arrives: each elapsed timeout triggers one resend, up to MAX_COMMAND_RETRIES.
+    for (uint8_t i = 1; i <= logic::fcu::detail::MAX_COMMAND_RETRIES; ++i) {
+        now_ms_ += logic::fcu::detail::COMMAND_TIMEOUT_MS;
+        control_.servicePending(now_ms_);
+        EXPECT_EQ(bus().can_tx.size(), 1u + i);    // original + i retries
+    }
+    // After the last retry it gives up — no further sends however long we wait.
+    now_ms_ += logic::fcu::detail::COMMAND_TIMEOUT_MS;
+    control_.servicePending(now_ms_);
+    EXPECT_EQ(bus().can_tx.size(), 1u + logic::fcu::detail::MAX_COMMAND_RETRIES);
+}
+
+TEST_F(ControlTest, PongEchoingTheSeqStopsRetransmission)
+{
+    setCurrent(State::Safe);
+    deliver(makePing());
+    ASSERT_EQ(bus().can_tx.size(), 1u);
+
+    CanHeader sent;
+    sent.code = bus().can_tx.front().id;
+    control_.onPong(static_cast<uint8_t>(sent.frame.seq), ++now_ms_);  // ack the exact ping
+
+    now_ms_ += logic::fcu::detail::COMMAND_TIMEOUT_MS * 4;
+    control_.servicePending(now_ms_);
+    EXPECT_EQ(bus().can_tx.size(), 1u);   // cleared by the Pong — never resent
+}
+
+TEST_F(ControlTest, PongWithWrongSeqDoesNotStopRetransmission)
+{
+    setCurrent(State::Safe);
+    deliver(makePing());                                   // seq 0
+    control_.onPong(/*seq=*/7, ++now_ms_);                 // a stale/mismatched Pong
+
+    now_ms_ += logic::fcu::detail::COMMAND_TIMEOUT_MS;
+    control_.servicePending(now_ms_);
+    EXPECT_EQ(bus().can_tx.size(), 2u);   // still pending -> resent
+}
+
 /* ---- SetState ------------------------------------------------------------ */
 
 TEST_F(ControlTest, LegalStateTransitionCommits)
@@ -200,7 +246,7 @@ TEST_F(ControlTest, UnknownValveActionIsRejected)
 
 TEST_F(ControlTest, PongIsRelayedToGsOverEthernet)
 {
-    control_.onPong(++now_ms_);
+    control_.onPong(/*seq=*/0, ++now_ms_);
 
     ASSERT_EQ(bus().udp_tx.size(), 1u);
     EthernetHeader header;

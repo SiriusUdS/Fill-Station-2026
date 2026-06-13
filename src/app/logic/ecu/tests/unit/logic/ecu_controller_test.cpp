@@ -41,7 +41,8 @@ namespace {
 constexpr std::size_t VALVE_INDEX_OFFSET = sizeof(uint32_t);
 
 /* Build a CAN command frame addressed FCU -> Engine. */
-CanFrame makeCommand(command::CommandType type, uint8_t senderState, BoardId target = BoardId::Engine)
+CanFrame makeCommand(command::CommandType type, uint8_t senderState,
+                     BoardId target = BoardId::Engine, uint8_t seq = 0)
 {
     CanHeader header        = {};
     header.frame.sender_id    = static_cast<uint8_t>(BoardId::FillingStation);
@@ -49,6 +50,7 @@ CanFrame makeCommand(command::CommandType type, uint8_t senderState, BoardId tar
     header.frame.sender_state = senderState;
     header.frame.payload_type = static_cast<uint8_t>(PayloadType::Command);
     header.frame.payload_id   = static_cast<uint8_t>(type);
+    header.frame.seq          = seq;
 
     CanFrame frame;
     frame.id     = header.code;
@@ -65,9 +67,10 @@ CanFrame makeValveCmd(EcuValves valve, ValveCommand action, BoardId target = Boa
     return frame;
 }
 
-CanFrame makePing()
+CanFrame makePing(uint8_t seq = 0)
 {
-    CanFrame frame = makeCommand(command::CommandType::Ping, /*senderState=*/0);
+    CanFrame frame = makeCommand(command::CommandType::Ping, /*senderState=*/0,
+                                 BoardId::Engine, seq);
     frame.length = 0;   // a ping carries no payload
     return frame;
 }
@@ -144,6 +147,17 @@ TEST_F(EcuControllerTest, PingIsAnsweredWithPongToTheFcu)
     EXPECT_EQ(static_cast<BoardId>(header.frame.target_id), BoardId::FillingStation);
     EXPECT_EQ(static_cast<PayloadType>(header.frame.payload_type), PayloadType::Response);
     EXPECT_EQ(static_cast<ResponseType>(header.frame.payload_id), ResponseType::Pong);
+}
+
+TEST_F(EcuControllerTest, PongEchoesThePingSeq)
+{
+    deliver(makePing(/*seq=*/7));
+
+    ASSERT_EQ(bus().can_tx.size(), 1u);
+    CanHeader header;
+    header.code = bus().can_tx.front().id;
+    EXPECT_EQ(static_cast<ResponseType>(header.frame.payload_id), ResponseType::Pong);
+    EXPECT_EQ(header.frame.seq, 7u);   // so the FCU can match the reply to its ping
 }
 
 /* ---- Telemetry (produce + drain + fragment onto CAN) --------------------- */

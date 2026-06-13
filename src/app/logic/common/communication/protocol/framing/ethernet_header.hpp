@@ -19,7 +19,10 @@ typedef struct {
     uint32_t payload_id: 6;         /**< A CommandType or a TelemetryType. */
     uint32_t payload_size_bytes: 16;
     uint8_t  sender_state;
-    uint8_t  reserved[3];           /**< Explicit padding bytes — keeps the layout padding-free. */
+    uint8_t  seq;                   /**< Command/response sequence: tags a command so its reply is
+                                         matched to it and retried; the receiver echoes it. 0 for
+                                         telemetry. Mirrors FrameCanHeader::seq. */
+    uint8_t  reserved[2];           /**< Explicit padding bytes — keeps the layout padding-free. */
     uint32_t sender_timestamp_ms;   /**< Empty if sender is GS (Command). */
 } EthernetHeader;
 
@@ -30,7 +33,8 @@ static_assert(sizeof(EthernetHeader) == 12,
               "EthernetHeader must be exactly 12 bytes (UDP packet header wire format)");
 static_assert(sizeof(EthernetHeader) == sizeof(uint32_t)   // sender/target/payload_type/payload_id/payload_size bit-fields
                                       + sizeof(uint8_t)     // sender_state
-                                      + sizeof(uint8_t[3])  // reserved
+                                      + sizeof(uint8_t)     // seq
+                                      + sizeof(uint8_t[2])  // reserved
                                       + sizeof(uint32_t),   // sender_timestamp_ms
               "EthernetHeader has implicit padding — add explicit reserved bytes to close the gap");
 

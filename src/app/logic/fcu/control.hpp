@@ -41,6 +41,12 @@ namespace detail {
 /* Abort if the ground-station link goes quiet for this long while armed. */
 inline constexpr uint32_t RX_WATCHDOG_MS = 500;
 
+/* A reliable FCU->ECU command (CAN auto-retransmission is off) is resent if no matching
+   response arrives within COMMAND_TIMEOUT_MS, up to MAX_COMMAND_RETRIES times; after that
+   it is abandoned and the FCU<->ECU link is treated as down. */
+inline constexpr uint32_t COMMAND_TIMEOUT_MS  = 50;
+inline constexpr uint8_t  MAX_COMMAND_RETRIES = 3;
+
 } // namespace detail
 
 /**
@@ -91,13 +97,44 @@ public:
         (void)handleCommand(*cmd, now_ms);
     }
 
-    /** @brief A Pong arrived from the ECU over CAN: relay it to the GS, completing
-     *         the Pong (Ecu->Fcu->Gs) leg. */
-    void onPong(uint32_t now_ms)
+    /** @brief A Pong arrived from the ECU over CAN (carrying the seq it answers): if it
+     *         matches the in-flight command, stop retrying it; then relay it to the GS,
+     *         completing the Pong (Ecu->Fcu->Gs) leg. */
+    void onPong(uint8_t seq, uint32_t now_ms)
     {
+        // A Pong answers a Ping: if it echoes the seq of our outstanding ping, the ECU
+        // got it — clear the pending command so servicePending() stops resending.
+        if (pending_.active && pending_.payload_id == static_cast<uint8_t>(CommandType::Ping) &&
+            pending_.seq == static_cast<uint8_t>(seq & 0x0F)) {
+            pending_.active = false;
+        }
         comm_.sendToGs(BoardId::Engine, PayloadType::Response,
                        static_cast<uint8_t>(ResponseType::Pong), /*sourceState=*/0,
                        std::span<const uint8_t>{}, now_ms);
+    }
+
+    /** @brief Resend the in-flight reliable command if its response has not arrived in
+     *         time, up to MAX_COMMAND_RETRIES; after that abandon it (FCU<->ECU down). */
+    void servicePending(uint32_t now_ms)
+    {
+        if (!pending_.active) {
+            return;
+        }
+        if ((now_ms - pending_.sent_ms) < detail::COMMAND_TIMEOUT_MS) {
+            return;  // still within the response window
+        }
+        if (pending_.retries < detail::MAX_COMMAND_RETRIES) {
+            ++pending_.retries;
+            pending_.sent_ms = now_ms;
+            comm_.sendToEcu(PayloadType::Command, pending_.payload_id, pending_.sender_state,
+                            pending_.seq,
+                            std::span<const uint8_t>(pending_.payload.data(), pending_.payload_len));
+        } else {
+            // Gave up: the ECU never answered after MAX_COMMAND_RETRIES. This is the seam
+            // for the FCU-local reaction when GS<->FCU works but FCU<->ECU does NOT.
+            // TODO(FCU-local ping reaction): act on the dead FCU<->ECU link here.
+            pending_.active = false;
+        }
     }
 
     /** @brief Abort if the ground-station link has gone quiet while armed. */
@@ -151,18 +188,35 @@ private:
 
     /* ---- Ping (Gs->Fcu->Ecu) ------------------------------------------------- */
 
-    // Reaching here means a Ping from the GS arrived: the GS<->FCU leg works. Forward
-    // it to the ECU over CAN; the ECU Pongs back and the controller relays that on to
-    // the GS (Controller demux -> onPong).
+    // Reaching here means a Ping from the GS arrived: the GS<->FCU leg works. Forward it
+    // to the ECU over CAN as a RELIABLE command — the ECU Pongs back echoing the seq
+    // (onPong matches it; servicePending retries until then). The "FCU<->ECU is down"
+    // seam lives in servicePending's give-up branch, not here.
     bool handlePing(uint32_t now_ms)
     {
-        (void)now_ms;
-        // TODO(FCU-local ping reaction): the single seam for the FCU to act when
-        // GS<->FCU works but FCU<->ECU does NOT — i.e. the GS pinged us but the ECU
-        // never Pongs back (onPong never fires). Behaviour undecided; hook in here.
-        comm_.sendToEcu(PayloadType::Command, static_cast<uint8_t>(CommandType::Ping),
-                        /*senderState=*/0, std::span<const uint8_t>{});  // Ping carries no payload
+        sendReliable(CommandType::Ping, /*sender_state=*/0, std::span<const uint8_t>{}, now_ms);
         return true;
+    }
+
+    // Send a command to the ECU and record it as the single in-flight reliable command:
+    // it is stamped with the next seq and resent by servicePending() until a response
+    // echoes that seq. At most one reliable command is outstanding at a time, which is
+    // all Ping needs; a second call overwrites the slot.
+    void sendReliable(CommandType type, uint8_t sender_state, std::span<const uint8_t> payload,
+                      uint32_t now_ms)
+    {
+        pending_.active       = true;
+        pending_.payload_id   = static_cast<uint8_t>(type);
+        pending_.sender_state = sender_state;
+        pending_.seq          = static_cast<uint8_t>(next_seq_++ & 0x0F);
+        pending_.sent_ms      = now_ms;
+        pending_.retries      = 0;
+        pending_.payload_len  = static_cast<uint8_t>(
+            payload.size() < pending_.payload.size() ? payload.size() : pending_.payload.size());
+        if (pending_.payload_len != 0) {
+            std::memcpy(pending_.payload.data(), payload.data(), pending_.payload_len);
+        }
+        comm_.sendToEcu(PayloadType::Command, pending_.payload_id, sender_state, pending_.seq, payload);
     }
 
     /* ---- SetState (commits through persistent_state) ------------------------- */
@@ -290,14 +344,29 @@ private:
         std::array<uint8_t, sizeof(uint32_t) + 1> payload;
         std::memcpy(payload.data(), &now_ms, sizeof(uint32_t));
         payload[sizeof(uint32_t)] = valve;
-        comm_.sendToEcu(PayloadType::Command, static_cast<uint8_t>(CommandType::SetValvePosition),
-                        /*senderState=*/cmd, std::span<const uint8_t>(payload));
+        sendReliable(CommandType::SetValvePosition, /*sender_state=*/cmd,
+                     std::span<const uint8_t>(payload), now_ms);
     }
+
+    /* One outstanding reliable command awaiting its response. A single slot — at most one
+       reliable command in flight at a time, which is all the current commands need. */
+    struct Pending {
+        bool                   active       = false;
+        uint8_t                payload_id   = 0;   // the CommandType awaiting a response
+        uint8_t                sender_state = 0;
+        uint8_t                seq          = 0;   // 4-bit, echoed back in the response
+        uint32_t               sent_ms      = 0;
+        uint8_t                retries      = 0;
+        std::array<uint8_t, 8> payload{};          // bytes to resend (commands carry <= 8)
+        uint8_t                payload_len  = 0;
+    };
 
     V&       fill_valve_;   // injected Fill / Dump valves, actuated by SetValvePosition
     V&       dump_valve_;
     Comm&    comm_;         // injected communication layer; forwards to ECU / GS
     uint32_t last_rx_ms_ = 0;  // last tick a datagram arrived; feeds the GS-link watchdog
+    Pending  pending_{};       // the in-flight reliable FCU->ECU command (Ping for now)
+    uint8_t  next_seq_ = 0;    // monotonic command sequence (4-bit on the wire)
 };
 
 } // namespace logic::fcu

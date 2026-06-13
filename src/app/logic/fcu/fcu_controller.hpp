@@ -98,7 +98,7 @@ public:
         // everything else is ECU telemetry -> Telemetry to reassemble + relay.
         while (auto in = comm_.receiveFrame()) {
             if (isPong(in->header)) {
-                control_.onPong(now_ms);
+                control_.onPong(static_cast<uint8_t>(in->header.frame.seq), now_ms);
             } else {
                 telemetry_.relayEcuFrame(in->frame, now_ms);
             }
@@ -110,8 +110,9 @@ public:
             control_.onDatagram(datagram->payload, now_ms);
         }
 
-        telemetry_.drain(now_ms);   // flush full halves to SD + the GS
-        control_.watchdog(now_ms);  // GS-link abort watchdog
+        telemetry_.drain(now_ms);        // flush full halves to SD + the GS
+        control_.servicePending(now_ms); // resend / time out the in-flight reliable command
+        control_.watchdog(now_ms);       // GS-link abort watchdog
 
         if (logic::control::persistent_state.fill_state == logic::control::State::Init) {
             logic::control::persistent_state.saveState(logic::control::State::Safe);

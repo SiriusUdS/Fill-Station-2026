@@ -78,7 +78,7 @@ public:
                 handleValveCmd(frame, header);
                 break;
             case logic::communication::command::CommandType::Ping:
-                handlePing(frame);
+                handlePing(frame, header);
                 break;
             default:
                 break;
@@ -110,11 +110,12 @@ private:
         }
     }
 
-    // Answer a ping with a pong back to the FCU, echoing the payload.
-    void handlePing(const logic::communication::CanFrame& frame)
+    // Answer a ping with a pong back to the FCU, echoing the payload AND the command's
+    // seq so the FCU can match the reply to the ping it sent and stop retrying.
+    void handlePing(const logic::communication::CanFrame& frame, const CanHeader& header)
     {
         comm_.sendToFcu(PayloadType::Response, static_cast<uint8_t>(ResponseType::Pong),
-                        /*senderState=*/0,
+                        /*senderState=*/0, /*seq=*/static_cast<uint8_t>(header.frame.seq),
                         std::span<const uint8_t>(frame.data.data(), frame.length));
     }
 
