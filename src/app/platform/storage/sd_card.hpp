@@ -52,24 +52,12 @@ public:
 
     /**
      * @brief  Append @p data to the open file and sync it to the card. No-op
-     *         unless the store is ready (init() succeeded) AND writing is enabled
-     *         (see setWriteEnabled). A no-op while writing is disabled is not an
-     *         error - the store stays ACTIVE.
+     *         unless the store is ready (init() succeeded) — a store that never
+     *         mounted stays inert. Whether records *should* be persisted at all
+     *         (the PersistingData control flag) is decided upstream in the
+     *         telemetry pipeline; this just saves whatever it is handed.
      */
     void write(std::span<const uint8_t> data);
-
-    /**
-     * @brief  Arm or disarm actual writing to the card.
-     *
-     * Disabled by default: init() still mounts the volume and creates the log
-     * file, but write() does nothing until writing is enabled - so the card is
-     * ready to log the instant it is armed, without churning the card (or the
-     * log) during idle/testing.
-     */
-    void setWriteEnabled(bool enabled) { info_.status.write_enabled = enabled ? 1 : 0; }
-
-    /** @brief Whether writing is currently enabled (false until armed). */
-    bool writeEnabled() const { return info_.status.write_enabled != 0; }
 
     /** @brief The store's own info record: state + status (incl. last error cause). */
     StorageInfo info() const { return info_; }

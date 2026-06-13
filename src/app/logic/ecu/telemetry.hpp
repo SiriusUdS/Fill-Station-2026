@@ -11,6 +11,7 @@
 #include "actuation/interfaces/valve.hpp"        // logic::actuation::Valve
 #include "communication/interfaces/adc.hpp"      // logic::communication::StreamingAdc + AdcInfo
 #include "communication/interfaces/can.hpp"      // logic::communication::CanFrame
+#include "control/control_flags.hpp"             // control_flags — PersistingData gates the SD write
 
 #include "communication/protocol/telemetry/ecu_system_state.hpp"  // EcuSystemState (+ SystemStateBase)
 #include "communication/system_state_codec.hpp"  // packSystemState (CAN fragments)
@@ -111,8 +112,10 @@ public:
         }
     }
 
-    /** @brief Flush any full half: write the 4096-byte block to SD (sector-aligned),
-     *         and downlink the half's most recent record to the FCU over CAN. */
+    /** @brief Flush any full half: persist the 4096-byte block to SD (only while the
+     *         PersistingData control flag is set — otherwise the half drains unwritten
+     *         to spare the card), and downlink the half's most recent record to the
+     *         FCU over CAN. */
     void drain(uint32_t /*now_ms*/)
     {
         for (uint8_t h = 0; h < 2; ++h) {
@@ -121,7 +124,11 @@ public:
             }
             const uint16_t bytes = log_.used[h];
 
-            storage_.write(std::span<const uint8_t>(log_.data[h], detail::LOG_HALF_BYTES));
+            // Save only when told to: the buffer always drains (the half is released
+            // below regardless), but it reaches the card only while PersistingData is on.
+            if (logic::control::control_flags.get(ControlFlag::PersistingData)) {
+                storage_.write(std::span<const uint8_t>(log_.data[h], detail::LOG_HALF_BYTES));
+            }
             if (bytes >= sizeof(EcuSystemState)) {
                 EcuSystemState latest;
                 std::memcpy(&latest, &log_.data[h][bytes - sizeof(EcuSystemState)], sizeof(EcuSystemState));

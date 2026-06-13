@@ -2,6 +2,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
+#include <optional>
 #include <span>
 
 #include "actuation/interfaces/valve.hpp"   // logic::actuation::Valve
@@ -10,8 +12,10 @@
 #include "communication/protocol/framing/can_header.hpp"      // CanHeader
 #include "communication/protocol/framing/payload_type.hpp"    // PayloadType
 #include "communication/protocol/command/command_type.hpp"    // CommandType
-#include "communication/protocol/response/response_type.hpp"  // ResponseType (Pong)
+#include "communication/protocol/response/response_type.hpp"  // ResponseType (Pong, Ack)
 #include "communication/protocol/command/set_valve_position.hpp"  // ValveCommand
+#include "communication/protocol/command/set_control_flag.hpp"    // ControlFlag, SetControlFlagFrame, toControlFlag
+#include "control/control_flags.hpp"                          // logic::control::control_flags
 #include "system/valves/ecu.hpp"                              // EcuValves
 #include "system/board_id.hpp"
 
@@ -77,6 +81,9 @@ public:
             case logic::communication::command::CommandType::SetValvePosition:
                 handleValveCmd(frame, header);
                 break;
+            case logic::communication::command::CommandType::SetControlFlag:
+                handleSetControlFlag(frame, header);
+                break;
             case logic::communication::command::CommandType::Ping:
                 handlePing(frame, header);
                 break;
@@ -108,6 +115,30 @@ private:
             case ValveCommand::Close:        (void)valve->close(); break;
             case ValveCommand::SetOpenedPct: break;  // not used for the ECU's on/off propellant valves
         }
+    }
+
+    // Apply a SetControlFlag command bridged from the GS (relayed by the FCU over CAN):
+    // the 2-byte SetControlFlagFrame rides in the payload (data[0] = flag, data[1] = value).
+    // Set the named runtime flag, then Ack back to the FCU echoing the command's seq so the
+    // reliable relay can match the reply and stop retrying (Gs->Fcu->Ecu, Ack: Ecu->Fcu->Gs).
+    void handleSetControlFlag(const logic::communication::CanFrame& frame, const CanHeader& header)
+    {
+        if (frame.length < sizeof(SetControlFlagFrame)) {
+            return;  // frame too short to carry the flag + value
+        }
+        SetControlFlagFrame payload;
+        std::memcpy(&payload, frame.data.data(), sizeof(payload));
+
+        const std::optional<ControlFlag> flag = toControlFlag(static_cast<uint8_t>(payload.flag));
+        if (!flag) {
+            return;  // unknown flag id — do not Ack a command we did not apply
+        }
+        logic::control::control_flags.set(*flag, payload.value != 0);
+
+        // Generic acknowledgement: the command was received AND applied. Echoes the seq.
+        comm_.sendToFcu(PayloadType::Response, static_cast<uint8_t>(ResponseType::Ack),
+                        /*senderState=*/0, /*seq=*/static_cast<uint8_t>(header.frame.seq),
+                        std::span<const uint8_t>{});
     }
 
     // Answer a ping with a pong back to the FCU, echoing the payload AND the command's

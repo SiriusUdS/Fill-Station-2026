@@ -4,7 +4,7 @@
  * Control is the receive side: parse an inbound datagram into a Command, gate it,
  * dispatch, and run the action — committing a state change, actuating a local
  * valve, or forwarding to the ECU through the communication layer. These tests
- * drive it at its public boundary (onDatagram / onPong / watchdog) over the real
+ * drive it at its public boundary (onDatagram / onResponse / watchdog) over the real
  * Communication layer wired to the FakeBus, and assert the effects: persisted
  * state, valve calls, and what was framed onto CAN / UDP.
  *
@@ -23,8 +23,10 @@
 #include "communication/command/command.hpp"                 // CommandType
 #include "communication/protocol/command/set_state.hpp"      // SetStateFrame
 #include "communication/protocol/command/set_valve_position.hpp"  // SetValvePositionFrame, ValveCommand
+#include "communication/protocol/command/set_control_flag.hpp"    // ControlFlag, SetControlFlagFrame
 #include "system/valves/fcu.hpp"                              // FcuValves
 #include "control/persistent_state.hpp"
+#include "control/control_flags.hpp"                          // logic::control::control_flags
 #include "system/state.hpp"
 #include "framing/can_header.hpp"
 #include "framing/ethernet_header.hpp"
@@ -87,6 +89,14 @@ std::vector<uint8_t> makePing(uint8_t seq = 0)
     return makeCommand(command::CommandType::Ping, BoardId::FillingStation, nullptr, 0, seq);
 }
 
+std::vector<uint8_t> makeSetControlFlag(ControlFlag flag, uint8_t value, BoardId target,
+                                        uint8_t seq = 0)
+{
+    const SetControlFlagFrame body{flag, value};
+    return makeCommand(command::CommandType::SetControlFlag, target,
+                       reinterpret_cast<const uint8_t*>(&body), sizeof(body), seq);
+}
+
 class ControlTest : public ::testing::Test {
 protected:
     FakeEthernet eth_;
@@ -102,6 +112,7 @@ protected:
     {
         bus().reset();
         logic::control::persistent_state = logic::control::PersistentState{};
+        logic::control::control_flags    = logic::control::ControlFlags{};  // all flags off
         comm_.init();
         control_.init();
         clearValveCalls();   // discard the boot-safing close() so command tests start clean
@@ -150,7 +161,7 @@ TEST_F(ControlTest, PropagatesGsSeqOntoTheCanPingAndBackOnTheRelayedPong)
     EXPECT_EQ(fwd.frame.seq, 9u);
 
     // The ECU's Pong (echoing seq 9) is relayed to the GS still carrying seq 9.
-    control_.onPong(/*seq=*/9, ++now_ms_);
+    control_.onResponse(static_cast<uint8_t>(ResponseType::Pong), /*seq=*/9, ++now_ms_);
     ASSERT_EQ(bus().udp_tx.size(), 1u);
     EthernetHeader relayed;
     std::memcpy(&relayed, bus().udp_tx.front().payload.data(), sizeof(EthernetHeader));
@@ -185,7 +196,8 @@ TEST_F(ControlTest, PongEchoingTheSeqStopsRetransmission)
 
     CanHeader sent;
     sent.code = bus().can_tx.front().id;
-    control_.onPong(static_cast<uint8_t>(sent.frame.seq), ++now_ms_);  // ack the exact ping
+    control_.onResponse(static_cast<uint8_t>(ResponseType::Pong),
+                        static_cast<uint8_t>(sent.frame.seq), ++now_ms_);  // ack the exact ping
 
     now_ms_ += logic::fcu::detail::COMMAND_TIMEOUT_MS * 4;
     control_.servicePending(now_ms_);
@@ -196,7 +208,8 @@ TEST_F(ControlTest, PongWithWrongSeqDoesNotStopRetransmission)
 {
     setCurrent(State::Safe);
     deliver(makePing());                                   // seq 0
-    control_.onPong(/*seq=*/7, ++now_ms_);                 // a stale/mismatched Pong
+    control_.onResponse(static_cast<uint8_t>(ResponseType::Pong),
+                        /*seq=*/7, ++now_ms_);             // a stale/mismatched Pong
 
     now_ms_ += logic::fcu::detail::COMMAND_TIMEOUT_MS;
     control_.servicePending(now_ms_);
@@ -266,7 +279,7 @@ TEST_F(ControlTest, UnknownValveActionIsRejected)
 
 TEST_F(ControlTest, PongIsRelayedToGsOverEthernet)
 {
-    control_.onPong(/*seq=*/0, ++now_ms_);
+    control_.onResponse(static_cast<uint8_t>(ResponseType::Pong), /*seq=*/0, ++now_ms_);
 
     ASSERT_EQ(bus().udp_tx.size(), 1u);
     EthernetHeader header;
@@ -275,6 +288,74 @@ TEST_F(ControlTest, PongIsRelayedToGsOverEthernet)
     EXPECT_EQ(static_cast<BoardId>(header.target_id), BoardId::GsControl);
     EXPECT_EQ(static_cast<PayloadType>(header.payload_type), PayloadType::Response);
     EXPECT_EQ(static_cast<ResponseType>(header.payload_id), ResponseType::Pong);
+}
+
+/* ---- SetControlFlag (local apply, bridge to ECU, or both) ---------------- */
+
+TEST_F(ControlTest, LocalSetControlFlagAppliesAndAcksGs)
+{
+    setCurrent(State::Safe);
+    deliver(makeSetControlFlag(ControlFlag::PersistingData, /*value=*/1,
+                               BoardId::FillingStation, /*seq=*/3));
+
+    EXPECT_TRUE(logic::control::control_flags.get(ControlFlag::PersistingData));
+    EXPECT_TRUE(bus().can_tx.empty());   // FillingStation-targeted: applied here, no ECU hop
+
+    ASSERT_EQ(bus().udp_tx.size(), 1u);
+    EthernetHeader ack;
+    std::memcpy(&ack, bus().udp_tx.front().payload.data(), sizeof(EthernetHeader));
+    EXPECT_EQ(static_cast<BoardId>(ack.sender_id), BoardId::FillingStation);
+    EXPECT_EQ(static_cast<PayloadType>(ack.payload_type), PayloadType::Response);
+    EXPECT_EQ(static_cast<ResponseType>(ack.payload_id), ResponseType::Ack);
+    EXPECT_EQ(ack.seq, 3u);              // echoes the GS seq so it matches the command
+}
+
+TEST_F(ControlTest, EngineSetControlFlagBridgesOverCanWithoutLocalApply)
+{
+    setCurrent(State::Safe);
+    deliver(makeSetControlFlag(ControlFlag::PersistingData, /*value=*/1,
+                               BoardId::Engine, /*seq=*/6));
+
+    EXPECT_FALSE(logic::control::control_flags.get(ControlFlag::PersistingData));  // not ours to set
+    EXPECT_TRUE(bus().udp_tx.empty());   // the ECU Acks; the FCU does not Ack locally
+
+    ASSERT_EQ(bus().can_tx.size(), 1u);
+    const auto& sent = bus().can_tx.front();
+    CanHeader header;
+    header.code = sent.id;
+    EXPECT_EQ(static_cast<BoardId>(header.frame.target_id), BoardId::Engine);
+    EXPECT_EQ(static_cast<PayloadType>(header.frame.payload_type), PayloadType::Command);
+    EXPECT_EQ(static_cast<command::CommandType>(header.frame.payload_id),
+              command::CommandType::SetControlFlag);
+    EXPECT_EQ(header.frame.seq, 6u);     // GS seq propagated onto the CAN hop
+    ASSERT_GE(sent.length, sizeof(SetControlFlagFrame));
+    EXPECT_EQ(sent.data[0], static_cast<uint8_t>(ControlFlag::PersistingData));
+    EXPECT_EQ(sent.data[1], 1u);         // flag + value carried verbatim
+}
+
+TEST_F(ControlTest, BroadcastSetControlFlagAppliesLocallyAndBridges)
+{
+    setCurrent(State::Safe);
+    deliver(makeSetControlFlag(ControlFlag::PersistingData, /*value=*/1,
+                               BoardId::Broadcast, /*seq=*/2));
+
+    EXPECT_TRUE(logic::control::control_flags.get(ControlFlag::PersistingData));  // applied locally
+    EXPECT_EQ(bus().can_tx.size(), 1u);   // and bridged to the ECU
+    EXPECT_EQ(bus().udp_tx.size(), 1u);   // local Ack to the GS
+}
+
+TEST_F(ControlTest, AckFromEcuClearsThePendingBridgedCommand)
+{
+    setCurrent(State::Safe);
+    deliver(makeSetControlFlag(ControlFlag::PersistingData, /*value=*/1,
+                               BoardId::Engine, /*seq=*/8));
+    ASSERT_EQ(bus().can_tx.size(), 1u);   // bridged once
+
+    control_.onResponse(static_cast<uint8_t>(ResponseType::Ack), /*seq=*/8, ++now_ms_);
+
+    now_ms_ += logic::fcu::detail::COMMAND_TIMEOUT_MS * 4;
+    control_.servicePending(now_ms_);
+    EXPECT_EQ(bus().can_tx.size(), 1u);   // cleared by the Ack — never resent
 }
 
 /* ---- Watchdog (GS-link liveness lives in Control) ------------------------ */

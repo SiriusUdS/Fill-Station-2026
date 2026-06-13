@@ -94,11 +94,13 @@ public:
      */
     void tick(uint32_t now_ms)
     {
-        // CAN ingress: the ECU's Pong (answering a forwarded ping) -> Control to relay;
-        // everything else is ECU telemetry -> Telemetry to reassemble + relay.
+        // CAN ingress: an ECU response (Pong answering a forwarded ping, or Ack answering any
+        // bridged command) -> Control to match + relay; everything else is ECU telemetry ->
+        // Telemetry to reassemble + relay.
         while (auto in = comm_.receiveFrame()) {
-            if (isPong(in->header)) {
-                control_.onPong(static_cast<uint8_t>(in->header.frame.seq), now_ms);
+            if (isResponse(in->header)) {
+                control_.onResponse(static_cast<uint8_t>(in->header.frame.payload_id),
+                                    static_cast<uint8_t>(in->header.frame.seq), now_ms);
             } else {
                 telemetry_.relayEcuFrame(in->frame, now_ms);
             }
@@ -128,11 +130,12 @@ public:
     void produceRecord(uint32_t now_ms) { telemetry_.produce(now_ms); }
 
 private:
-    // A Pong from the ECU answering a ping we forwarded (Response/Pong on CAN).
-    [[nodiscard]] static bool isPong(const CanHeader& header)
+    // A response from the ECU on CAN (Response payload type): a Pong answering a forwarded
+    // ping, or an Ack answering any bridged command. Control matches it to the in-flight
+    // command by seq and relays it to the GS.
+    [[nodiscard]] static bool isResponse(const CanHeader& header)
     {
-        return static_cast<PayloadType>(header.frame.payload_type) == PayloadType::Response &&
-               static_cast<ResponseType>(header.frame.payload_id) == ResponseType::Pong;
+        return static_cast<PayloadType>(header.frame.payload_type) == PayloadType::Response;
     }
 
     Communication<E, C>                     comm_;       // declared first: the others hold a ref to it

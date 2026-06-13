@@ -11,6 +11,7 @@
 #include "actuation/interfaces/valve.hpp"        // logic::actuation::Valve
 #include "communication/interfaces/adc.hpp"      // logic::communication::StreamingAdc + AdcInfo
 #include "control/persistent_state.hpp"          // Backup-SRAM state snapshot (drain tags the source state)
+#include "control/control_flags.hpp"             // control_flags — PersistingData gates the SD write
 
 #include "communication/protocol/framing/payload_type.hpp"        // PayloadType
 #include "communication/protocol/telemetry/fcu_system_state.hpp"  // FcuSystemState
@@ -121,8 +122,10 @@ public:
         }
     }
 
-    /** @brief Flush any full half: write the 4096-byte block to SD, stream its
-     *         records to the GS, then release the half. */
+    /** @brief Flush any full half: persist the 4096-byte block to SD (only while
+     *         the PersistingData control flag is set — otherwise the half is
+     *         released unwritten, draining into emptiness to spare the card),
+     *         stream its records to the GS, then release the half. */
     void drain(uint32_t now_ms)
     {
         for (uint8_t h = 0; h < 2; ++h) {
@@ -131,7 +134,11 @@ public:
             }
             const uint16_t bytes = log_.used[h];
 
-            storage_.write(std::span<const uint8_t>(log_.data[h], detail::LOG_HALF_BYTES));
+            // Save only when told to: the buffer always drains (the half is released
+            // below regardless), but it reaches the card only while PersistingData is on.
+            if (logic::control::control_flags.get(ControlFlag::PersistingData)) {
+                storage_.write(std::span<const uint8_t>(log_.data[h], detail::LOG_HALF_BYTES));
+            }
             downlink(BoardId::FillingStation,
                      static_cast<uint8_t>(logic::control::persistent_state.fill_state),
                      std::span<const uint8_t>(log_.data[h], bytes), sizeof(FcuSystemState), now_ms);

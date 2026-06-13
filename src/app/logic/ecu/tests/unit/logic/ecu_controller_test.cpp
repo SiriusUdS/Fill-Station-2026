@@ -21,6 +21,8 @@
 #include "command/command_type.hpp"
 #include "response/response_type.hpp"
 #include "command/set_valve_position.hpp"   // ValveCommand
+#include "command/set_control_flag.hpp"     // ControlFlag, SetControlFlagFrame
+#include "control/control_flags.hpp"        // logic::control::control_flags
 #include "system/valves/ecu.hpp"            // EcuValves
 #include "system/board_id.hpp"
 #include "telemetry/telemetry_type.hpp"
@@ -75,6 +77,19 @@ CanFrame makePing(uint8_t seq = 0)
     return frame;
 }
 
+/* A SetControlFlag command FCU -> Engine: the 2-byte SetControlFlagFrame rides in
+   the payload (data[0] = flag id, data[1] = value). */
+CanFrame makeSetControlFlag(ControlFlag flag, uint8_t value,
+                            BoardId target = BoardId::Engine, uint8_t seq = 0)
+{
+    CanFrame frame = makeCommand(command::CommandType::SetControlFlag, /*senderState=*/0,
+                                 target, seq);
+    frame.data[0] = static_cast<uint8_t>(flag);
+    frame.data[1] = value;
+    frame.length  = sizeof(SetControlFlagFrame);
+    return frame;
+}
+
 class EcuControllerTest : public ::testing::Test {
 protected:
     FakeStorage      storage_;
@@ -90,6 +105,7 @@ protected:
     {
         bus().reset();
         logic::control::persistent_state = logic::control::PersistentState{};
+        logic::control::control_flags    = logic::control::ControlFlags{};  // all flags off
         controller_.init();
     }
 
@@ -158,6 +174,66 @@ TEST_F(EcuControllerTest, PongEchoesThePingSeq)
     header.code = bus().can_tx.front().id;
     EXPECT_EQ(static_cast<ResponseType>(header.frame.payload_id), ResponseType::Pong);
     EXPECT_EQ(header.frame.seq, 7u);   // so the FCU can match the reply to its ping
+}
+
+/* ---- SetControlFlag (Control sets a runtime flag + Acks the FCU) ---------- */
+
+TEST_F(EcuControllerTest, SetControlFlagAppliesTheFlagAndAcksTheFcu)
+{
+    deliver(makeSetControlFlag(ControlFlag::PersistingData, /*value=*/1, BoardId::Engine, /*seq=*/4));
+
+    EXPECT_TRUE(logic::control::control_flags.get(ControlFlag::PersistingData));
+
+    ASSERT_EQ(bus().can_tx.size(), 1u);
+    CanHeader header;
+    header.code = bus().can_tx.front().id;
+    EXPECT_EQ(static_cast<BoardId>(header.frame.sender_id), BoardId::Engine);
+    EXPECT_EQ(static_cast<BoardId>(header.frame.target_id), BoardId::FillingStation);
+    EXPECT_EQ(static_cast<PayloadType>(header.frame.payload_type), PayloadType::Response);
+    EXPECT_EQ(static_cast<ResponseType>(header.frame.payload_id), ResponseType::Ack);
+    EXPECT_EQ(header.frame.seq, 4u);   // echoes the command seq so the FCU matches it
+}
+
+TEST_F(EcuControllerTest, SetControlFlagWithZeroValueClearsTheFlag)
+{
+    logic::control::control_flags.set(ControlFlag::PersistingData, true);
+    deliver(makeSetControlFlag(ControlFlag::PersistingData, /*value=*/0));
+    EXPECT_FALSE(logic::control::control_flags.get(ControlFlag::PersistingData));
+}
+
+TEST_F(EcuControllerTest, UnknownControlFlagIsNotAppliedOrAcked)
+{
+    deliver(makeSetControlFlag(static_cast<ControlFlag>(0xFF), /*value=*/1));
+    EXPECT_FALSE(logic::control::control_flags.get(ControlFlag::PersistingData));
+    EXPECT_TRUE(bus().can_tx.empty());   // no Ack for a flag we did not apply
+}
+
+/* ---- PersistingData gates the SD write (telemetry drains regardless) ------ */
+
+TEST_F(EcuControllerTest, TelemetryDrainsWithoutWritingToSdWhenFlagOff)
+{
+    step();  // Init -> Safe; PersistingData defaults off
+    const AdcInfo sample{};
+    for (int i = 0; i < 2000 && bus().can_tx.empty(); ++i) {
+        adc_.push(sample);
+        controller_.produceRecord(++now_ms_);
+        step();
+    }
+    ASSERT_FALSE(bus().can_tx.empty()) << "a full telemetry half never drained";
+    EXPECT_TRUE(storage_.writes.empty());   // drained into emptiness — nothing reached the card
+}
+
+TEST_F(EcuControllerTest, TelemetryPersistsToSdWhenFlagOn)
+{
+    step();  // Init -> Safe
+    logic::control::control_flags.set(ControlFlag::PersistingData, true);
+    const AdcInfo sample{};
+    for (int i = 0; i < 2000 && storage_.writes.empty(); ++i) {
+        adc_.push(sample);
+        controller_.produceRecord(++now_ms_);
+        step();
+    }
+    EXPECT_FALSE(storage_.writes.empty());  // the drained half reached the SD card
 }
 
 /* ---- Telemetry (produce + drain + fragment onto CAN) --------------------- */

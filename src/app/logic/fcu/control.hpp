@@ -13,12 +13,14 @@
 #include "communication/command/parser/command_ethernet_parser.hpp"  // fromEthernet
 #include "communication/protocol/command/set_state.hpp"        // SetStateFrame
 #include "communication/protocol/command/set_valve_position.hpp"  // SetValvePositionFrame, ValveCommand
+#include "communication/protocol/command/set_control_flag.hpp"    // ControlFlag, SetControlFlagFrame, toControlFlag
 #include "communication/protocol/framing/payload_type.hpp"     // PayloadType
-#include "communication/protocol/response/response_type.hpp"   // ResponseType (Pong)
+#include "communication/protocol/response/response_type.hpp"   // ResponseType (Pong, Ack)
 #include "system/valves/fcu.hpp"                               // FcuValves
 #include "system/board_id.hpp"
 #include "system/state.hpp"                                    // logic::control::State
 #include "control/persistent_state.hpp"                        // logic::control::persistent_state
+#include "control/control_flags.hpp"                           // logic::control::control_flags
 
 /* ------------------------------------------------------------------------- *
  * FCU control layer (HAL-free) — command handling + execution, the receive side
@@ -90,27 +92,27 @@ public:
         if (!cmd) {
             return;  // not a command / malformed / unknown id
         }
-        const auto target = static_cast<BoardId>(cmd->target);
-        if (target != BoardId::FillingStation && target != BoardId::Broadcast) {
-            return;  // addressed to another board
+        if (!addressedToUs(cmd->type, static_cast<BoardId>(cmd->target))) {
+            return;  // addressed to a board we neither act for nor bridge to
         }
         (void)handleCommand(*cmd, now_ms);
     }
 
-    /** @brief A Pong arrived from the ECU over CAN carrying the seq it answers: if it
-     *         matches the in-flight command, stop retrying it; then relay it to the GS
-     *         CARRYING that seq, so the GS matches it to the ping it sent (Ecu->Fcu->Gs). */
-    void onPong(uint8_t seq, uint32_t now_ms)
+    /** @brief A response (Pong or Ack) arrived from the ECU over CAN carrying the seq it
+     *         answers: if it matches the in-flight relayed command, stop retrying it; then
+     *         relay it to the GS CARRYING that seq AND its response id, so the GS matches it
+     *         to the command it sent (Ecu->Fcu->Gs). One reliable command is outstanding at
+     *         a time, so the seq alone identifies which command this answers. */
+    void onResponse(uint8_t responseId, uint8_t seq, uint32_t now_ms)
     {
-        // A Pong answers a Ping: if it echoes the seq of our outstanding ping, the ECU
-        // got it — clear the pending command so servicePending() stops resending.
-        if (pending_.active && pending_.payload_id == static_cast<uint8_t>(CommandType::Ping) &&
-            pending_.seq == static_cast<uint8_t>(seq & 0x0F)) {
+        // The response answers the command we relayed: if it echoes the seq of our
+        // outstanding command, the ECU got it — clear the pending slot so servicePending()
+        // stops resending. Pong answers Ping, Ack answers any other relayed command alike.
+        if (pending_.active && pending_.seq == static_cast<uint8_t>(seq & 0x0F)) {
             pending_.active = false;
         }
-        // Relay to the GS, propagating the seq so the GS can match its ping<->pong.
-        comm_.sendToGs(BoardId::Engine, PayloadType::Response,
-                       static_cast<uint8_t>(ResponseType::Pong), /*sourceState=*/0,
+        // Relay to the GS, propagating the seq + response id so the GS matches command<->response.
+        comm_.sendToGs(BoardId::Engine, PayloadType::Response, responseId, /*sourceState=*/0,
                        /*seq=*/seq, std::span<const uint8_t>{}, now_ms);
     }
 
@@ -154,7 +156,29 @@ private:
     using CommandType = logic::communication::command::CommandType;
     using State       = logic::control::State;
 
-    /* ---- Gate + dispatch ----------------------------------------------------- */
+    /* ---- Addressing + gate + dispatch ---------------------------------------- */
+
+    // Is a command bridgeable to the ECU? The FCU is a bridge for these: the GS may target
+    // them at the Engine and the FCU relays them over CAN (Ping tests the link; SetControlFlag
+    // sets an ECU-side flag). Every other command is FCU-local only.
+    [[nodiscard]] static bool isBridgeable(CommandType type)
+    {
+        return type == CommandType::Ping || type == CommandType::SetControlFlag;
+    }
+
+    // Should the FCU act on a command with this target? Always for FillingStation / Broadcast
+    // (we are, or are among, the addressees). For an Engine target only if the command is
+    // bridgeable — then we accept it solely to relay it on; otherwise it is for another board.
+    [[nodiscard]] static bool addressedToUs(CommandType type, BoardId target)
+    {
+        if (target == BoardId::FillingStation || target == BoardId::Broadcast) {
+            return true;
+        }
+        if (target == BoardId::Engine) {
+            return isBridgeable(type);
+        }
+        return false;
+    }
 
     // May a command of `type` run in `current`? Skeleton: permissive for every known
     // command in every state for now — the single place to add per-command, per-state
@@ -166,6 +190,7 @@ private:
             case CommandType::Ping:
             case CommandType::SetState:
             case CommandType::SetValvePosition:
+            case CommandType::SetControlFlag:
             case CommandType::Synchronise:
                 return true;
         }
@@ -182,6 +207,7 @@ private:
             case CommandType::Ping:             return handlePing(cmd, now_ms);
             case CommandType::SetState:         return handleSetState(cmd);
             case CommandType::SetValvePosition: return handleSetValvePosition(cmd);
+            case CommandType::SetControlFlag:   return handleSetControlFlag(cmd, now_ms);
             case CommandType::Synchronise:      return handleSynchronise(cmd);
         }
         return false;  // unknown command type
@@ -191,7 +217,7 @@ private:
 
     // Reaching here means a Ping from the GS arrived: the GS<->FCU leg works. Forward it
     // to the ECU over CAN as a RELIABLE command, PROPAGATING the GS's seq — the ECU echoes
-    // it in its Pong, onPong matches it (stopping retries) and relays the Pong to the GS
+    // it in its Pong, onResponse matches it (stopping retries) and relays the Pong to the GS
     // carrying that same seq, so the GS can match its own ping. The "FCU<->ECU is down"
     // seam lives in servicePending's give-up branch, not here.
     bool handlePing(const Command& cmd, uint32_t now_ms)
@@ -325,6 +351,47 @@ private:
         return action == ValveCommand::Open ||
                action == ValveCommand::Close ||
                action == ValveCommand::SetOpenedPct;
+    }
+
+    /* ---- SetControlFlag (local apply and/or bridge to the ECU) --------------- */
+
+    // Set a runtime control flag, routed by the command's target board:
+    //   FillingStation -> apply our own flag and Ack the GS directly (no ECU hop).
+    //   Engine         -> bridge the command to the ECU over CAN as a reliable command;
+    //                     the ECU applies it and Acks, and onResponse relays that Ack to the GS.
+    //   Broadcast      -> both: apply locally (Ack as the FCU) AND bridge (the ECU Acks too).
+    // The 2-byte SetControlFlagFrame rides verbatim in the payload, so the bridged CAN frame
+    // carries the same bytes the GS sent.
+    bool handleSetControlFlag(const Command& cmd, uint32_t now_ms)
+    {
+        const auto target = static_cast<BoardId>(cmd.target);
+        bool ok = true;
+
+        if (target == BoardId::FillingStation || target == BoardId::Broadcast) {
+            ok = applyControlFlagLocally(cmd, now_ms) && ok;
+        }
+        if (target == BoardId::Engine || target == BoardId::Broadcast) {
+            sendReliable(CommandType::SetControlFlag, /*sender_state=*/0,
+                         std::span<const uint8_t>(cmd.payload.data(), sizeof(SetControlFlagFrame)),
+                         cmd.seq, now_ms);
+        }
+        return ok;
+    }
+
+    // Apply a SetControlFlag to the FCU's own control-flag state and Ack the GS directly
+    // (we handled it ourselves; no ECU round-trip). Echoes the GS's seq in the Ack.
+    bool applyControlFlagLocally(const Command& cmd, uint32_t now_ms)
+    {
+        const auto* frame = reinterpret_cast<const SetControlFlagFrame*>(cmd.payload.data());
+        const std::optional<ControlFlag> flag = toControlFlag(static_cast<uint8_t>(frame->flag));
+        if (!flag) {
+            return false;  // unknown flag id — do not Ack a command we did not apply
+        }
+        logic::control::control_flags.set(*flag, frame->value != 0);
+        comm_.sendToGs(BoardId::FillingStation, PayloadType::Response,
+                       static_cast<uint8_t>(ResponseType::Ack), /*sourceState=*/0,
+                       /*seq=*/cmd.seq, std::span<const uint8_t>{}, now_ms);
+        return true;
     }
 
     /* ---- Synchronise --------------------------------------------------------- */
