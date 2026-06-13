@@ -1,0 +1,3 @@
+[submodule "src/app/logic/common/communication/protocol"]
+	path = src/app/logic/common/communication/protocol
+	url = https://github.com/SiriusUdS/common-protocol.git
