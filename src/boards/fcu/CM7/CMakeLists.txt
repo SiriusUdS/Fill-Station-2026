@@ -92,16 +92,10 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ../main.cpp
     ../board.cpp
 
-    # FCU policy — command handlers (src/app/logic/fcu). fcu_controller is header-only.
-    ${REPO_ROOT}/src/app/logic/fcu/control/command_handlers/main_handler.cpp
-    ${REPO_ROOT}/src/app/logic/fcu/control/command_handlers/ping.cpp
-    ${REPO_ROOT}/src/app/logic/fcu/control/command_handlers/execute_ping.cpp
-    ${REPO_ROOT}/src/app/logic/fcu/control/command_handlers/set_state.cpp
-    ${REPO_ROOT}/src/app/logic/fcu/control/command_handlers/set_state_transitions/activate_igniter.cpp
-    ${REPO_ROOT}/src/app/logic/fcu/control/command_handlers/set_valve_position.cpp
-    ${REPO_ROOT}/src/app/logic/fcu/control/command_handlers/execute_set_valve_position.cpp
-    ${REPO_ROOT}/src/app/logic/fcu/control/command_handlers/synchronise.cpp
-    ${REPO_ROOT}/src/app/logic/fcu/control/command_handlers/execute_synchronise.cpp
+    # FCU policy (src/app/logic/fcu): the controller + its Communication/Telemetry/
+    # Control collaborators are header-only templates; only the shared Ethernet ->
+    # Command parser that Control uses needs a translation unit linked.
+    ${REPO_ROOT}/src/app/logic/common/communication/command/parser/command_ethernet_parser.cpp
 
     # Shared logic mechanism (src/app/logic/common)
     ${REPO_ROOT}/src/app/logic/common/control/persistent_state.cpp

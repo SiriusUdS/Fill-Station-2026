@@ -8,6 +8,9 @@
 
 #include "communication/protocol/framing/system_state_codec.hpp"
 
+#include "framing/can_header.hpp"
+#include "framing/payload_type.hpp"
+
 #include <gtest/gtest.h>
 
 #include <array>
@@ -89,6 +92,24 @@ TEST(SystemStateCodec, IncompleteYieldsNothing)
     SystemStateReassembler rx;
     for (std::size_t i = 0; i + 1 < frames.size(); ++i) {  // all but the last
         EXPECT_FALSE(rx.accept(frames[i]).has_value());
+    }
+}
+
+// The reassembler accepts only PayloadType::Telemetry frames. Flip every
+// fragment's payload_type to Command and no record may ever complete.
+TEST(SystemStateCodec, NonTelemetryPayloadTypeIgnored)
+{
+    auto frames = pack(makeRecord(0x33), /*seq*/ 4);
+    for (auto& f : frames) {
+        CanHeader h{};
+        h.code = f.id;
+        h.frame.payload_type = static_cast<uint8_t>(PayloadType::Command);
+        f.id = h.code;
+    }
+
+    SystemStateReassembler rx;
+    for (const auto& f : frames) {
+        EXPECT_FALSE(rx.accept(f).has_value());
     }
 }
 

@@ -19,7 +19,8 @@
 #include "system/valves/fcu.hpp"                   // FcuValves
 #include "control/persistent_state.hpp"
 
-#include "framing/udp_frame.hpp"                 // UDPPacketHeader
+#include "framing/ethernet_header.hpp"           // EthernetHeader
+#include "framing/payload_type.hpp"              // PayloadType
 #include "system/board_id.hpp"  // BoardId::FillingStation
 
 #include <gtest/gtest.h>
@@ -33,18 +34,19 @@ namespace command = logic::communication::command;
 namespace {
 
 /* Build a UDP datagram carrying a SetValvePosition command: the 12-byte header
-   (payloadID = SetValvePosition) followed by the 3-byte frame. */
+   (payload_id = SetValvePosition) followed by the 3-byte frame. */
 std::vector<uint8_t> makeValveCommand(FcuValves valve, ValveCommand action, uint8_t value)
 {
-    UDPPacketHeader header{};
-    header.frame.deviceID  = static_cast<uint8_t>(BoardId::FillingStation);
-    header.frame.payloadID = static_cast<uint8_t>(command::CommandType::SetValvePosition);
+    EthernetHeader header{};
+    header.target_id    = static_cast<uint8_t>(BoardId::FillingStation);
+    header.payload_type = static_cast<uint8_t>(PayloadType::Command);
+    header.payload_id   = static_cast<uint8_t>(command::CommandType::SetValvePosition);
 
     const SetValvePositionFrame frame{valve, action, value};
 
-    std::vector<uint8_t> datagram(sizeof(UDPPacketHeader) + sizeof(SetValvePositionFrame));
-    std::memcpy(datagram.data(), header.bytes, sizeof(UDPPacketHeader));
-    std::memcpy(datagram.data() + sizeof(UDPPacketHeader), &frame, sizeof(frame));
+    std::vector<uint8_t> datagram(sizeof(EthernetHeader) + sizeof(SetValvePositionFrame));
+    std::memcpy(datagram.data(), &header, sizeof(EthernetHeader));
+    std::memcpy(datagram.data() + sizeof(EthernetHeader), &frame, sizeof(frame));
     return datagram;
 }
 
@@ -65,6 +67,11 @@ protected:
         bus().reset();
         logic::control::persistent_state = logic::control::PersistentState{};
         controller_.init();
+
+        // init() safe-boots the valves closed through the control layer; discard those
+        // call counts so each test asserts only its own command-driven actuation.
+        fill_valve_.open_calls = fill_valve_.close_calls = fill_valve_.percent_calls = 0;
+        dump_valve_.open_calls = dump_valve_.close_calls = dump_valve_.percent_calls = 0;
     }
 
     /* Deliver a datagram the way the link does: queue it, then tick once so the

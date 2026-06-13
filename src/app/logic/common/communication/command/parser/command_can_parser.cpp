@@ -1,7 +1,7 @@
 /* ------------------------------------------------------------------------- *
  * CAN -> Command parser. Pure byte transform, no HAL dependency.
  *
- * The CAN messageID carries the canonical CommandType id directly (single
+ * The CAN payload_id carries the canonical CommandType id directly (single
  * source of truth in command.hpp), so there is no per-transport id table here.
  *
  * Command -> CAN is intentionally absent: it arrives with the upcoming CAN
@@ -12,6 +12,7 @@
 #include "communication/command/parser/command_can_parser.hpp"
 
 #include "framing/can_header.hpp"
+#include "framing/payload_type.hpp"
 
 #include <cstddef>
 #include <cstring>
@@ -23,16 +24,20 @@ std::optional<Command> fromCan(const CanFrame& frame)
     CanHeader header{};
     header.code = frame.id;
 
+    if (static_cast<PayloadType>(header.frame.payload_type) != PayloadType::Command) {
+        return std::nullopt;   // telemetry/response or unset — not a command
+    }
+
     const std::optional<CommandType> type =
-        toCommandType(static_cast<uint8_t>(header.frame.messageID));
+        toCommandType(static_cast<uint8_t>(header.frame.payload_id));
     if (!type) {
         return std::nullopt;   // not a command (status frames, unknown ids)
     }
 
     Command cmd{};
     cmd.type   = *type;
-    cmd.source = static_cast<uint8_t>(header.frame.senderID);
-    cmd.target = static_cast<uint8_t>(header.frame.targetID);
+    cmd.source = static_cast<uint8_t>(header.frame.sender_id);
+    cmd.target = static_cast<uint8_t>(header.frame.target_id);
 
     std::size_t n = payloadSize(*type);
     if (n > frame.data.size()) {

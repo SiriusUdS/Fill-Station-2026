@@ -4,25 +4,16 @@
 
 set(FCU_INCLUDE_DIRS ${TEST_SUPPORT} ${LOGIC_FCU} ${LOGIC_COMMON_INCLUDE_DIRS})
 
-# The FCU command-handler translation units, reused by the targets that link them.
-set(HANDLERS ${LOGIC_FCU}/control/command_handlers)
-set(COMMAND_HANDLER_SOURCES
-    ${HANDLERS}/main_handler.cpp
-    ${HANDLERS}/ping.cpp
-    ${HANDLERS}/execute_ping.cpp
-    ${HANDLERS}/set_state.cpp
-    ${HANDLERS}/set_state_transitions/activate_igniter.cpp
-    ${HANDLERS}/set_valve_position.cpp
-    ${HANDLERS}/execute_set_valve_position.cpp
-    ${HANDLERS}/synchronise.cpp
-    ${HANDLERS}/execute_synchronise.cpp
-)
+# The Ethernet -> Command parser TU that the control layer's onDatagram() uses.
+# Header-only otherwise, so every controller/control target links just this.
+set(COMMAND_PARSER_SRC ${LOGIC_COMMON}/communication/command/parser/command_ethernet_parser.cpp)
 
 # --- FCU controller logic (unit) ------------------------------------------
 add_executable(fcu_controller_test
     unit/logic/fcu_controller_test.cpp
     ${FAKES_SRC}
     ${CRC_HOST_SRC}
+    ${COMMAND_PARSER_SRC}
     ${LOGIC_COMMON}/control/persistent_state.cpp
 )
 target_include_directories(fcu_controller_test PRIVATE ${FCU_INCLUDE_DIRS})
@@ -37,34 +28,38 @@ target_include_directories(adc_test PRIVATE ${FCU_INCLUDE_DIRS})
 target_link_libraries(adc_test PRIVATE GTest::gtest_main)
 gtest_discover_tests(adc_test PROPERTIES LABELS "unit")
 
-# --- Command handlers (unit) ----------------------------------------------
-add_executable(command_handlers_test
-    unit/logic/control/command_handlers/command_handlers_test.cpp
-    ${COMMAND_HANDLER_SOURCES}
+# --- Control layer (unit) -------------------------------------------------
+add_executable(control_test
+    unit/logic/control/control_test.cpp
+    ${FAKES_SRC}
+    ${CRC_HOST_SRC}
+    ${COMMAND_PARSER_SRC}
     ${LOGIC_COMMON}/control/persistent_state.cpp
 )
-target_include_directories(command_handlers_test PRIVATE ${FCU_INCLUDE_DIRS})
-target_link_libraries(command_handlers_test PRIVATE GTest::gtest_main)
-gtest_discover_tests(command_handlers_test PROPERTIES LABELS "unit")
-
-# --- Ethernet -> state change (integration) -------------------------------
-add_executable(ethernet_state_change_test
-    integration/ethernet_state_change_test.cpp
-    ${COMMAND_HANDLER_SOURCES}
-    ${LOGIC_COMMON}/communication/command/parser/command_ethernet_parser.cpp
-    ${LOGIC_COMMON}/control/persistent_state.cpp
-)
-target_include_directories(ethernet_state_change_test PRIVATE ${FCU_INCLUDE_DIRS})
-target_link_libraries(ethernet_state_change_test PRIVATE GTest::gtest_main)
-gtest_discover_tests(ethernet_state_change_test PROPERTIES LABELS "integration")
+target_include_directories(control_test PRIVATE ${FCU_INCLUDE_DIRS})
+target_link_libraries(control_test PRIVATE GTest::gtest_main)
+gtest_discover_tests(control_test PROPERTIES LABELS "unit")
 
 # --- UDP SetValvePosition -> valve actuation (integration) ----------------
 add_executable(valve_actuation_test
     integration/valve_actuation_test.cpp
     ${FAKES_SRC}
     ${CRC_HOST_SRC}
+    ${COMMAND_PARSER_SRC}
     ${LOGIC_COMMON}/control/persistent_state.cpp
 )
 target_include_directories(valve_actuation_test PRIVATE ${FCU_INCLUDE_DIRS})
 target_link_libraries(valve_actuation_test PRIVATE GTest::gtest_main)
 gtest_discover_tests(valve_actuation_test PROPERTIES LABELS "integration")
+
+# --- Ping routing (Gs<->Fcu<->Ecu) (integration) --------------------------
+add_executable(ping_routing_test
+    integration/ping_routing_test.cpp
+    ${FAKES_SRC}
+    ${CRC_HOST_SRC}
+    ${COMMAND_PARSER_SRC}
+    ${LOGIC_COMMON}/control/persistent_state.cpp
+)
+target_include_directories(ping_routing_test PRIVATE ${FCU_INCLUDE_DIRS})
+target_link_libraries(ping_routing_test PRIVATE GTest::gtest_main)
+gtest_discover_tests(ping_routing_test PROPERTIES LABELS "integration")

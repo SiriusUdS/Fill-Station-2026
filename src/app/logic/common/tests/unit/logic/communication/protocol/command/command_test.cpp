@@ -12,6 +12,7 @@
 #include "communication/command/parser/command_ethernet_parser.hpp"
 #include "framing/can_header.hpp"
 #include "framing/ethernet_header.hpp"
+#include "framing/payload_type.hpp"
 
 #include <array>
 #include <bit>
@@ -30,12 +31,14 @@ namespace {
 constexpr uint8_t wireId(CommandType t) { return static_cast<uint8_t>(t); }
 
 CanFrame makeCanFrame(uint8_t sender, uint8_t target, uint8_t messageId,
-                      std::span<const uint8_t> data = {})
+                      std::span<const uint8_t> data = {},
+                      PayloadType type = PayloadType::Command)
 {
     CanHeader header{};
-    header.frame.senderID  = sender;
-    header.frame.targetID  = target;
-    header.frame.messageID = messageId;
+    header.frame.sender_id    = sender;
+    header.frame.target_id    = target;
+    header.frame.payload_type = static_cast<uint8_t>(type);
+    header.frame.payload_id   = messageId;
 
     CanFrame frame{};
     frame.id     = header.code;
@@ -45,14 +48,16 @@ CanFrame makeCanFrame(uint8_t sender, uint8_t target, uint8_t messageId,
     return frame;
 }
 
-std::vector<uint8_t> makeEthFrame(uint8_t deviceId, uint8_t payloadId, uint32_t ts,
-                                  std::span<const uint8_t> payload = {})
+std::vector<uint8_t> makeEthFrame(uint8_t senderId, uint8_t payloadId, uint32_t ts,
+                                  std::span<const uint8_t> payload = {},
+                                  PayloadType type = PayloadType::Command)
 {
     EthernetHeader header{};
-    header.deviceID      = deviceId;
-    header.payloadID     = payloadId;
-    header.payloadLenght = static_cast<uint16_t>(payload.size());
-    header.deviceTS_MS   = ts;
+    header.sender_id            = senderId;
+    header.payload_type         = static_cast<uint8_t>(type);
+    header.payload_id           = payloadId;
+    header.payload_size_bytes   = static_cast<uint16_t>(payload.size());
+    header.sender_timestamp_ms  = ts;
 
     std::vector<uint8_t> buf(sizeof(EthernetHeader) + payload.size());
     std::memcpy(buf.data(), &header, sizeof(EthernetHeader));
@@ -106,6 +111,14 @@ TEST(CommandFromCan, UnknownMessageIdRejected)
     EXPECT_FALSE(cmd::fromCan(makeCanFrame(0x01, 0x02, 0x7E)).has_value());
 }
 
+// payload_id 0x01 is BOTH CommandType::Ping and TelemetryType::SystemState; only
+// payload_type tells them apart. A non-command frame must never parse as a command.
+TEST(CommandFromCan, NonCommandPayloadTypeRejected)
+{
+    const auto f = makeCanFrame(0x01, 0x02, wireId(CommandType::Ping), {}, PayloadType::Telemetry);
+    EXPECT_FALSE(cmd::fromCan(f).has_value());
+}
+
 TEST(CommandFromCan, SetStateParsed)
 {
     SetStateFrame rs{};
@@ -136,7 +149,7 @@ TEST(CommandFromEthernet, SetStateParsedSourceFromHeader)
     const auto c = cmd::fromEthernet(frame);
     ASSERT_TRUE(c.has_value());
     EXPECT_EQ(c->type, CommandType::SetState);
-    EXPECT_EQ(c->source, 0x03);          // read from header.deviceID, not assumed
+    EXPECT_EQ(c->source, 0x03);          // read from header.sender_id, not assumed
     EXPECT_EQ(c->timestamp_ms, 4242u);
 
     const auto* out = reinterpret_cast<const SetStateFrame*>(c->payload.data());
@@ -171,6 +184,14 @@ TEST(CommandFromEthernet, PingParsedNoPayload)
 TEST(CommandFromEthernet, UnknownPayloadIdRejected)
 {
     EXPECT_FALSE(cmd::fromEthernet(makeEthFrame(0x03, 0x99, 0)).has_value());
+}
+
+// As above: payload_id collides between Ping and SystemState; payload_type is
+// what disambiguates, so a telemetry frame must not parse as a command.
+TEST(CommandFromEthernet, NonCommandPayloadTypeRejected)
+{
+    const auto frame = makeEthFrame(0x03, wireId(CommandType::Ping), 0, {}, PayloadType::Telemetry);
+    EXPECT_FALSE(cmd::fromEthernet(frame).has_value());
 }
 
 TEST(CommandFromEthernet, TruncatedPayloadRejected)

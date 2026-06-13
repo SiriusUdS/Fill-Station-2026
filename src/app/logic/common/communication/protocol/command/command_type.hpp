@@ -11,7 +11,7 @@
  * Canonical command id (the on-wire SSOT) + per-command payload sizing.
  *
  * CommandType's numeric value is what travels on the wire on *every* transport —
- * the CAN `messageID` and the Ethernet `payloadID` carry the identical value.
+ * the CAN `payload_id` and the Ethernet `payload_id` carry the identical value.
  * Flight-critical: never define a command id anywhere else, so CAN and Ethernet
  * can never disagree about what a command means.
  *
@@ -23,16 +23,17 @@ namespace logic::communication::command {
 
 /**
  * @brief Canonical command id — the single source of truth shared by every
- *        transport. The enumerator value IS the on-wire id (CAN messageID /
- *        Ethernet payloadID).
+ *        transport. The enumerator value IS the on-wire id (CAN payload_id /
+ *        Ethernet payload_id).
  */
 enum class CommandType : uint8_t {
     Ping             = 0x01,  /**< Link test. Carries no payload. */
     SetState         = 0x02,  /**< Request a device state change. Payload: SetStateFrame (State TBD). */
     SetValvePosition = 0x03,  /**< Drive a valve to a position. Payload: SetValvePositionFrame. */
     Synchronise      = 0x04,  /**< Synchronise device state across the network (always includes time). No payload. */
-    Pong             = 0x05,  /**< Reply to a Ping; a command in that it must be propagated. No payload. */
 };
+// Replies to commands live in ResponseType (response_type.hpp), tagged
+// PayloadType::Response — e.g. Pong answering Ping. CommandType is requests only.
 
 /**
  * @brief Wire payload size, in bytes, for a command. One definition for all
@@ -45,7 +46,6 @@ enum class CommandType : uint8_t {
         case CommandType::SetState:         return sizeof(SetStateFrame);
         case CommandType::SetValvePosition: return sizeof(SetValvePositionFrame);
         case CommandType::Synchronise:      return 0;
-        case CommandType::Pong:             return 0;
     }
     return 0;
 }
@@ -61,7 +61,6 @@ enum class CommandType : uint8_t {
         case CommandType::SetState:
         case CommandType::SetValvePosition:
         case CommandType::Synchronise:
-        case CommandType::Pong:
             return static_cast<CommandType>(id);
     }
     return std::nullopt;

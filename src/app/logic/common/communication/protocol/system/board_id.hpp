@@ -4,7 +4,7 @@
 
 /* ------------------------------------------------------------------------- *
  * System-wide board identities — the single source of truth for who is who on
- * every transport (CAN senderID/targetID, Ethernet deviceID). The enumerator
+ * every transport (CAN/Ethernet sender_id/target_id). The enumerator
  * value IS the on-wire id; never spell these numbers anywhere else.
  * ------------------------------------------------------------------------- */
 

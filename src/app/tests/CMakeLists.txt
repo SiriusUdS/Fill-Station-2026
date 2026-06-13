@@ -52,6 +52,7 @@ set(FAKES_SRC    ${CMAKE_CURRENT_SOURCE_DIR}/support/fakes.cpp)   # the FakeBus 
 set(CRC_HOST_SRC ${CMAKE_CURRENT_SOURCE_DIR}/support/crc32_host.cpp)  # software def of the data-integrity CRC seam
 set(LOGIC_COMMON ${APP_DIR}/logic/common)
 set(LOGIC_FCU    ${APP_DIR}/logic/fcu)
+set(LOGIC_ECU    ${APP_DIR}/logic/ecu)
 set(LOGIC_COMMON_INCLUDE_DIRS
     ${LOGIC_COMMON}                        # interfaces + control/ + communication/
     ${LOGIC_COMMON}/communication/protocol # wire formats: peripherals/, devices/, framing/, command/, system/, telemetry/
@@ -60,4 +61,4 @@ set(LOGIC_COMMON_INCLUDE_DIRS
 # --- Test sites (one per board + common) ----------------------------------
 add_subdirectory(${APP_DIR}/logic/common/tests ${CMAKE_BINARY_DIR}/common-tests)
 add_subdirectory(${APP_DIR}/logic/fcu/tests    ${CMAKE_BINARY_DIR}/fcu-tests)
-# add_subdirectory(${APP_DIR}/logic/ecu/tests  ${CMAKE_BINARY_DIR}/ecu-tests)  # when ECU lands
+add_subdirectory(${APP_DIR}/logic/ecu/tests    ${CMAKE_BINARY_DIR}/ecu-tests)

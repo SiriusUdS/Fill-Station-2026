@@ -13,7 +13,7 @@ namespace logic::communication::command {
  * @param  frame  Full datagram: a 12-byte EthernetHeader followed by the command
  *                payload bytes.
  * @return The command, or std::nullopt if the frame is too short or its
- *         payloadID is not a known command.
+ *         payload_id is not a known command.
  */
 [[nodiscard]] std::optional<Command> fromEthernet(std::span<const uint8_t> frame);
 

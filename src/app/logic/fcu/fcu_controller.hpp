@@ -1,116 +1,56 @@
 #pragma once
 
-#include <array>
-#include <cstddef>
 #include <cstdint>
-#include <cstring>
-#include <span>
-#include <type_traits>
 
-#include "storage/interfaces/storage.hpp"            // logic::storage::Storage + StorageInfo (injected dependency)
-#include "actuation/interfaces/valve.hpp"            // logic::actuation::Valve + ValveState (injected)
-#include "communication/interfaces/adc.hpp"          // logic::communication::StreamingAdc (injected)
-#include "communication/interfaces/ethernet.hpp"     // logic::communication::udp + Endpoint
-#include "communication/interfaces/can.hpp"          // logic::communication::can + CanFrame
-#include "control/persistent_state.hpp"              // Backup-SRAM state snapshot
-#include "framing/can_header.hpp"                           // HAL-free CAN protocol (CanHeader, enums)
+#include "storage/interfaces/storage.hpp"        // logic::storage::Storage
+#include "actuation/interfaces/valve.hpp"        // logic::actuation::Valve
+#include "communication/interfaces/adc.hpp"      // logic::communication::StreamingAdc
+#include "communication/interfaces/ethernet.hpp" // logic::communication::Ethernet
+#include "communication/interfaces/can.hpp"      // logic::communication::Can
+#include "control/persistent_state.hpp"          // Backup-SRAM state snapshot
 
-#include "communication/protocol/framing/ethernet_header.hpp"  // EthernetHeader (downlink header)
-#include "communication/protocol/telemetry/fcu_system_state.hpp"  // FcuSystemState (this board's own record)
-#include "communication/protocol/framing/system_state_codec.hpp"    // EcuSystemState + SystemStateReassembler (ECU telemetry relay)
-#include "system/valves/fcu.hpp"                  // FcuValves (valve identity / array index SSOT)
-#include "communication/command/command.hpp"            // CommandType (Ethernet payloadID)
-#include "command/set_valve_position.hpp" // SetValvePositionFrame, ValveCommand
-
-#include "framing/udp_frame.hpp"
-#include "system/board_id.hpp"
-#include "telemetry/telemetry_id.hpp"
+#include "communication/protocol/framing/can_header.hpp"      // CanHeader (inbound demux)
+#include "communication/protocol/framing/payload_type.hpp"    // PayloadType
+#include "communication/protocol/response/response_type.hpp"  // ResponseType (Pong)
 #include "system/state.hpp"
-#include "data_integrity/crc32.hpp"   // logic::data_integrity::crc32 (hardware-backed telemetry CRC seam)
+
+#include "communication.hpp"   // logic::fcu::Communication<E,C>
+#include "telemetry.hpp"       // logic::fcu::Telemetry<S,V,A,Comm>
+#include "control.hpp"         // logic::fcu::Control<V,Comm>
 
 /* ------------------------------------------------------------------------- *
- * FCU filling-station state machine (HAL-free), as a class template.
+ * FCU controller (HAL-free) — the orchestrator. It holds the three concerns and
+ * wires them together; it owns no peripheral logic of its own:
  *
- * Controller<S, V, A> is parameterised on its held drivers: the backing store S
- * (any logic::storage::Storage), the valve type V (logic::actuation::Valve, both
- * Fill and Dump), and the streaming ADC A (logic::communication::StreamingAdc).
- * It holds each by reference and calls it directly, so error handling is inline
- * and the contract is explicit. The ADC's DRDY ISR fills its ring; the controller
- * drains it on its own cadence in produceRecord() (driven by a dedicated record
- * timer), so capture is decoupled from the save/comms rate.
+ *   Communication<E,C>  — the only owner of Ethernet (GS) + CAN (ECU): framing,
+ *                         routing, CRC, raw transport. Consumed by the other two.
+ *   Telemetry<S,V,A>    — ADC + SD: produce records, flush to SD, downlink to GS,
+ *                         relay the ECU's telemetry on.
+ *   Control<V>          — command handling + execution: parse, gate, dispatch,
+ *                         actuate local valves, forward to the ECU.
  *
- * Bring-up owns the one instance (Controller<SdCard, BallValve, Ads131m08>) and
- * the test owns Controller<Fake...>; the implementation lives in fcu_controller.tpp.
+ * The orchestrator's one piece of real work is ingress routing: it drains the
+ * transports and routes each inbound frame to the right consumer (a Pong from the
+ * ECU -> Control; ECU telemetry -> Telemetry; GS commands -> Control). Routing is
+ * here, not in Communication, because it means knowing about both consumers — and
+ * Communication must not depend on them.
  *
- * The telemetry double buffer is a member (log_); in firmware the whole instance
- * is placed in D1 AXI-SRAM (see main.cpp) because the SD write hands a half
- * straight to the SDMMC DMA, which cannot reach DTCM.
+ * Public surface is unchanged from the former monolithic controller (init / tick /
+ * produceRecord), so bring-up (Controller<SdCard, BallValve, Ads131m08, ...>) and
+ * the tests (Controller<Fake...>) construct it exactly as before. In firmware the
+ * whole instance is placed in D1 AXI-SRAM (see main.cpp) because Telemetry's SD
+ * write hands a buffer half straight to the SDMMC DMA, which cannot reach DTCM.
  * ------------------------------------------------------------------------- */
 
 namespace logic::fcu {
 
-namespace detail {
-
-using logic::communication::Endpoint;
-
-inline constexpr uint32_t    RX_WATCHDOG_MS            = 500;
-inline constexpr std::size_t REQUEST_STATE_OFFSET_BYTES = 15;  // requested state byte in the packet
-
-/* Telemetry double buffer: each FcuSystemState (one per ADC sample) is appended to
-   the active 4096-byte half; when a half fills it is flushed to SD and streamed
-   to the GS while the producer fills the other half. */
-inline constexpr std::size_t LOG_HALF_BYTES = 4096;
-
-/* If the ADC ring stays empty this long, the ADC is presumed silent and the
-   record timer emits filler records (flagged invalid) so the packet rate holds. */
-inline constexpr uint32_t ADC_TIMEOUT_MS = 10;   // > worst-case stall before declaring the ADC silent
-
-/* The link's UDP payload limit (EthernetHeader + records + CRC must fit; keep in
-   sync with the platform stack). sendToGs packs as many whole records as fit,
-   computed from the record size it is handed — the FCU's own FcuSystemState and
-   the relayed EcuSystemState have different sizes. */
-inline constexpr std::size_t UDP_MAX_PAYLOAD_BYTES = 1432;
-
-/* Ground-station endpoint (heartbeat / telemetry destination). */
-inline constexpr std::array<uint8_t, 6> GS_MAC  = {0x00, 0xE0, 0x4C, 0x33, 0x0F, 0x98};
-inline constexpr uint16_t               GS_PORT = 7520;
-
-inline constexpr uint32_t make_ipv4(uint8_t b1, uint8_t b2, uint8_t b3, uint8_t b4)
-{
-    return (static_cast<uint32_t>(b1) << 24) | (static_cast<uint32_t>(b2) << 16) |
-           (static_cast<uint32_t>(b3) << 8) | static_cast<uint32_t>(b4);
-}
-
-/* The state-machine state itself is NOT held here: it lives in battery-backed
-   Backup SRAM via logic::control::persistent_state, so it survives a reset.
-   This struct holds only the volatile per-boot bookkeeping. */
-struct FillStation {
-    uint32_t current_tick_ms  = 0;
-    uint32_t last_rx_ms       = 0;
-    Endpoint gs;
-};
-
-/* The telemetry double buffer. A plain aggregate (no member initializers) so the
-   controller's constructor does not touch its 8 KB at static-init; init() zeroes
-   it. Pinned in D1 AXI-SRAM via the controller instance's placement in firmware. */
-struct LogBuffer {
-    uint8_t           data[2][LOG_HALF_BYTES];
-    volatile uint16_t used[2];   // bytes filled in each half
-    volatile bool     ready[2];  // half full, awaiting drain
-    uint8_t           active;    // half the producer is filling (0/1)
-    volatile bool     overrun;   // a half filled before the other was drained
-};
-
-} // namespace detail
-
 /**
  * @brief The FCU filling-station controller, parameterised on its held drivers.
- * @tparam S A type modelling logic::storage::Storage (the SD card in firmware).
- * @tparam V A type modelling logic::actuation::Valve (a BallValve in firmware);
- *           both the Fill and Dump valves are of this type.
- * @tparam A A type modelling logic::communication::StreamingAdc (the ADS131M08).
- * @tparam E A type modelling logic::communication::Ethernet (the UDP link).
- * @tparam C A type modelling logic::communication::Can (the FDCAN bus).
+ * @tparam S logic::storage::Storage (the SD card in firmware).
+ * @tparam V logic::actuation::Valve (a BallValve in firmware; both Fill and Dump).
+ * @tparam A logic::communication::StreamingAdc (the ADS131M08).
+ * @tparam E logic::communication::Ethernet (the UDP link to the GS).
+ * @tparam C logic::communication::Can (the FDCAN bus to the ECU).
  */
 template <logic::storage::Storage S, logic::actuation::Valve V,
           logic::communication::StreamingAdc A, logic::communication::Ethernet E,
@@ -119,68 +59,84 @@ class Controller {
 public:
     /** @brief Construct over the held drivers; does not touch hardware. Call init() next. */
     Controller(S& storage, V& fill_valve, V& dump_valve, A& adc, E& eth, C& can)
-        : storage_(storage), fill_valve_(fill_valve), dump_valve_(dump_valve),
-          adc_(adc), eth_(eth), can_(can) {}
+        : comm_(eth, can),
+          telemetry_(storage, fill_valve, dump_valve, adc, comm_),
+          control_(fill_valve, dump_valve, comm_) {}
 
     /**
-     * @brief  Initialise the FCU logic: starting state, ground-station endpoint,
-     *         telemetry buffer, and bring the backing store online. Call once
-     *         after the platform peripherals (Ethernet, CAN) are up.
+     * @brief  Initialise the FCU logic: communication endpoint, telemetry buffer +
+     *         backing store, control liveness clock, and resume the persisted state.
+     *         Call once after the platform peripherals (Ethernet, CAN) are up.
      */
-    void init();
+    void init()
+    {
+        // Resume the persisted state FIRST. The state-machine state lives in Backup
+        // SRAM; resume it across a reset, and on a cold or corrupt boot commit a fresh
+        // INIT so the blob is valid from here on. It must be valid before Control's
+        // init runs, because Control safes the local valves against it.
+        logic::control::persistent_state.saveState(
+            logic::control::persistent_state.loadState().value_or(logic::control::State::Init));
+
+        // Control next, so the valves are driven to a safe boot position before the
+        // slower link / SD bring-up below — they spend the least time in the unmanaged
+        // power-on state.
+        control_.init();
+
+        comm_.init();
+        telemetry_.init();   // zeroes the double buffer and mounts the SD card
+    }
 
     /**
-     * @brief  Advance the FCU one step: drain CAN and UDP, run the state machine,
-     *         emit the heartbeat and service the receive watchdog. Record
+     * @brief  Advance the FCU one step: drain CAN and UDP and route each frame, flush
+     *         full telemetry halves, and service the GS-link watchdog. Record
      *         production is on its own timer (produceRecord), not here.
      * @param  now_ms  Current millisecond tick (e.g. HAL_GetTick()).
      */
-    void tick(uint32_t now_ms);
+    void tick(uint32_t now_ms)
+    {
+        // CAN ingress: the ECU's Pong (answering a forwarded ping) -> Control to relay;
+        // everything else is ECU telemetry -> Telemetry to reassemble + relay.
+        while (auto in = comm_.receiveFrame()) {
+            if (isPong(in->header)) {
+                control_.onPong(now_ms);
+            } else {
+                telemetry_.relayEcuFrame(in->frame, now_ms);
+            }
+        }
+
+        // UDP ingress: ground-station commands.
+        comm_.tick();  // service the link so receiveDatagram() can return inbound traffic
+        while (auto datagram = comm_.receiveDatagram()) {
+            control_.onDatagram(datagram->payload, now_ms);
+        }
+
+        telemetry_.drain(now_ms);   // flush full halves to SD + the GS
+        control_.watchdog(now_ms);  // GS-link abort watchdog
+
+        if (logic::control::persistent_state.fill_state == logic::control::State::Init) {
+            logic::control::persistent_state.saveState(logic::control::State::Safe);
+        }
+    }
 
     /**
      * @brief  Produce telemetry record(s) — the comms/save cadence, driven by a
-     *         dedicated timer (NOT the ADC). Drains every conversion queued in the
-     *         ADC's ring (each a fresh record); if the ring is empty and the ADC
-     *         has timed out, emits one filler with the last-known data flagged
-     *         invalid (Faulted / !data_valid). Runs in the timer ISR — keep it off
-     *         the SD and Ethernet paths.
+     *         dedicated timer (NOT the ADC). Runs in the timer ISR; delegates to the
+     *         telemetry pipeline. Keep it off the SD and Ethernet paths.
      * @param  now_ms  Current millisecond tick (e.g. HAL_GetTick()).
      */
-    void produceRecord(uint32_t now_ms);
+    void produceRecord(uint32_t now_ms) { telemetry_.produce(now_ms); }
 
 private:
-    void        sendValveCmd(uint8_t valve, uint8_t cmd);
-    void        canTick();
-    void        handleStateRequest(std::span<const uint8_t> payload);
-    void        handleSetValvePosition(std::span<const uint8_t> payload);
-    void        handleDatagram(std::span<const uint8_t> payload);
-    void        rxTick();
-    FcuSystemState buildSystemState(const AdcInfo& adc, uint32_t now_ms);
-    void        logAppend(const FcuSystemState& record);
-    void        watchdogTick();
-    // Single GS egress: batch a run of fixed-size telemetry records into UDP datagrams
-    // tagged with their source board id + state. Used for both the FCU's own records
-    // (record_size = sizeof(FcuSystemState)) and the reassembled ECU records relayed off
-    // the CAN bus (record_size = sizeof(EcuSystemState)) — hence the explicit stride.
-    void        sendToGs(BoardId sourceId, uint8_t sourceState,
-                         std::span<const uint8_t> records, std::size_t record_size);
-    void        drainTick();
+    // A Pong from the ECU answering a ping we forwarded (Response/Pong on CAN).
+    [[nodiscard]] static bool isPong(const CanHeader& header)
+    {
+        return static_cast<PayloadType>(header.frame.payload_type) == PayloadType::Response &&
+               static_cast<ResponseType>(header.frame.payload_id) == ResponseType::Pong;
+    }
 
-    S&                  storage_;        // injected backing store, used as a Storage explicitly
-    V&                  fill_valve_;      // injected Fill / Dump valves, read for telemetry
-    V&                  dump_valve_;
-    A&                  adc_;            // injected streaming ADC; produceRecord() drains its ring
-    E&                  eth_;            // injected UDP link; rx in rxTick(), tx in sendBatched()
-    C&                  can_;            // injected CAN bus; drained in canTick(), tx in sendValveCmd()
-    detail::FillStation fill_{};
-    detail::LogBuffer   log_;            // .axisram in firmware; left uninitialised until init()
-    volatile uint32_t   last_adc_ms_ = 0;  // last tick a conversion was drained; gates the silent-ADC filler
-    logic::communication::can::SystemStateReassembler ecu_reassembler_;  // rebuilds ECU telemetry from CAN
-
-    static_assert(std::extent_v<decltype(SystemStateBase::valve_info)> == 2,
-                  "FcuSystemState expects exactly two valves (Fill, Dump)");
+    Communication<E, C>                     comm_;       // declared first: the others hold a ref to it
+    Telemetry<S, V, A, Communication<E, C>> telemetry_;
+    Control<V, Communication<E, C>>         control_;
 };
 
 } // namespace logic::fcu
-
-#include "fcu_controller.tpp"

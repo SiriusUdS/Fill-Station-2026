@@ -7,7 +7,7 @@
  *
  * logic::control::State is the single source of truth, mirroring how CommandType
  * is the SSOT for command ids: the enumerator value IS the wire/telemetry
- * encoding shared with the ground station (carried in EthernetHeader.deviceState
+ * encoding shared with the ground station (carried in EthernetHeader.sender_state
  * and the SetState payload). Never spell these values anywhere else.
  * ------------------------------------------------------------------------- */
 

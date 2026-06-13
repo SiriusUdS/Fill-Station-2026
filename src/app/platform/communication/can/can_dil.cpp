@@ -22,7 +22,7 @@ using logic::communication::MAX_PAYLOAD_LENGTH_BYTES;
 namespace {
 
 /* CAN extended-identifier layout: the target id occupies a 4-bit field that
-   starts at bit 4 (senderID is the low nibble). The RX filter matches on it. */
+   starts at bit 4 (sender_id is the low nibble). The RX filter matches on it. */
 constexpr uint32_t TARGET_ID_SHIFT_BITS = 4;
 constexpr uint32_t TARGET_ID_WIDTH_BITS = 4;
 constexpr uint32_t TARGET_ID_MASK =
@@ -54,6 +54,26 @@ FDCAN_HandleTypeDef* s_hfdcan = nullptr;
    loop. */
 CanInfo s_info{};
 
+/* FDCAN latches CCCR.INIT and stops participating in the bus — RX and ACK included —
+   when it enters bus-off, and it does NOT self-recover: software must clear INIT. This
+   bites when the peer power-cycles. A frame queued with auto-retransmission gets no ACK
+   while the peer is down, the transmit error counter runs to bus-off, INIT latches, and
+   the link never returns even after the peer is back (the deaf node won't ACK, so the
+   peer bus-offs too). Detect bus-off here and kick off the standard FDCAN recovery:
+   clearing INIT makes the controller wait for 128x11 recessive bits, then rejoin. We
+   keep the HAL State as-is (still "started") and just toggle the register, so the next
+   receive()/send() keep working once the bus is healthy again. Clearing INIT when it is
+   already clear (during the recovery wait) is a harmless no-op. */
+void recoverIfBusOff()
+{
+    if (s_hfdcan == nullptr) {
+        return;
+    }
+    if ((s_hfdcan->Instance->PSR & FDCAN_PSR_BO) != 0u) {
+        CLEAR_BIT(s_hfdcan->Instance->CCCR, FDCAN_CCCR_INIT);  // begin bus-off recovery
+    }
+}
+
 } // namespace
 
 /* -------------------------------------------------------------------------- */
@@ -65,6 +85,19 @@ namespace platform::communication::can {
 std::optional<CanError> Can::init(FDCAN_HandleTypeDef* hfdcan, uint8_t nodeId)
 {
     s_hfdcan = hfdcan;
+
+    // Disable automatic retransmission (CCCR.DAR). With it on, a frame that is not
+    // ACKed — e.g. while the peer is power-cycled — is retried forever, runs the error
+    // counter to bus-off, and (with the recovery above) just bus-off/recovers in a loop.
+    // With it off, an un-ACKed frame is dropped after one attempt, so the link stays
+    // healthy when the peer is absent. Set here in the driver (config-in-code) rather
+    // than the CubeMX .ioc, while the peripheral is still in config mode (INIT/CCE set
+    // by MX_FDCAN1_Init, before HAL_FDCAN_Start below).
+    //
+    // The trade: CAN TX is now best-effort. That is fine for ECU->FCU telemetry (already
+    // downsampled / best-effort), but FCU->ECU commands must NOT be fire-and-forget —
+    // each needs its own response + retry at the application layer (see Control).
+    SET_BIT(hfdcan->Instance->CCCR, FDCAN_CCCR_DAR);
 
     FDCAN_FilterTypeDef filter{};
     filter.IdType       = FDCAN_EXTENDED_ID;
@@ -138,6 +171,8 @@ std::optional<CanError> Can::send(const CanFrame& frame)
 
 std::optional<CanFrame> Can::receive()
 {
+    recoverIfBusOff();  // self-heal a latched bus-off (e.g. after the peer power-cycled)
+
     if (s_rxRing.tail == s_rxRing.head) {
         return std::nullopt;  // ring empty
     }

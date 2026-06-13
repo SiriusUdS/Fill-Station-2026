@@ -10,7 +10,8 @@
 #include "communication/interfaces/can.hpp"                     // logic::communication::CanFrame
 #include "communication/protocol/telemetry/ecu_system_state.hpp"  // EcuSystemState (the record fragmented over CAN)
 #include "framing/can_header.hpp"                               // CanHeader
-#include "communication/protocol/telemetry/telemetry_id.hpp"    // TelemetryId::SystemState
+#include "framing/payload_type.hpp"                             // PayloadType::Telemetry
+#include "communication/protocol/telemetry/telemetry_type.hpp"  // TelemetryType::SystemState
 #include "communication/protocol/system/board_id.hpp"          // BoardId
 
 /* ------------------------------------------------------------------------- *
@@ -23,8 +24,8 @@
  * FcuSystemState straight over Ethernet, so it never needs this codec.
  *
  * Wire format, per fragment (one CAN frame):
- *   - 29-bit id  = CanHeader { senderID, targetID, messageID = TelemetryId::SystemState,
- *                              deviceState = 4-bit record sequence }
+ *   - 29-bit id  = CanHeader { sender_id, target_id, payload_id = TelemetryType::SystemState,
+ *                              sender_state = 4-bit record sequence }
  *   - data[0]    = fragment index (0 .. SYSTEM_STATE_FRAGMENTS-1)
  *   - data[1..]  = up to FRAGMENT_PAYLOAD_BYTES of the record's bytes
  * The record sequence lets the receiver detect record boundaries and drop a record
@@ -48,10 +49,11 @@ inline void packSystemState(const EcuSystemState& record, BoardId sender, BoardI
     const auto* bytes = reinterpret_cast<const uint8_t*>(&record);
 
     CanHeader header = {};
-    header.frame.senderID    = static_cast<uint8_t>(sender);
-    header.frame.targetID    = static_cast<uint8_t>(target);
-    header.frame.deviceState = seq & 0x0F;
-    header.frame.messageID   = static_cast<uint8_t>(TelemetryId::SystemState);
+    header.frame.sender_id    = static_cast<uint8_t>(sender);
+    header.frame.target_id    = static_cast<uint8_t>(target);
+    header.frame.sender_state = seq & 0x0F;
+    header.frame.payload_type = static_cast<uint8_t>(PayloadType::Telemetry);
+    header.frame.payload_id   = static_cast<uint8_t>(TelemetryType::SystemState);
 
     for (std::size_t i = 0; i < SYSTEM_STATE_FRAGMENTS; ++i) {
         CanFrame& f = out[i];
@@ -65,7 +67,7 @@ inline void packSystemState(const EcuSystemState& record, BoardId sender, BoardI
     }
 }
 
-/* Reassembles EcuSystemState records from inbound TelemetryId::SystemState fragments,
+/* Reassembles EcuSystemState records from inbound TelemetryType::SystemState fragments,
    one record at a time. Feed every frame; a completed record is returned exactly once. */
 class SystemStateReassembler {
 public:
@@ -73,10 +75,12 @@ public:
     {
         CanHeader header;
         header.code = frame.id;
-        if (static_cast<TelemetryId>(header.frame.messageID) != TelemetryId::SystemState || frame.length < 1) {
+        if (static_cast<PayloadType>(header.frame.payload_type) != PayloadType::Telemetry
+            || static_cast<TelemetryType>(header.frame.payload_id) != TelemetryType::SystemState
+            || frame.length < 1) {
             return std::nullopt;
         }
-        const uint8_t seq = static_cast<uint8_t>(header.frame.deviceState) & 0x0F;
+        const uint8_t seq = static_cast<uint8_t>(header.frame.sender_state) & 0x0F;
         const uint8_t idx = frame.data[0];
         if (idx >= SYSTEM_STATE_FRAGMENTS) {
             return std::nullopt;

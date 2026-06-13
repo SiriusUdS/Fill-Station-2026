@@ -4,7 +4,7 @@
  * The logic is exercised purely through its public surface (init/tick) and the
  * communication interfaces, which the FakeBus stands in for. The state machine
  * keeps its state in battery-backed persistent_state; telemetry is no longer a
- * per-tick heartbeat (the TelemetryId::SystemState SystemState packet is now produced on the
+ * per-tick heartbeat (the TelemetryType::SystemState SystemState packet is now produced on the
  * record timer, see produceRecord), so the state-machine tests read the current
  * state straight from persistent_state via currentState().
  * ------------------------------------------------------------------------- */
@@ -21,12 +21,17 @@
 #include "control/persistent_state.hpp"
 #include "system/state.hpp"
 #include "framing/can_header.hpp"
+#include "framing/payload_type.hpp"
 
-#include "framing/udp_frame.hpp"
 #include "system/state.hpp"
-#include "telemetry/telemetry_id.hpp"
+#include "telemetry/telemetry_type.hpp"
 #include "system/board_id.hpp"
 #include "command/command_type.hpp"
+#include "communication/protocol/framing/system_state_codec.hpp"   // packSystemState (ECU telemetry fragments)
+#include "communication/protocol/telemetry/ecu_system_state.hpp"   // EcuSystemState
+
+#include <array>
+#include <span>
 
 #include <gtest/gtest.h>
 
@@ -39,19 +44,22 @@ using logic::communication::command::CommandType;
 
 namespace {
 
-/* Byte offset, within the UDP payload, of the requested-state field of a
-   CommandType::SetState command. Mirrors REQUEST_STATE_OFFSET_BYTES in the logic. */
-constexpr std::size_t REQUEST_STATE_OFFSET = 15;
-
-/* Build a CommandType::SetState datagram addressed to `device`, asking for `requested`. */
+/* Build a CommandType::SetState datagram addressed to `device`, asking for `requested`:
+   a 12-byte EthernetHeader followed by the 2-byte SetStateFrame (the canonical wire
+   layout the Ethernet command parser reads). */
 std::vector<uint8_t> makeStateRequest(BoardId device, logic::control::State requested)
 {
-    std::vector<uint8_t> payload(REQUEST_STATE_OFFSET + 1, 0);
-    UDPPacketHeader header = {};
-    header.frame.deviceID  = static_cast<uint8_t>(device);
-    header.frame.payloadID = static_cast<uint8_t>(CommandType::SetState);
-    std::memcpy(payload.data(), header.bytes, sizeof(UDPPacketHeader));
-    payload[REQUEST_STATE_OFFSET] = static_cast<uint8_t>(requested);
+    EthernetHeader header = {};
+    header.target_id    = static_cast<uint8_t>(device);
+    header.payload_type = static_cast<uint8_t>(PayloadType::Command);
+    header.payload_id   = static_cast<uint8_t>(CommandType::SetState);
+    header.payload_size_bytes = static_cast<uint16_t>(sizeof(SetStateFrame));
+
+    const SetStateFrame body{0, static_cast<uint8_t>(requested)};
+
+    std::vector<uint8_t> payload(sizeof(EthernetHeader) + sizeof(SetStateFrame));
+    std::memcpy(payload.data(), &header, sizeof(EthernetHeader));
+    std::memcpy(payload.data() + sizeof(EthernetHeader), &body, sizeof(SetStateFrame));
     return payload;
 }
 
@@ -60,9 +68,10 @@ CanFrame makeCanFrame(BoardId sender, BoardId target, uint8_t messageId,
                       std::array<uint8_t, 8> data = {})
 {
     CanHeader header        = {};
-    header.frame.senderID   = static_cast<uint8_t>(sender);
-    header.frame.targetID   = static_cast<uint8_t>(target);
-    header.frame.messageID  = messageId;
+    header.frame.sender_id    = static_cast<uint8_t>(sender);
+    header.frame.target_id    = static_cast<uint8_t>(target);
+    header.frame.payload_type = static_cast<uint8_t>(PayloadType::Command);
+    header.frame.payload_id   = messageId;
 
     CanFrame frame;
     frame.id     = header.code;
@@ -133,9 +142,9 @@ TEST_F(FcuControllerTest, StartsAtInitAndFirstTickEntersSafe)
 }
 
 /* Telemetry is no longer a per-tick heartbeat: SystemState records are produced
-   on the record timer (produceRecord) and batched into TelemetryId::SystemState datagrams when
+   on the record timer (produceRecord) and batched into TelemetryType::SystemState datagrams when
    a 4096-byte half fills and drains. Pump records until that happens and check
-   the downlinked packet is a well-formed TelemetryId::SystemState frame. */
+   the downlinked packet is a well-formed TelemetryType::SystemState frame. */
 TEST_F(FcuControllerTest, FullTelemetryBufferDownlinksGetSystem)
 {
     reachSafe();  // also clears udp_tx
@@ -152,8 +161,8 @@ TEST_F(FcuControllerTest, FullTelemetryBufferDownlinksGetSystem)
     ASSERT_GE(payload.size(), sizeof(EthernetHeader));
     EthernetHeader header;
     std::memcpy(&header, payload.data(), sizeof(EthernetHeader));
-    EXPECT_EQ(header.deviceID, static_cast<uint8_t>(BoardId::FillingStation));
-    EXPECT_EQ(header.payloadID, static_cast<uint8_t>(TelemetryId::SystemState));
+    EXPECT_EQ(header.sender_id, static_cast<uint8_t>(BoardId::FillingStation));
+    EXPECT_EQ(header.payload_id, static_cast<uint8_t>(TelemetryType::SystemState));
 }
 
 TEST_F(FcuControllerTest, EveryTickServicesTheLink)
@@ -298,19 +307,52 @@ TEST_F(FcuControllerTest, TrafficKeepsUnsafeAlive)
 
 TEST_F(FcuControllerTest, IncomingCanFrameProducesNoReply)
 {
-    bus().push_can(makeCanFrame(BoardId::Engine, BoardId::FillingStation, static_cast<uint8_t>(TelemetryId::SystemState)));
+    bus().push_can(makeCanFrame(BoardId::Engine, BoardId::FillingStation, static_cast<uint8_t>(TelemetryType::SystemState)));
     step();
     EXPECT_TRUE(bus().can_tx.empty());
 }
 
 TEST_F(FcuControllerTest, AllQueuedCanFramesAreDrainedInOneTick)
 {
-    bus().push_can(makeCanFrame(BoardId::Engine, BoardId::FillingStation, static_cast<uint8_t>(TelemetryId::SystemState)));
-    bus().push_can(makeCanFrame(BoardId::Engine, BoardId::FillingStation, static_cast<uint8_t>(TelemetryId::SystemState)));
-    bus().push_can(makeCanFrame(BoardId::Engine, BoardId::FillingStation, static_cast<uint8_t>(TelemetryId::SystemState)));
+    bus().push_can(makeCanFrame(BoardId::Engine, BoardId::FillingStation, static_cast<uint8_t>(TelemetryType::SystemState)));
+    bus().push_can(makeCanFrame(BoardId::Engine, BoardId::FillingStation, static_cast<uint8_t>(TelemetryType::SystemState)));
+    bus().push_can(makeCanFrame(BoardId::Engine, BoardId::FillingStation, static_cast<uint8_t>(TelemetryType::SystemState)));
     step();
     EXPECT_TRUE(bus().can_rx.empty());  // all drained in one tick
     EXPECT_TRUE(bus().can_tx.empty());  // and never answered
+}
+
+/* A full EcuSystemState, fragmented over CAN exactly as the ECU sends it, must be
+   reassembled and relayed to the GS tagged as the ECU's (sender BoardId::Engine).
+   This drives the real codec end to end, so it pins the relay path the GS depends on. */
+TEST_F(FcuControllerTest, EcuTelemetryIsReassembledAndRelayedToGs)
+{
+    namespace codec = logic::communication::can;
+    reachSafe();  // clears udp_tx / can_tx
+
+    EcuSystemState record{};
+    record.base.creation_timestamp_ms = 0xABCDEF01;  // a marker to find on the GS side
+
+    std::array<CanFrame, codec::SYSTEM_STATE_FRAGMENTS> frames;
+    codec::packSystemState(record, BoardId::Engine, BoardId::FillingStation, /*seq=*/0,
+                           std::span<CanFrame, codec::SYSTEM_STATE_FRAGMENTS>(frames));
+    for (const auto& f : frames) {
+        bus().push_can(f);
+    }
+
+    step();  // controller drains CAN, reassembles, relays to the GS
+
+    ASSERT_FALSE(bus().udp_tx.empty()) << "reassembled ECU record was not relayed to the GS";
+    const auto& payload = bus().udp_tx.back().payload;
+    ASSERT_GE(payload.size(), sizeof(EthernetHeader) + sizeof(EcuSystemState));
+    EthernetHeader header;
+    std::memcpy(&header, payload.data(), sizeof(EthernetHeader));
+    EXPECT_EQ(header.sender_id, static_cast<uint8_t>(BoardId::Engine));  // tagged as the ECU's
+    EXPECT_EQ(header.payload_id, static_cast<uint8_t>(TelemetryType::SystemState));
+
+    EcuSystemState relayed{};
+    std::memcpy(&relayed, payload.data() + sizeof(EthernetHeader), sizeof(EcuSystemState));
+    EXPECT_EQ(relayed.base.creation_timestamp_ms, 0xABCDEF01u);  // bytes round-tripped intact
 }
 
 /* ---- Persistent state (Backup SRAM) -------------------------------------- */

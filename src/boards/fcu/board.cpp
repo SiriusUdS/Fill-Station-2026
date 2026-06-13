@@ -143,11 +143,10 @@ void wireDrivers(void)
       .opened_switch_ignored  = true,
   });
 
-  /* Safe boot state: drive both valves closed (no flow) before logic starts. */
-  (void)g_fill_valve.close();
-  (void)g_dump_valve.close();
-
-  /* Bring up the FCU controller (this also mounts the SD card via g_card.init()). */
+  /* Bring up the FCU controller. It resumes the persisted state and then safes the
+     local valves (drives them closed) through the control layer — actuation is the
+     control layer's authority, so boot-safing lives there, not in board bring-up.
+     This also mounts the SD card via g_card.init(). */
   g_controller.init();
 
   /* Start the record-production timer last, so records only flow once the logic
