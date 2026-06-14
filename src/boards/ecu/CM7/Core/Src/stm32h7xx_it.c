@@ -46,12 +46,36 @@
 
 /* Private function prototypes -----------------------------------------------*/
 /* USER CODE BEGIN PFP */
-
+/* Make the generated HardFault_Handler naked so the trampoline in it captures the exact
+   exception stack frame (no C prologue to shift the stack pointer first). */
+void HardFault_Handler(void) __attribute__((naked));
+void HardFault_Capture(uint32_t *frame);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+/* Hard fault capture. The naked HardFault_Handler trampolines here with r0 = the faulting
+   exception stack frame. Read these in the debugger after the trap:
+     g_fault_pc   = the faulting instruction (look it up in the .map / disassembly)
+     g_fault_lr   = link register at the fault
+     g_fault_cfsr = Configurable Fault Status (0xE000ED28): the fault type + flags
+                    (bit 15 BFARVALID -> g_fault_bfar holds the faulting data address;
+                     bits 8-15 BusFault, 16-25 UsageFault, 0-7 MemManage)
+     g_fault_hfsr = HardFault Status (0xE000ED2C): bit 30 FORCED = escalated config fault */
+volatile uint32_t g_fault_pc, g_fault_lr, g_fault_psr;
+volatile uint32_t g_fault_cfsr, g_fault_hfsr, g_fault_bfar, g_fault_mmfar;
 
+void HardFault_Capture(uint32_t *frame)
+{
+    g_fault_lr    = frame[5];
+    g_fault_pc    = frame[6];   /* stacked return address = the faulting instruction */
+    g_fault_psr   = frame[7];
+    g_fault_cfsr  = *(volatile uint32_t *)0xE000ED28u;
+    g_fault_hfsr  = *(volatile uint32_t *)0xE000ED2Cu;
+    g_fault_mmfar = *(volatile uint32_t *)0xE000ED34u;
+    g_fault_bfar  = *(volatile uint32_t *)0xE000ED38u;
+    while (1) { }
+}
 /* USER CODE END 0 */
 
 /* External variables --------------------------------------------------------*/
@@ -84,7 +108,13 @@ void NMI_Handler(void)
 void HardFault_Handler(void)
 {
   /* USER CODE BEGIN HardFault_IRQn 0 */
-
+  __asm volatile(
+    "tst lr, #4          \n"   /* EXC_RETURN bit 2: 0 -> faulting frame on MSP, 1 -> PSP */
+    "ite eq              \n"
+    "mrseq r0, msp       \n"
+    "mrsne r0, psp       \n"
+    "b HardFault_Capture \n"
+  );
   /* USER CODE END HardFault_IRQn 0 */
   while (1)
   {
