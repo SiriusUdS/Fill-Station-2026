@@ -78,7 +78,15 @@ constexpr uint16_t LOCAL_PORT      = 55555;
 
 /* ---- RX DMA pool --------------------------------------------------------- */
 constexpr std::size_t RX_BUF_SIZE_BYTES = 1536;
-constexpr std::size_t RX_BUF_COUNT      = 4;
+/* MUST stay strictly greater than ETH_RX_DESC_CNT (4). When the RX ISR pops a frame it
+   immediately re-arms that descriptor via HAL_ETH_RxAllocateCallback (the only path that
+   re-arms RX descriptors). With as many buffers as descriptors there is never a spare buffer
+   at that instant, the callback returns null, the descriptor is left dead, and after the DMA
+   chews through its descriptors RX stops for good (telemetry TX keeps running, masking it).
+   The spare buffers here guarantee the re-arm always finds one — even when a whole halt's worth
+   of frames (the debugger case) is drained in one ISR pass. 12 buffers = 4 descriptors + 8
+   spare, ~18 KB in the 288 KB Ethernet DMA SRAM region. */
+constexpr std::size_t RX_BUF_COUNT      = 12;
 
 /* ---- RX datagram ring for the UDP seam ----------------------------------- */
 constexpr std::size_t MAX_UDP_PAYLOAD_BYTES      = IPV4_MAX_DATA_LEN_BYTES - 8;  // minus UDP header
@@ -341,11 +349,15 @@ namespace platform::communication::ethernet {
 
 void Ethernet::init()
 {
-    HAL_ETH_Start_IT(&heth);
-
+    // Mark the whole pool Free BEFORE starting the peripheral: HAL_ETH_Start_IT immediately
+    // allocates ETH_RX_DESC_CNT buffers through HAL_ETH_RxAllocateCallback and marks them
+    // OwnedDma. Initialising after Start would clobber those marks back to Free, so the pool
+    // would later hand the DMA-owned buffers out a second time (double-use). Order matters.
     for (std::size_t i = 0; i < RX_BUF_COUNT; ++i) {
         rx_buf_status[i] = BufStatus::Free;
     }
+
+    HAL_ETH_Start_IT(&heth);
 
     std::memset(&TxConfig, 0, sizeof(TxConfig));
     TxConfig.Attributes   = ETH_TX_PACKETS_FEATURES_CSUM | ETH_TX_PACKETS_FEATURES_CRCPAD;
@@ -498,16 +510,26 @@ extern "C" void HAL_ETH_RxLinkCallback(void** p_start, void** p_end, uint8_t* bu
 
 extern "C" void HAL_ETH_RxCpltCallback(ETH_HandleTypeDef* eth_handle)
 {
+    // Drain EVERY completed frame, not just one. HAL_ETH_ReadData returns a single frame per
+    // call (it stops at the first complete packet), and the ETH RX interrupt does NOT re-fire
+    // for frames already waiting in the descriptor ring — so reading one frame per interrupt
+    // strands the rest whenever several arrive between ISR entries (a debugger halt fills all
+    // four descriptors; a burst can too). The stranded descriptors are then never re-armed
+    // (ETH_UpdateDescriptor runs only inside ReadData), the DMA runs out of RX descriptors and
+    // command reception stops dead while telemetry TX keeps running. Looping until ReadData
+    // reports no more ready frames empties the ring and re-arms each descriptor from the buffer
+    // pool (RX_BUF_COUNT > ETH_RX_DESC_CNT guarantees a spare buffer for the re-arm) — the same
+    // drain loop ST's reference LwIP port uses.
     uint8_t* rx_buf = nullptr;
-    if (HAL_ETH_ReadData(eth_handle, reinterpret_cast<void**>(&rx_buf)) != HAL_OK) {
-        return;
+    while (HAL_ETH_ReadData(eth_handle, reinterpret_cast<void**>(&rx_buf)) == HAL_OK) {
+        const std::size_t idx =
+            (reinterpret_cast<uintptr_t>(rx_buf) - reinterpret_cast<uintptr_t>(rx_pool)) / RX_BUF_SIZE_BYTES;
+        if (idx < RX_BUF_COUNT) {
+            rx_buf_status[idx] = BufStatus::OwnedCpu;
+            __disable_irq();
+            rx_queue_size = static_cast<uint8_t>(rx_queue_size + 1);
+            __enable_irq();
+        }
+        rx_buf = nullptr;
     }
-
-    const std::size_t idx =
-        (reinterpret_cast<uintptr_t>(rx_buf) - reinterpret_cast<uintptr_t>(rx_pool)) / RX_BUF_SIZE_BYTES;
-    rx_buf_status[idx] = BufStatus::OwnedCpu;
-
-    __disable_irq();
-    rx_queue_size = static_cast<uint8_t>(rx_queue_size + 1);
-    __enable_irq();
 }
