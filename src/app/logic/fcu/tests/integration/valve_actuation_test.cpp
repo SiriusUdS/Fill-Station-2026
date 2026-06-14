@@ -10,6 +10,7 @@
 
 #include "fcu_controller.hpp"
 #include "support/fakes.hpp"   // the standard set of host test doubles
+#include "support/datagram_crc.hpp"   // appendGsCrc (inbound datagrams carry a CRC)
 
 #include "communication/command/command.hpp"             // CommandType
 #include "command/set_valve_position.hpp"  // SetValvePositionFrame, ValveCommand
@@ -44,6 +45,7 @@ std::vector<uint8_t> makeValveCommand(FcuValves valve, ValveCommand action, uint
     std::vector<uint8_t> datagram(sizeof(EthernetHeader) + sizeof(SetValvePositionFrame));
     std::memcpy(datagram.data(), &header, sizeof(EthernetHeader));
     std::memcpy(datagram.data() + sizeof(EthernetHeader), &frame, sizeof(frame));
+    appendGsCrc(datagram);
     return datagram;
 }
 

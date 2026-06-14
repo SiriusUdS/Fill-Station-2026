@@ -93,7 +93,8 @@ public:
     /**
      * @brief Frame @p payload for the ground station and send it: an EthernetHeader
      *        (from @p sourceId to GsControl, tagged @p payloadType / @p payloadId /
-     *        @p sourceState / @p seq / @p now_ms) + the payload + a CRC over the payload.
+     *        @p sourceState / @p seq / @p now_ms) + the payload + a CRC over the header
+     *        AND the payload (the header has no checksum of its own).
      *
      * @p payloadId is opaque here — a TelemetryType, ResponseType, etc. @p seq is the
      * GS's command sequence echoed back on a relayed response (0 for telemetry). The
@@ -121,7 +122,9 @@ public:
         if (chunk != 0) {
             std::memcpy(packet.data() + sizeof(header), payload.data(), chunk);
         }
-        const uint32_t crc = logic::data_integrity::crc32(packet.data() + sizeof(header), chunk);
+        // CRC covers the header AND the payload (the header carries no checksum of its
+        // own), i.e. everything in the datagram up to the CRC field itself.
+        const uint32_t crc = logic::data_integrity::crc32(packet.data(), sizeof(header) + chunk);
         std::memcpy(packet.data() + sizeof(header) + chunk, &crc, sizeof(crc));
 
         (void)eth_.send(gs_, std::span<const uint8_t>(packet.data(), sizeof(header) + chunk + sizeof(crc)));
@@ -157,11 +160,26 @@ public:
 
     /* ---- Ingress ------------------------------------------------------------- */
 
-    /** @brief Pop the next inbound UDP datagram, or std::nullopt. The caller parses it. */
+    /** @brief Pop the next inbound UDP datagram whose trailing CRC checks out, or
+     *         std::nullopt. The CRC covers the EthernetHeader + payload (appended
+     *         little-endian, mirroring sendToGs); a datagram that fails it — too short,
+     *         corrupted, or forged — is dropped and the next is tried, so a bad datagram
+     *         never reaches the parser and does not block the queue. */
     [[nodiscard]] std::optional<logic::communication::Datagram> receiveDatagram()
     {
-        return eth_.receive();
+        while (auto datagram = eth_.receive()) {
+            if (crcValid(datagram->payload)) {
+                return datagram;
+            }
+            if (rx_crc_errors_ != 0xFFFFFFFFu) {
+                ++rx_crc_errors_;   // saturating; a corrupt/forged datagram, dropped
+            }
+        }
+        return std::nullopt;
     }
+
+    /** @brief Count of inbound datagrams dropped for a bad CRC (saturating). */
+    [[nodiscard]] uint32_t rxCrcErrors() const { return rx_crc_errors_; }
 
     /** @brief Pop the next inbound CAN frame with its header decoded, or std::nullopt. */
     [[nodiscard]] std::optional<InboundFrame> receiveFrame()
@@ -182,9 +200,25 @@ public:
     [[nodiscard]] ::CanInfo      canInfo() const { return can_.info(); }
 
 private:
+    // Verify the trailing CRC-32 the sender appended over the EthernetHeader + payload
+    // (little-endian). Rejects a datagram too short to hold a header + CRC, or whose CRC
+    // does not match — the same coverage sendToGs writes, so the two ends agree.
+    [[nodiscard]] static bool crcValid(std::span<const uint8_t> datagram)
+    {
+        if (datagram.size() < sizeof(EthernetHeader) + sizeof(uint32_t)) {
+            return false;
+        }
+        const std::size_t covered = datagram.size() - sizeof(uint32_t);
+        const uint32_t    expected = logic::data_integrity::crc32(datagram.data(), covered);
+        uint32_t received = 0;
+        std::memcpy(&received, datagram.data() + covered, sizeof(received));
+        return received == expected;
+    }
+
     E&                             eth_;   // injected UDP link to the GS
     C&                             can_;   // injected CAN bus to the ECU
     logic::communication::Endpoint gs_{};  // ground-station endpoint (resolved in init())
+    uint32_t                       rx_crc_errors_ = 0;  // inbound datagrams dropped for a bad CRC
 };
 
 } // namespace logic::fcu

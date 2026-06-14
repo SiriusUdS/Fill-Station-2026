@@ -15,6 +15,7 @@
 
 #include "fcu_controller.hpp"
 #include "support/fakes.hpp"   // the standard set of host test doubles
+#include "support/datagram_crc.hpp"   // appendGsCrc (inbound datagrams carry a CRC)
 
 #include "communication/command/command.hpp"     // CommandType
 #include "control/persistent_state.hpp"
@@ -48,6 +49,7 @@ std::vector<uint8_t> makePingCommand(uint8_t seq = 0)
 
     std::vector<uint8_t> datagram(sizeof(EthernetHeader));
     std::memcpy(datagram.data(), &header, sizeof(EthernetHeader));
+    appendGsCrc(datagram);
     return datagram;
 }
 

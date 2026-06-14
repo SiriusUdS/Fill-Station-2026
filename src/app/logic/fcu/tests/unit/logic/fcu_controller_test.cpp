@@ -28,6 +28,8 @@
 #include "communication/protocol/telemetry/ecu_system_state.hpp"   // EcuSystemState
 #include "communication/protocol/telemetry/fcu_system_state.hpp"   // FcuSystemState
 #include "communication/protocol/telemetry/fcu_extended_system_state.hpp"   // FcuExtendedSystemState (thermocouples)
+#include "data_integrity/crc32.hpp"   // logic::data_integrity::crc32 (validate the downlink CRC coverage)
+#include "support/datagram_crc.hpp"   // appendGsCrc (inbound datagrams carry a CRC)
 
 #include <array>
 #include <span>
@@ -59,6 +61,7 @@ std::vector<uint8_t> makeStateRequest(BoardId device, logic::control::State requ
     std::vector<uint8_t> payload(sizeof(EthernetHeader) + sizeof(SetStateFrame));
     std::memcpy(payload.data(), &header, sizeof(EthernetHeader));
     std::memcpy(payload.data() + sizeof(EthernetHeader), &body, sizeof(SetStateFrame));
+    appendGsCrc(payload);
     return payload;
 }
 
@@ -290,6 +293,43 @@ TEST_F(FcuControllerTest, EachTickServicesTheThermocoupleBank)
     step();
     step();
     EXPECT_GT(tc_.service_calls, before);
+}
+
+/* The downlink CRC covers the EthernetHeader + payload (everything up to the CRC), and
+   is appended little-endian — the contract the GS must reproduce. */
+TEST_F(FcuControllerTest, DownlinkCrcCoversHeaderAndPayload)
+{
+    reachSafe();
+    controller_.tick(now_ms_ += 150);   // emit at least the ExtendedSystemState datagram
+    ASSERT_FALSE(bus().udp_tx.empty());
+
+    const auto& dg = bus().udp_tx.front().payload;
+    ASSERT_GE(dg.size(), sizeof(EthernetHeader) + sizeof(uint32_t));
+
+    const std::size_t covered  = dg.size() - sizeof(uint32_t);   // header + payload, all but the CRC
+    const uint32_t    expected = logic::data_integrity::crc32(dg.data(), covered);
+    uint32_t received = 0;
+    std::memcpy(&received, dg.data() + covered, sizeof(received));   // appended little-endian
+    EXPECT_EQ(received, expected) << "downlink CRC must cover the EthernetHeader + payload, LE";
+}
+
+/* An inbound datagram whose CRC does not check out is dropped before it reaches the
+   command handler; the same datagram with a good CRC is applied. */
+TEST_F(FcuControllerTest, InboundDatagramWithBadCrcIsRejected)
+{
+    reachSafe();   // state SAFE; SAFE -> UNSAFE is a legal transition
+
+    std::vector<uint8_t> good = makeStateRequest(BoardId::FillingStation, logic::control::State::Unsafe);
+    std::vector<uint8_t> bad  = good;
+    bad.back() ^= 0xFFu;   // corrupt the trailing CRC
+
+    bus().push_udp(Endpoint{}, bad);
+    step();
+    EXPECT_EQ(currentState(), logic::control::State::Safe) << "a bad-CRC command must be ignored";
+
+    bus().push_udp(Endpoint{}, good);
+    step();
+    EXPECT_EQ(currentState(), logic::control::State::Unsafe) << "the same command with a valid CRC applies";
 }
 
 TEST_F(FcuControllerTest, EveryTickServicesTheLink)
