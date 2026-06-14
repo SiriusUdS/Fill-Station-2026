@@ -26,20 +26,12 @@
  * ping. The CAN-only sibling of logic::fcu::Control.
  *
  * It speaks to the wire only through the injected Communication layer; it never
- * touches can_ directly. Commands arrive frame-encoded (the action rides in the
- * header's sender_state, the valve index in the payload), so this decodes the
+ * touches can_ directly. Commands arrive as the verbatim GS command payload bridged
+ * by the FCU over CAN (the same bytes the GS sent), so this decodes each payload
  * frame directly rather than via the Command parser.
  * ------------------------------------------------------------------------- */
 
 namespace logic::ecu {
-
-namespace detail {
-
-/* Byte offset of the valve index in a CommandType::SetValvePosition frame (mirrors the
-   FCU's sendValveCmd: data[0..3] = timestamp, data[4] = valve index). */
-inline constexpr std::size_t CMD_VALVE_INDEX_OFFSET = sizeof(uint32_t);
-
-} // namespace detail
 
 /**
  * @brief The ECU control layer, parameterised on the valve type it actuates and
@@ -93,28 +85,38 @@ public:
     }
 
 private:
-    // Drive one of the ECU's valves from a SetValvePosition frame: the valve index is at
-    // data[4] (EcuValves::IPA / NOS); the open/close action is in the header's
-    // sender_state (ValveCommand::Open / ValveCommand::Close).
+    // Drive one of the ECU's valves from a SetValvePosition command bridged from the GS
+    // (relayed by the FCU over CAN). The 3-byte SetValvePositionFrame rides verbatim in the
+    // payload (data[0] = valve index, data[1] = action, data[2] = value), decoded exactly as
+    // the FCU encoded it; the valve byte selects EcuValves::IPA / NOS. After driving the valve,
+    // Ack back to the FCU echoing the seq so the reliable relay matches the reply and stops
+    // retrying (Gs->Fcu->Ecu, Ack: Ecu->Fcu->Gs).
     void handleValveCmd(const logic::communication::CanFrame& frame, const CanHeader& header)
     {
-        if (frame.length <= detail::CMD_VALVE_INDEX_OFFSET) {
-            return;  // frame too short to carry a valve index
+        if (frame.length < sizeof(SetValvePositionFrame)) {
+            return;  // frame too short to carry the valve frame
         }
-        const auto valve_id = static_cast<EcuValves>(frame.data[detail::CMD_VALVE_INDEX_OFFSET]);
+        SetValvePositionFrame payload;
+        std::memcpy(&payload, frame.data.data(), sizeof(payload));
 
+        const auto valve_id = static_cast<EcuValves>(static_cast<uint8_t>(payload.valve));
         V* valve = (valve_id == EcuValves::IPA) ? &ipa_valve_
                  : (valve_id == EcuValves::NOS) ? &nos_valve_
                  : nullptr;
         if (valve == nullptr) {
-            return;  // unknown valve id
+            return;  // unknown valve id — do not Ack a command we did not apply
         }
 
-        switch (static_cast<ValveCommand>(header.frame.sender_state)) {
+        switch (payload.action) {
             case ValveCommand::Open:         (void)valve->open();  break;
             case ValveCommand::Close:        (void)valve->close(); break;
             case ValveCommand::SetOpenedPct: break;  // not used for the ECU's on/off propellant valves
         }
+
+        // Generic acknowledgement: the command was received AND applied. Echoes the seq.
+        comm_.sendToFcu(PayloadType::Response, static_cast<uint8_t>(ResponseType::Ack),
+                        /*senderState=*/0, /*seq=*/static_cast<uint8_t>(header.frame.seq),
+                        std::span<const uint8_t>{});
     }
 
     // Apply a SetControlFlag command bridged from the GS (relayed by the FCU over CAN):

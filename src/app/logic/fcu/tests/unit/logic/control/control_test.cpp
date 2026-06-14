@@ -76,11 +76,12 @@ std::vector<uint8_t> makeSetState(State requested, BoardId target = BoardId::Fil
                        reinterpret_cast<const uint8_t*>(&body), sizeof(body));
 }
 
-std::vector<uint8_t> makeSetValve(FcuValves valve, ValveCommand action, uint8_t value = 0)
+std::vector<uint8_t> makeSetValve(FcuValves valve, ValveCommand action, uint8_t value = 0,
+                                  BoardId target = BoardId::FillingStation, uint8_t seq = 0)
 {
     const SetValvePositionFrame body{valve, action, value};
-    return makeCommand(command::CommandType::SetValvePosition, BoardId::FillingStation,
-                       reinterpret_cast<const uint8_t*>(&body), sizeof(body));
+    return makeCommand(command::CommandType::SetValvePosition, target,
+                       reinterpret_cast<const uint8_t*>(&body), sizeof(body), seq);
 }
 
 std::vector<uint8_t> makePing(uint8_t seq = 0)
@@ -257,13 +258,14 @@ TEST_F(ControlTest, InitDrivesLocalValvesClosed)
     EXPECT_EQ(dump_valve_.open_calls, 0);
 }
 
-/* ---- SetValvePosition (actuates a local valve) --------------------------- */
+/* ---- SetValvePosition (local actuation, bridge to ECU, or both) ---------- */
 
 TEST_F(ControlTest, ValidValveActionActuatesLocalValve)
 {
     deliver(makeSetValve(FcuValves::Fill, ValveCommand::Open));
     EXPECT_EQ(fill_valve_.open_calls, 1);
     EXPECT_EQ(dump_valve_.open_calls, 0);
+    EXPECT_TRUE(bus().can_tx.empty());   // FillingStation-targeted: actuated here, no ECU hop
 }
 
 TEST_F(ControlTest, UnknownValveActionIsRejected)
@@ -272,6 +274,53 @@ TEST_F(ControlTest, UnknownValveActionIsRejected)
     EXPECT_EQ(fill_valve_.open_calls, 0);
     EXPECT_EQ(fill_valve_.close_calls, 0);
     EXPECT_EQ(fill_valve_.percent_calls, 0);
+}
+
+TEST_F(ControlTest, EngineValveCommandBridgesOverCanWithoutLocalActuation)
+{
+    setCurrent(State::Safe);
+    deliver(makeSetValve(FcuValves::Fill, ValveCommand::Open, /*value=*/0,
+                         BoardId::Engine, /*seq=*/6));
+
+    EXPECT_EQ(fill_valve_.open_calls, 0);   // not ours to drive — relayed to the ECU
+    EXPECT_TRUE(bus().udp_tx.empty());      // the ECU Acks; the FCU does not Ack locally
+
+    ASSERT_EQ(bus().can_tx.size(), 1u);
+    const auto& sent = bus().can_tx.front();
+    CanHeader header;
+    header.code = sent.id;
+    EXPECT_EQ(static_cast<BoardId>(header.frame.target_id), BoardId::Engine);
+    EXPECT_EQ(static_cast<PayloadType>(header.frame.payload_type), PayloadType::Command);
+    EXPECT_EQ(static_cast<command::CommandType>(header.frame.payload_id),
+              command::CommandType::SetValvePosition);
+    EXPECT_EQ(header.frame.seq, 6u);        // GS seq propagated onto the CAN hop
+    ASSERT_GE(sent.length, sizeof(SetValvePositionFrame));
+    EXPECT_EQ(sent.data[0], static_cast<uint8_t>(FcuValves::Fill));  // valve + action carried verbatim
+    EXPECT_EQ(sent.data[1], static_cast<uint8_t>(ValveCommand::Open));
+}
+
+TEST_F(ControlTest, BroadcastValveCommandActuatesLocallyAndBridges)
+{
+    setCurrent(State::Safe);
+    deliver(makeSetValve(FcuValves::Fill, ValveCommand::Open, /*value=*/0,
+                         BoardId::Broadcast, /*seq=*/2));
+
+    EXPECT_EQ(fill_valve_.open_calls, 1);   // actuated locally
+    EXPECT_EQ(bus().can_tx.size(), 1u);     // and bridged to the ECU
+}
+
+TEST_F(ControlTest, AckFromEcuClearsThePendingBridgedValveCommand)
+{
+    setCurrent(State::Safe);
+    deliver(makeSetValve(FcuValves::Fill, ValveCommand::Open, /*value=*/0,
+                         BoardId::Engine, /*seq=*/8));
+    ASSERT_EQ(bus().can_tx.size(), 1u);   // bridged once
+
+    control_.onResponse(static_cast<uint8_t>(ResponseType::Ack), /*seq=*/8, ++now_ms_);
+
+    now_ms_ += logic::fcu::detail::COMMAND_TIMEOUT_MS * 4;
+    control_.servicePending(now_ms_);
+    EXPECT_EQ(bus().can_tx.size(), 1u);   // cleared by the Ack — never resent
 }
 
 /* ---- Pong (Ecu->Fcu->Gs) ------------------------------------------------- */

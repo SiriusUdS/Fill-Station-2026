@@ -92,7 +92,7 @@ public:
         if (!cmd) {
             return;  // not a command / malformed / unknown id
         }
-        if (!addressedToUs(cmd->type, static_cast<BoardId>(cmd->target))) {
+        if (!addressedToUs(static_cast<BoardId>(cmd->target))) {
             return;  // addressed to a board we neither act for nor bridge to
         }
         (void)handleCommand(*cmd, now_ms);
@@ -158,26 +158,15 @@ private:
 
     /* ---- Addressing + gate + dispatch ---------------------------------------- */
 
-    // Is a command bridgeable to the ECU? The FCU is a bridge for these: the GS may target
-    // them at the Engine and the FCU relays them over CAN (Ping tests the link; SetControlFlag
-    // sets an ECU-side flag). Every other command is FCU-local only.
-    [[nodiscard]] static bool isBridgeable(CommandType type)
+    // Should the FCU act on a command with this target? Yes for FillingStation / Broadcast
+    // (we are, or are among, the addressees) and yes for Engine: every command targeted at the
+    // ECU is bridgeable by definition — the ECU is reachable only through us, so we accept it
+    // solely to relay it on over CAN. A target of any other board is not ours.
+    [[nodiscard]] static bool addressedToUs(BoardId target)
     {
-        return type == CommandType::Ping || type == CommandType::SetControlFlag;
-    }
-
-    // Should the FCU act on a command with this target? Always for FillingStation / Broadcast
-    // (we are, or are among, the addressees). For an Engine target only if the command is
-    // bridgeable — then we accept it solely to relay it on; otherwise it is for another board.
-    [[nodiscard]] static bool addressedToUs(CommandType type, BoardId target)
-    {
-        if (target == BoardId::FillingStation || target == BoardId::Broadcast) {
-            return true;
-        }
-        if (target == BoardId::Engine) {
-            return isBridgeable(type);
-        }
-        return false;
+        return target == BoardId::FillingStation
+            || target == BoardId::Broadcast
+            || target == BoardId::Engine;
     }
 
     // May a command of `type` run in `current`? Skeleton: permissive for every known
@@ -206,7 +195,7 @@ private:
         switch (cmd.type) {
             case CommandType::Ping:             return handlePing(cmd, now_ms);
             case CommandType::SetState:         return handleSetState(cmd);
-            case CommandType::SetValvePosition: return handleSetValvePosition(cmd);
+            case CommandType::SetValvePosition: return handleSetValvePosition(cmd, now_ms);
             case CommandType::SetControlFlag:   return handleSetControlFlag(cmd, now_ms);
             case CommandType::Synchronise:      return handleSynchronise(cmd);
         }
@@ -252,6 +241,14 @@ private:
 
     bool handleSetState(const Command& cmd)
     {
+        // The global filling-station state machine is the FCU's own: a SetState applies only
+        // when we are an addressee (FillingStation / Broadcast). An Engine-only target is not
+        // ours to apply and is not bridged — the ECU runs its own state machine and has no
+        // SetState handler — so we leave our state untouched.
+        const auto target = static_cast<BoardId>(cmd.target);
+        if (target != BoardId::FillingStation && target != BoardId::Broadcast) {
+            return false;
+        }
         const auto* frame = reinterpret_cast<const SetStateFrame*>(cmd.payload.data());
         const std::optional<State> requested = toState(frame->requestedID);
         if (!requested) {
@@ -324,9 +321,33 @@ private:
         }
     }
 
-    /* ---- SetValvePosition (actuates a local valve) --------------------------- */
+    /* ---- SetValvePosition (local actuation and/or bridge to the ECU) --------- */
 
-    bool handleSetValvePosition(const Command& cmd)
+    // Drive a valve, routed by the command's target board (mirrors handleSetControlFlag):
+    //   FillingStation -> actuate our own Fill/Dump valve locally.
+    //   Engine         -> bridge the command to the ECU over CAN as a reliable command; the
+    //                     ECU drives its IPA/NOS valve and Acks, and onResponse relays the Ack.
+    //   Broadcast      -> both: actuate locally AND bridge.
+    // The 3-byte SetValvePositionFrame rides verbatim in the payload, so the bridged CAN frame
+    // carries the same bytes the GS sent (the valve byte is read as EcuValves on the ECU).
+    bool handleSetValvePosition(const Command& cmd, uint32_t now_ms)
+    {
+        const auto target = static_cast<BoardId>(cmd.target);
+        bool ok = true;
+
+        if (target == BoardId::FillingStation || target == BoardId::Broadcast) {
+            ok = actuateLocalValve(cmd) && ok;
+        }
+        if (target == BoardId::Engine || target == BoardId::Broadcast) {
+            sendReliable(CommandType::SetValvePosition, /*sender_state=*/0,
+                         std::span<const uint8_t>(cmd.payload.data(), sizeof(SetValvePositionFrame)),
+                         cmd.seq, now_ms);
+        }
+        return ok;
+    }
+
+    // Actuate the FCU's own Fill/Dump valve from a SetValvePosition frame.
+    bool actuateLocalValve(const Command& cmd)
     {
         const auto* frame = reinterpret_cast<const SetValvePositionFrame*>(cmd.payload.data());
         if (!isValidAction(frame->action)) {

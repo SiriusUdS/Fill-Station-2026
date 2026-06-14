@@ -36,9 +36,6 @@ using logic::control::State;
 
 namespace {
 
-/* data[] offset of the valve index in a SetValvePosition frame (data[0..3] = timestamp). */
-constexpr std::size_t VALVE_INDEX_OFFSET = sizeof(uint32_t);
-
 /* Build a CAN command frame addressed FCU -> Engine. */
 CanFrame makeCommand(command::CommandType type, uint8_t senderState,
                      BoardId target = BoardId::Engine, uint8_t seq = 0)
@@ -58,11 +55,17 @@ CanFrame makeCommand(command::CommandType type, uint8_t senderState,
     return frame;
 }
 
-CanFrame makeValveCmd(EcuValves valve, ValveCommand action, BoardId target = BoardId::Engine)
+/* A SetValvePosition command FCU -> Engine: the 3-byte SetValvePositionFrame rides
+   verbatim in the payload (data[0] = valve index, data[1] = action, data[2] = value). */
+CanFrame makeValveCmd(EcuValves valve, ValveCommand action, BoardId target = BoardId::Engine,
+                      uint8_t seq = 0)
 {
-    CanFrame frame = makeCommand(command::CommandType::SetValvePosition,
-                                 static_cast<uint8_t>(action), target);
-    frame.data[VALVE_INDEX_OFFSET] = static_cast<uint8_t>(valve);
+    CanFrame frame = makeCommand(command::CommandType::SetValvePosition, /*senderState=*/0,
+                                 target, seq);
+    frame.data[0] = static_cast<uint8_t>(valve);
+    frame.data[1] = static_cast<uint8_t>(action);
+    frame.data[2] = 0;   // value, unused for Open/Close
+    frame.length  = sizeof(SetValvePositionFrame);
     return frame;
 }
 
@@ -148,6 +151,30 @@ TEST_F(EcuControllerTest, CommandForAnotherBoardIsIgnored)
 {
     deliver(makeValveCmd(EcuValves::IPA, ValveCommand::Open, BoardId::FillingStation));
     EXPECT_EQ(ipa_valve_.open_calls, 0);
+}
+
+TEST_F(EcuControllerTest, ValveCommandIsAckedToTheFcu)
+{
+    deliver(makeValveCmd(EcuValves::IPA, ValveCommand::Open, BoardId::Engine, /*seq=*/5));
+
+    EXPECT_EQ(ipa_valve_.open_calls, 1);
+
+    ASSERT_EQ(bus().can_tx.size(), 1u);
+    CanHeader header;
+    header.code = bus().can_tx.front().id;
+    EXPECT_EQ(static_cast<BoardId>(header.frame.sender_id), BoardId::Engine);
+    EXPECT_EQ(static_cast<BoardId>(header.frame.target_id), BoardId::FillingStation);
+    EXPECT_EQ(static_cast<PayloadType>(header.frame.payload_type), PayloadType::Response);
+    EXPECT_EQ(static_cast<ResponseType>(header.frame.payload_id), ResponseType::Ack);
+    EXPECT_EQ(header.frame.seq, 5u);   // echoes the command seq so the FCU matches it
+}
+
+TEST_F(EcuControllerTest, UnknownValveIsNotActuatedOrAcked)
+{
+    deliver(makeValveCmd(static_cast<EcuValves>(0x7F), ValveCommand::Open));
+    EXPECT_EQ(ipa_valve_.open_calls, 0);
+    EXPECT_EQ(nos_valve_.open_calls, 0);
+    EXPECT_TRUE(bus().can_tx.empty());   // no Ack for a valve we did not drive
 }
 
 /* ---- Ping (Control answers with Pong over CAN) --------------------------- */
