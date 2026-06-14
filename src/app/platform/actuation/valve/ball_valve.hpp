@@ -31,6 +31,13 @@ struct LimitSwitchConfig {
     uint16_t      pin;   /**< GPIO pin of the switch. */
 };
 
+/* Default servo PWM duty-cycle calibration for a ball valve, as a percentage of the PWM period:
+   the duty that drives the ball to each mechanical hard stop. These are the uncalibrated
+   defaults — give each valve its own measured pair via BallValveConfig::duty_{closed,open}_percent
+   once characterised. 26 % = fully closed, 54 % = fully open. */
+constexpr float BALL_VALVE_DUTY_CLOSED_PERCENT_DEFAULT = 26.0F;
+constexpr float BALL_VALVE_DUTY_OPEN_PERCENT_DEFAULT   = 54.0F;
+
 /**
  * @brief Static configuration of one ball valve.
  */
@@ -40,6 +47,11 @@ struct BallValveConfig {
     LimitSwitchConfig       close_limit;      /**< Switch asserted when fully closed. */
     uint32_t                max_transit_timeout_ms;  /**< Open/close time before declaring Fault. */
     bool                    opened_switch_ignored = false;  /**< No physical open switch: open() floats at 100 %. */
+    /* PWM duty-cycle calibration (percent of the PWM period): the duty commanded at 0 % open
+       (fully closed) and 100 % open (fully open). init() converts these to the servo's pulse-tick
+       endpoints against the timer period. One calibrated pair per valve; defaults are 26 / 54 %. */
+    float                   duty_closed_percent = BALL_VALVE_DUTY_CLOSED_PERCENT_DEFAULT;
+    float                   duty_open_percent   = BALL_VALVE_DUTY_OPEN_PERCENT_DEFAULT;
 };
 
 /**

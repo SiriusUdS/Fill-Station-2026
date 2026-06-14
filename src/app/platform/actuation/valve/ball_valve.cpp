@@ -43,6 +43,15 @@ namespace platform::actuation::valve {
 void BallValve::init(const BallValveConfig& config)
 {
     config_                          = config;
+
+    // Translate the valve's PWM duty-cycle calibration into the servo's pulse-tick endpoints:
+    // duty is a percentage of the full PWM period (ARR + 1), so setPercent() then maps 0..100 %
+    // open linearly across the [closed, open] duty range. The board configures the timer's ARR
+    // before calling init(), so the period read here is valid.
+    const float period_ticks      = static_cast<float>(__HAL_TIM_GET_AUTORELOAD(config_.servo.htim)) + 1.0F;
+    config_.servo.min_pulse_ticks = (config_.duty_closed_percent / 100.0F) * period_ticks;
+    config_.servo.max_pulse_ticks = (config_.duty_open_percent   / 100.0F) * period_ticks;
+
     info_                            = ValveInfo{};   // state Unknown, no status bits, 0 % commanded
     info_.status.initialized         = 1u;            // bound and ready to operate
     info_.status.opened_switch_ignored = config_.opened_switch_ignored ? 1u : 0u;
@@ -59,6 +68,11 @@ std::optional<ValveError> BallValve::open()
         return setOpenPercent(MAX_OPEN_PERCENT);
     }
     if (info_.state == ValveState::Opened || info_.state == ValveState::Opening) {
+        // No motion needed (already open / opening), but still record the commanded position:
+        // an open command means 100 % regardless of whether it caused movement, so telemetry
+        // reflects the operator's intent even when the actuation is a no-op (e.g. limit
+        // switches unplugged and the valve already reads Opened).
+        info_.current_set_value = static_cast<uint8_t>(MAX_OPEN_PERCENT);
         return std::nullopt;
     }
     info_.state                = ValveState::Opening;
@@ -72,6 +86,11 @@ std::optional<ValveError> BallValve::open()
 std::optional<ValveError> BallValve::close()
 {
     if (info_.state == ValveState::Closed || info_.state == ValveState::Closing) {
+        // No motion needed (already closed / closing), but still record the commanded position:
+        // a close command means 0 % regardless of whether it caused movement, so telemetry
+        // reflects the operator's intent even when the actuation is a no-op (e.g. limit
+        // switches unplugged and the valve already reads Closed).
+        info_.current_set_value = static_cast<uint8_t>(MIN_OPEN_PERCENT);
         return std::nullopt;
     }
     info_.state                = ValveState::Closing;

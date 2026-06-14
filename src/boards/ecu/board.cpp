@@ -89,21 +89,21 @@ void wireDrivers(void)
 
   /* Two propellant ball valves on TIM15: IPA = CH1 (PE5), NOS = CH2 (PE6). 333 Hz
      (3 ms) servo PWM owned here: 100 MHz / (PSC 99 + 1) = 1 MHz tick; ARR 2999 -> 3 ms.
-     Pulse 1-2 ms = 1000-2000 ticks; tune min/max for the valve's actual travel. */
+     The closed/open endpoints are each valve's PWM duty-cycle calibration
+     (BallValveConfig::duty_{closed,open}_percent, default 26 %/54 %); BallValve::init()
+     converts them to pulse ticks against this period, so no pulse ticks are set here. */
   __HAL_TIM_SET_PRESCALER(&htim15,  99);
   __HAL_TIM_SET_AUTORELOAD(&htim15, 2999);
   htim15.Instance->EGR = TIM_EGR_UG;   // reload PSC/ARR now (no first-period glitch)
 
   g_ipa_valve.init({
-      .servo       = {.htim = &htim15, .channel = TIM_CHANNEL_1,
-                      .min_pulse_ticks = 1000.0F, .max_pulse_ticks = 2000.0F},
+      .servo       = {.htim = &htim15, .channel = TIM_CHANNEL_1},
       .open_limit  = {.port = SWITCH_VALVE_IPA_OPENED_GPIO_Port, .pin = SWITCH_VALVE_IPA_OPENED_Pin},
       .close_limit = {.port = SWITCH_VALVE_IPA_CLOSED_GPIO_Port, .pin = SWITCH_VALVE_IPA_CLOSED_Pin},
       .max_transit_timeout_ms = 5000,
   });
   g_nos_valve.init({
-      .servo       = {.htim = &htim15, .channel = TIM_CHANNEL_2,
-                      .min_pulse_ticks = 1000.0F, .max_pulse_ticks = 2000.0F},
+      .servo       = {.htim = &htim15, .channel = TIM_CHANNEL_2},
       .open_limit  = {.port = SWITCH_VALVE_NOS_OPENED_GPIO_Port, .pin = SWITCH_VALVE_NOS_OPENED_Pin},
       .close_limit = {.port = SWITCH_VALVE_NOS_CLOSED_GPIO_Port, .pin = SWITCH_VALVE_NOS_CLOSED_Pin},
       .max_transit_timeout_ms = 5000,
