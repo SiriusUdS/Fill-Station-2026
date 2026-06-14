@@ -72,6 +72,13 @@ void halInit(void)
 
 void wireDrivers(void)
 {
+  /* Start the main-loop heartbeat first, so a steady blink confirms the loop is
+     alive through the rest of bring-up (a frozen LED means it stalled). Pin is
+     configurable HERE: PF1 (the board's LED1) for now — change the port/pin to
+     relocate it. The GPIOF clock is already enabled by MX_GPIO_Init. */
+  g_run_led.init({.port = GPIOF, .pin = GPIO_PIN_1});
+  g_running_indicator.init();
+
   /* Bring up the backup domain first, so the battery-backed Backup SRAM that
      holds the persistent state is clocked, writable and retained on VBAT before
      the FCU logic reads it. A regulator-timeout only means VBAT retention is
@@ -108,9 +115,35 @@ void wireDrivers(void)
   });
   g_ads131.start();
 
-  /* Bind the SD card to its HAL handle + FatFs drive (the app composition left it
-     unbound). It is mounted later by g_controller.init(). */
-  g_card.bind(&hsd2, "0:/");
+  /* Bring up the 4 MAX31856 thermocouples on SPI6. The board owns the 4 chip-selects:
+     CubeMX left TC1_CS asserted (low) and TC2/3/4_CS as floating inputs, which is wrong
+     for a shared SPI bus — every CS must be a push-pull output idling deasserted (high).
+     Configure all four as outputs here; the driver then deasserts each, configures the
+     devices, and polls them NON-BLOCKING from the main loop over interrupt-driven SPI6
+     (so a plugged-in board never stalls the loop). Channel order TC1..TC4 maps to
+     thermocouple_info[0..3]. NOTE: MX_SPI6_Init must use CPHA = 1 (SPI mode 1/3). */
+  GPIO_InitTypeDef tc_cs = {};
+  tc_cs.Mode  = GPIO_MODE_OUTPUT_PP;
+  tc_cs.Pull  = GPIO_NOPULL;
+  tc_cs.Speed = GPIO_SPEED_FREQ_LOW;
+  tc_cs.Pin = TC1_CS_Pin; HAL_GPIO_Init(TC1_CS_GPIO_Port, &tc_cs);
+  tc_cs.Pin = TC2_CS_Pin; HAL_GPIO_Init(TC2_CS_GPIO_Port, &tc_cs);
+  tc_cs.Pin = TC3_CS_Pin; HAL_GPIO_Init(TC3_CS_GPIO_Port, &tc_cs);
+  tc_cs.Pin = TC4_CS_Pin; HAL_GPIO_Init(TC4_CS_GPIO_Port, &tc_cs);
+
+  g_thermocouples.init({
+      .hspi     = &hspi6,
+      .cs_ports = { TC1_CS_GPIO_Port, TC2_CS_GPIO_Port, TC3_CS_GPIO_Port, TC4_CS_GPIO_Port },
+      .cs_pins  = { TC1_CS_Pin, TC2_CS_Pin, TC3_CS_Pin, TC4_CS_Pin },
+  });
+
+  /* Bind the three SD log files to the HAL handle + FatFs drive + file name (the app
+     composition left them unbound). They share one card: g_controller.init() mounts the
+     volume + creates this boot's session folder once, then opens all three files inside
+     it (data_fast.bin / data_slow.bin / data_ext.bin). */
+  g_card_fast.bind(&hsd2, "0:/", "data_fast.bin");
+  g_card_slow.bind(&hsd2, "0:/", "data_slow.bin");
+  g_card_ext.bind(&hsd2, "0:/", "data_ext.bin");
 
   /* Bring up the two local ball valves. The 333 Hz (3 ms) servo PWM frequency is
      owned HERE, not in CubeMX: leave the generated timer at its defaults and set

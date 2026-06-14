@@ -10,10 +10,7 @@
  * ------------------------------------------------------------------------- */
 
 #include "fcu_controller.hpp"
-#include "support/fakes.hpp"
-#include "support/fake_storage.hpp"
-#include "support/fake_valve.hpp"
-#include "support/fake_adc.hpp"
+#include "support/fakes.hpp"   // the standard set of host test doubles
 
 #include "communication/interfaces/can.hpp"
 #include "communication/interfaces/ethernet.hpp"
@@ -29,6 +26,8 @@
 #include "command/command_type.hpp"
 #include "communication/system_state_codec.hpp"   // packSystemState (ECU telemetry fragments)
 #include "communication/protocol/telemetry/ecu_system_state.hpp"   // EcuSystemState
+#include "communication/protocol/telemetry/fcu_system_state.hpp"   // FcuSystemState
+#include "communication/protocol/telemetry/fcu_extended_system_state.hpp"   // FcuExtendedSystemState (thermocouples)
 
 #include <array>
 #include <span>
@@ -82,14 +81,19 @@ CanFrame makeCanFrame(BoardId sender, BoardId target, uint8_t messageId,
 
 class FcuControllerTest : public ::testing::Test {
 protected:
-    FakeStorage      storage_;
+    FakeStorage      storage_fast_;
+    FakeStorage      storage_slow_;
+    FakeStorage      storage_ext_;
     FakeValve        fill_valve_;
     FakeValve        dump_valve_;
     FakeStreamingAdc adc_;
     FakeEthernet     eth_;
     FakeCan          can_;
-    logic::fcu::Controller<FakeStorage, FakeValve, FakeStreamingAdc, FakeEthernet, FakeCan>
-                     controller_{storage_, fill_valve_, dump_valve_, adc_, eth_, can_};
+    FakeThermocoupleBank tc_;
+    logic::fcu::Controller<FakeStorage, FakeValve, FakeStreamingAdc, FakeEthernet, FakeCan,
+                           FakeThermocoupleBank>
+                     controller_{storage_fast_, storage_slow_, storage_ext_,
+                                 fill_valve_, dump_valve_, adc_, eth_, can_, tc_};
     uint32_t         now_ms_ = 0;
 
     void SetUp() override
@@ -98,6 +102,7 @@ protected:
         /* Start every test from a cold Backup SRAM so persisted state never
            leaks between tests; init() then commits a fresh INIT. */
         logic::control::persistent_state = logic::control::PersistentState{};
+        logic::control::control_flags    = logic::control::ControlFlags{};  // all flags off
         controller_.init();
     }
 
@@ -143,26 +148,148 @@ TEST_F(FcuControllerTest, StartsAtInitAndFirstTickEntersSafe)
 
 /* Telemetry is no longer a per-tick heartbeat: SystemState records are produced
    on the record timer (produceRecord) and batched into TelemetryType::SystemState datagrams when
-   a 4096-byte half fills and drains. Pump records until that happens and check
-   the downlinked packet is a well-formed TelemetryType::SystemState frame. */
+   a 4096-byte half fills and drains. Pump records until a SystemState frame downlinks
+   (the low-rate ExtendedSystemState shares the egress, so we filter by type) and check
+   it is well-formed. */
 TEST_F(FcuControllerTest, FullTelemetryBufferDownlinksGetSystem)
 {
     reachSafe();  // also clears udp_tx
 
+    auto findSystemState = []() -> const SentDatagram* {
+        for (const auto& d : bus().udp_tx) {
+            EthernetHeader h;
+            std::memcpy(&h, d.payload.data(), sizeof(h));
+            if (static_cast<TelemetryType>(h.payload_id) == TelemetryType::SystemState) {
+                return &d;
+            }
+        }
+        return nullptr;
+    };
+
     const AdcInfo sample{};
-    for (int i = 0; i < 1000 && bus().udp_tx.empty(); ++i) {
+    for (int i = 0; i < 2000 && findSystemState() == nullptr; ++i) {
         adc_.push(sample);                  // one conversion into the ADC ring
         controller_.produceRecord(++now_ms_);  // drain it into the telemetry buffer
         step();                             // drainTick flushes any full half
     }
 
-    ASSERT_FALSE(bus().udp_tx.empty()) << "a full telemetry half never downlinked";
-    const auto& payload = bus().udp_tx.back().payload;
-    ASSERT_GE(payload.size(), sizeof(EthernetHeader));
+    const SentDatagram* sys = findSystemState();
+    ASSERT_NE(sys, nullptr) << "a full telemetry half never downlinked a SystemState";
+    ASSERT_GE(sys->payload.size(), sizeof(EthernetHeader));
     EthernetHeader header;
-    std::memcpy(&header, payload.data(), sizeof(EthernetHeader));
+    std::memcpy(&header, sys->payload.data(), sizeof(EthernetHeader));
     EXPECT_EQ(header.sender_id, static_cast<uint8_t>(BoardId::FillingStation));
     EXPECT_EQ(header.payload_id, static_cast<uint8_t>(TelemetryType::SystemState));
+}
+
+/* The FCU must downlink the FULL FcuSystemState (base + eth_info), not just the shared
+   SystemStateBase. Mark the Ethernet info, pump a SystemState, and read the marker back
+   from the record's eth_info — which only exists if the whole FcuSystemState was sent. */
+TEST_F(FcuControllerTest, DownlinkCarriesTheFullFcuSystemStateNotJustTheBase)
+{
+    reachSafe();  // clears udp_tx
+    eth_.info_value.rx_dropped = 0xBEEF;   // a marker that lives in eth_info, past the base
+
+    auto findSystemState = []() -> const SentDatagram* {
+        for (const auto& d : bus().udp_tx) {
+            EthernetHeader h;
+            std::memcpy(&h, d.payload.data(), sizeof(h));
+            if (static_cast<TelemetryType>(h.payload_id) == TelemetryType::SystemState) {
+                return &d;
+            }
+        }
+        return nullptr;
+    };
+
+    const AdcInfo sample{};
+    for (int i = 0; i < 2000 && findSystemState() == nullptr; ++i) {
+        adc_.push(sample);
+        controller_.produceRecord(++now_ms_);
+        step();
+    }
+
+    const SentDatagram* sys = findSystemState();
+    ASSERT_NE(sys, nullptr) << "no SystemState downlinked";
+    // The datagram must hold at least one WHOLE FcuSystemState after the header (a base-
+    // only record would be sizeof(SystemStateBase), too short to carry eth_info).
+    ASSERT_GE(sys->payload.size(), sizeof(EthernetHeader) + sizeof(FcuSystemState));
+
+    FcuSystemState record;
+    std::memcpy(&record, sys->payload.data() + sizeof(EthernetHeader), sizeof(record));
+    EXPECT_EQ(record.eth_info.rx_dropped, 0xBEEF)
+        << "eth_info absent — the FCU downlinked only the SystemStateBase";
+}
+
+/* The 4 thermocouples ride the low-rate ExtendedSystemState (data_ext / 10 Hz), NOT
+   the 2 kHz SystemState. Set a distinctive reading, cross the extended interval, and
+   read it back out of the ExtendedSystemState datagram. */
+TEST_F(FcuControllerTest, ThermocouplesDownlinkInTheLowRateExtendedRecord)
+{
+    reachSafe();  // also clears udp_tx
+
+    ThermocoupleInfo tc{};
+    tc.state              = ThermocoupleState::Active;
+    tc.status.data_valid  = 1u;
+    tc.thermocouple_code  = 0x4321;
+    tc.cold_junction_code = 0x0210;
+    tc_.set(0, tc);
+
+    // Cross the ~10 Hz extended interval (100 ms) so produceExtended emits one record.
+    controller_.tick(now_ms_ += 150);
+
+    bool found = false;
+    for (const auto& d : bus().udp_tx) {
+        ASSERT_GE(d.payload.size(), sizeof(EthernetHeader));
+        EthernetHeader h;
+        std::memcpy(&h, d.payload.data(), sizeof(h));
+        if (static_cast<TelemetryType>(h.payload_id) != TelemetryType::ExtendedSystemState) {
+            continue;
+        }
+        ASSERT_GE(d.payload.size(), sizeof(EthernetHeader) + sizeof(FcuExtendedSystemState));
+        FcuExtendedSystemState ext;
+        std::memcpy(&ext, d.payload.data() + sizeof(EthernetHeader), sizeof(ext));
+        EXPECT_EQ(ext.thermocouple_info[0].thermocouple_code, 0x4321);
+        EXPECT_EQ(ext.thermocouple_info[0].cold_junction_code, 0x0210);
+        EXPECT_EQ(static_cast<uint8_t>(ext.thermocouple_info[0].state),
+                  static_cast<uint8_t>(ThermocoupleState::Active));
+        found = true;
+    }
+    EXPECT_TRUE(found) << "no ExtendedSystemState was downlinked";
+}
+
+/* The ExtendedSystemState carries the live control-flag bitmask, so the GS reads the
+   recording config straight from telemetry (bit N = ControlFlag value N). */
+TEST_F(FcuControllerTest, ExtendedRecordReportsTheLiveControlFlags)
+{
+    reachSafe();  // clears udp_tx
+    logic::control::control_flags.set(ControlFlag::FastRecording, true);  // PersistingData stays off
+
+    controller_.tick(now_ms_ += 150);  // cross the extended interval
+
+    bool found = false;
+    for (const auto& d : bus().udp_tx) {
+        EthernetHeader h;
+        std::memcpy(&h, d.payload.data(), sizeof(h));
+        if (static_cast<TelemetryType>(h.payload_id) != TelemetryType::ExtendedSystemState) {
+            continue;
+        }
+        FcuExtendedSystemState ext;
+        std::memcpy(&ext, d.payload.data() + sizeof(EthernetHeader), sizeof(ext));
+        EXPECT_NE(ext.control_flags & (1u << static_cast<uint8_t>(ControlFlag::FastRecording)), 0u);
+        EXPECT_EQ(ext.control_flags & (1u << static_cast<uint8_t>(ControlFlag::PersistingData)), 0u);
+        found = true;
+    }
+    EXPECT_TRUE(found) << "no ExtendedSystemState was downlinked";
+}
+
+/* The controller advances the non-blocking thermocouple bank from its foreground
+   tick, so readings refresh without the record-timer ISR ever touching SPI. */
+TEST_F(FcuControllerTest, EachTickServicesTheThermocoupleBank)
+{
+    const uint32_t before = tc_.service_calls;
+    step();
+    step();
+    EXPECT_GT(tc_.service_calls, before);
 }
 
 TEST_F(FcuControllerTest, EveryTickServicesTheLink)

@@ -31,6 +31,10 @@ public:
         return (bits_ & (1u << static_cast<uint8_t>(flag))) != 0u;
     }
 
+    /** @brief The whole bitmask (bit N = ControlFlag value N). Surfaced in the
+     *         ExtendedSystemState telemetry so the GS sees the live config. */
+    [[nodiscard]] uint32_t raw() const { return bits_; }
+
 private:
     uint32_t bits_ = 0;   // all flags off on boot (ControlFlag ids are bit positions 0..31)
 };

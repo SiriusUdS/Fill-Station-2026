@@ -29,7 +29,9 @@ extern valve::BallValve          g_ipa_valve;
 extern valve::BallValve          g_nos_valve;
 extern ads131m08::Ads131m08      g_ads131;
 extern can::Can                  g_can;
-extern platform::storage::SdCard g_card;
+extern platform::storage::SdCard g_card_fast;  // data_fast.bin (raw 2 kHz SystemState)
+extern platform::storage::SdCard g_card_slow;  // data_slow.bin (125 Hz averaged SystemState)
+extern platform::storage::SdCard g_card_ext;   // data_ext.bin  (ExtendedSystemState)
 extern EcuController             g_controller;
 
 }  // namespace ecu_app

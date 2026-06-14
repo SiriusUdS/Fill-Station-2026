@@ -17,8 +17,7 @@
 #include "control.hpp"
 #include "communication.hpp"
 
-#include "support/fakes.hpp"
-#include "support/fake_valve.hpp"
+#include "support/fakes.hpp"   // the standard set of host test doubles
 
 #include "communication/command/command.hpp"                 // CommandType
 #include "communication/protocol/command/set_state.hpp"      // SetStateFrame

@@ -12,8 +12,11 @@
 #include "communication/ethernet/ethernet.hpp"
 #include "communication/can/can_dil.hpp"
 #include "acquisition/adc/ads131m08.hpp"
+#include "acquisition/thermocouple/max31856.hpp"
 #include "storage/sd_card.hpp"
 #include "actuation/valve/ball_valve.hpp"
+#include "indication/led.hpp"
+#include "indication/running_indicator.hpp"
 #include "fcu_controller.hpp"
 
 namespace fcu_app {
@@ -21,20 +24,32 @@ namespace fcu_app {
 namespace eth        = platform::communication::ethernet;
 namespace can        = platform::communication::can;
 namespace ads131m08  = platform::acquisition::adc::ads131m08;
+namespace max31856   = platform::acquisition::thermocouple::max31856;
 namespace valve      = platform::actuation::valve;
+namespace indication = platform::indication;
+
+/* The main-loop liveness indicator, blinking a status LED straight from the
+ * for(;;) loop (a frozen LED means the loop stalled). */
+using RunningIndicator = logic::indication::RunningIndicator<indication::Led>;
 
 /* The FCU's concrete controller type, instantiated over its real drivers. */
 using FcuController = logic::fcu::Controller<platform::storage::SdCard, valve::BallValve,
-                                             ads131m08::Ads131m08, eth::Ethernet, can::Can>;
+                                             ads131m08::Ads131m08, eth::Ethernet, can::Can,
+                                             max31856::Max31856Bank>;
 
 /* Fill/Dump ball valves, the streaming ADC, the Ethernet link and CAN node, the
  * SD card, and the controller built over them all. Defined in main.cpp. */
 extern valve::BallValve       g_fill_valve;
 extern valve::BallValve       g_dump_valve;
 extern ads131m08::Ads131m08   g_ads131;
+extern max31856::Max31856Bank g_thermocouples;
 extern eth::Ethernet          g_eth;
 extern can::Can               g_can;
-extern platform::storage::SdCard g_card;
+extern platform::storage::SdCard g_card_fast;  // data_fast.bin (raw 2 kHz SystemState)
+extern platform::storage::SdCard g_card_slow;  // data_slow.bin (125 Hz averaged SystemState)
+extern platform::storage::SdCard g_card_ext;   // data_ext.bin  (ExtendedSystemState)
+extern indication::Led        g_run_led;
+extern RunningIndicator       g_running_indicator;
 extern FcuController          g_controller;
 
 }  // namespace fcu_app

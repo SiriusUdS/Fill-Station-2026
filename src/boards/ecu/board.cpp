@@ -80,9 +80,12 @@ void wireDrivers(void)
   });
   g_ads131.start();
 
-  /* Bind the SD card on SDMMC1 (the app composition left it unbound). It is mounted
-     later by g_controller.init(). */
-  g_card.bind(&hsd1, "0:/");
+  /* Bind the three SD log files on SDMMC1 (the app composition left them unbound). They
+     share one card: g_controller.init() mounts the volume + creates this boot's session
+     folder once, then opens all three files inside it (same recording policy as the FCU). */
+  g_card_fast.bind(&hsd1, "0:/", "data_fast.bin");
+  g_card_slow.bind(&hsd1, "0:/", "data_slow.bin");
+  g_card_ext.bind(&hsd1, "0:/", "data_ext.bin");
 
   /* Two propellant ball valves on TIM15: IPA = CH1 (PE5), NOS = CH2 (PE6). 333 Hz
      (3 ms) servo PWM owned here: 100 MHz / (PSC 99 + 1) = 1 MHz tick; ARR 2999 -> 3 ms.

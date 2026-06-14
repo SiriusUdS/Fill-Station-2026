@@ -52,10 +52,13 @@ template <logic::storage::Storage S, logic::actuation::Valve V,
           logic::communication::StreamingAdc A, logic::communication::Can C>
 class Controller {
 public:
-    /** @brief Construct over the held drivers; does not touch hardware. Call init() next. */
-    Controller(S& storage, V& ipa_valve, V& nos_valve, A& adc, C& can)
+    /** @brief Construct over the held drivers; does not touch hardware. Call init() next.
+     *         The three SD streams (data_fast/slow/ext.bin) use the same shared recording
+     *         policy as the FCU; which SystemState file is written is the FastRecording flag's. */
+    Controller(S& storage_fast, S& storage_slow, S& storage_ext,
+               V& ipa_valve, V& nos_valve, A& adc, C& can)
         : comm_(can),
-          telemetry_(storage, ipa_valve, nos_valve, adc, comm_),
+          telemetry_(storage_fast, storage_slow, storage_ext, ipa_valve, nos_valve, adc, comm_),
           control_(ipa_valve, nos_valve, comm_) {}
 
     /**
@@ -86,6 +89,7 @@ public:
             control_.onCommand(*frame, now_ms);
         }
 
+        telemetry_.produceExtended(now_ms);  // ~10 Hz ExtendedSystemState -> data_ext.bin
         telemetry_.drain(now_ms);   // flush full halves to SD + downlink over CAN
 
         // Minimal state machine for now: Init -> Safe on the first tick (engine states

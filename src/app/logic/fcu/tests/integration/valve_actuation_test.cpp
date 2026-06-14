@@ -9,10 +9,7 @@
  * ------------------------------------------------------------------------- */
 
 #include "fcu_controller.hpp"
-#include "support/fakes.hpp"
-#include "support/fake_storage.hpp"
-#include "support/fake_valve.hpp"
-#include "support/fake_adc.hpp"
+#include "support/fakes.hpp"   // the standard set of host test doubles
 
 #include "communication/command/command.hpp"             // CommandType
 #include "command/set_valve_position.hpp"  // SetValvePositionFrame, ValveCommand
@@ -52,14 +49,19 @@ std::vector<uint8_t> makeValveCommand(FcuValves valve, ValveCommand action, uint
 
 class ValveActuation : public ::testing::Test {
 protected:
-    FakeStorage      storage_;
+    FakeStorage      storage_fast_;
+    FakeStorage      storage_slow_;
+    FakeStorage      storage_ext_;
     FakeValve        fill_valve_;
     FakeValve        dump_valve_;
     FakeStreamingAdc adc_;
     FakeEthernet     eth_;
     FakeCan          can_;
-    logic::fcu::Controller<FakeStorage, FakeValve, FakeStreamingAdc, FakeEthernet, FakeCan>
-                     controller_{storage_, fill_valve_, dump_valve_, adc_, eth_, can_};
+    FakeThermocoupleBank tc_;
+    logic::fcu::Controller<FakeStorage, FakeValve, FakeStreamingAdc, FakeEthernet, FakeCan,
+                           FakeThermocoupleBank>
+                     controller_{storage_fast_, storage_slow_, storage_ext_,
+                                 fill_valve_, dump_valve_, adc_, eth_, can_, tc_};
     uint32_t         now_ms_ = 0;
 
     void SetUp() override

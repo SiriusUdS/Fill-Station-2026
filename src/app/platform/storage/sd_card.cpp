@@ -1,11 +1,13 @@
 /**
  ******************************************************************************
  * @file    storage/sd_card.cpp
- * @brief   FatFs-backed SD card driver: mounts the volume and opens a log file
- *          at init, then appends + syncs each record so writes stay cheap and
- *          power-loss safe. The store owns its StorageInfo (state + status, the
- *          status carrying the last error cause), exposed through info(). C++
- *          port of the original sd_card.c.
+ * @brief   FatFs-backed SD log file. At the first init() it mounts the volume and
+ *          creates a fresh per-boot session folder (the highest existing numeric
+ *          folder + 1); both shared across every file on the card. Each instance
+ *          then opens one log file inside that folder and appends + syncs each
+ *          record so writes stay cheap and power-loss safe. The store owns its
+ *          StorageInfo (state + status, carrying the last error cause), exposed
+ *          through info(). C++ port of the original sd_card.c.
  ******************************************************************************
  */
 
@@ -15,29 +17,91 @@
 
 namespace platform::storage {
 
-SdCard::SdCard(SD_HandleTypeDef* handle, const char* drive)
-    : handle_(handle), drive_(drive)
+namespace {
+
+/* The single mounted FAT volume + this boot's session folder, shared by every
+   SdCard on this board (one physical card). The mount and folder are created once
+   (by the first SdCard to init()); each SdCard then opens its own file inside the
+   session folder. One static volume per firmware binary is enough — each board has
+   exactly one card. */
+FATFS s_volume_fs;
+bool  s_session_ready      = false;
+char  s_session_dir[24]    = {};   // this boot's folder, e.g. "0:/7/"
+
+/* Highest existing numeric folder name in the volume root, + 1 (0 if none). Folder
+   names are short numerics, so the 8.3 fname carries them regardless of LFN. */
+int nextSessionNumber(const char* drive)
 {
-    info_.state = StorageState::Init;
+    DIR     dir;
+    FILINFO fno;
+    int     max = -1;
+
+    if (f_opendir(&dir, drive) != FR_OK) {
+        return 0;
+    }
+    while (f_readdir(&dir, &fno) == FR_OK && fno.fname[0] != '\0') {
+        if (!(fno.fattrib & AM_DIR)) {
+            continue;
+        }
+        int  value     = 0;
+        bool all_digits = true;
+        for (const char* p = fno.fname; *p != '\0'; ++p) {
+            if (*p < '0' || *p > '9') { all_digits = false; break; }
+            value = value * 10 + (*p - '0');
+        }
+        if (all_digits && value > max) {
+            max = value;
+        }
+    }
+    f_closedir(&dir);
+    return max + 1;
+}
+
+} // namespace
+
+const char* beginSession(const char* drive)
+{
+    if (s_session_ready) {
+        return s_session_dir;   // mounted + folder created by the first SdCard to init()
+    }
+    if (f_mount(&s_volume_fs, drive, 1) != FR_OK) {
+        return nullptr;
+    }
+
+    // A fresh folder per boot: highest existing numeric folder + 1, e.g. "0:/7".
+    const int n = nextSessionNumber(drive);
+    char created[24];
+    std::snprintf(created, sizeof(created), "%s%d", drive, n);
+    if (f_mkdir(created) != FR_OK) {
+        return nullptr;
+    }
+
+    std::snprintf(s_session_dir, sizeof(s_session_dir), "%s%d/", drive, n);
+    s_session_ready = true;
+    return s_session_dir;
 }
 
 void SdCard::init()
 {
-    if (f_mount(&fs_, drive_, 1) != FR_OK) {
+    info_.state = StorageState::Init;
+
+    // Mount the volume and create/locate this boot's session folder (shared, once).
+    const char* session = beginSession(drive_);
+    if (session == nullptr) {
         fail(StorageError::MountFail);
         return;
     }
 
-    // Drive-relative path so each card writes to its own volume, e.g.
-    // "0:/runtime.bin". Opened once and kept open for the driver's lifetime.
-    char path[32];
-    std::snprintf(path, sizeof(path), "%sruntime.bin", drive_);
+    // This stream's file inside the session folder, e.g. "0:/7/data_fast.bin".
+    // Opened once and kept open for the driver's lifetime.
+    char path[40];
+    std::snprintf(path, sizeof(path), "%s%s", session, filename_);
     if (f_open(&file_, path, FA_WRITE | FA_CREATE_ALWAYS) != FR_OK) {
         fail(StorageError::FileOpenFail);
         return;
     }
 
-    info_.status.initialized = 1u;             // mounted + log file open
+    info_.status.initialized = 1u;             // volume mounted, session folder + log file open
     info_.status.error       = StorageError::None;
     info_.state              = StorageState::Active;
 }

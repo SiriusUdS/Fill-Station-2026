@@ -5,6 +5,7 @@
 #include "storage/interfaces/storage.hpp"        // logic::storage::Storage
 #include "actuation/interfaces/valve.hpp"        // logic::actuation::Valve
 #include "communication/interfaces/adc.hpp"      // logic::communication::StreamingAdc
+#include "communication/interfaces/thermocouple.hpp"  // logic::communication::ThermocoupleBank
 #include "communication/interfaces/ethernet.hpp" // logic::communication::Ethernet
 #include "communication/interfaces/can.hpp"      // logic::communication::Can
 #include "control/persistent_state.hpp"          // Backup-SRAM state snapshot
@@ -51,16 +52,21 @@ namespace logic::fcu {
  * @tparam A logic::communication::StreamingAdc (the ADS131M08).
  * @tparam E logic::communication::Ethernet (the UDP link to the GS).
  * @tparam C logic::communication::Can (the FDCAN bus to the ECU).
+ * @tparam TC logic::communication::ThermocoupleBank (the 4 MAX31856 on SPI6).
  */
 template <logic::storage::Storage S, logic::actuation::Valve V,
           logic::communication::StreamingAdc A, logic::communication::Ethernet E,
-          logic::communication::Can C>
+          logic::communication::Can C, logic::communication::ThermocoupleBank TC>
 class Controller {
 public:
-    /** @brief Construct over the held drivers; does not touch hardware. Call init() next. */
-    Controller(S& storage, V& fill_valve, V& dump_valve, A& adc, E& eth, C& can)
+    /** @brief Construct over the held drivers; does not touch hardware. Call init() next.
+     *         The three SD streams are the raw (data_fast.bin) and 125 Hz averaged
+     *         (data_slow.bin) SystemState plus the low-rate ExtendedSystemState
+     *         (data_ext.bin); which SystemState file is written is the FastRecording flag's. */
+    Controller(S& storage_fast, S& storage_slow, S& storage_ext,
+               V& fill_valve, V& dump_valve, A& adc, E& eth, C& can, TC& thermocouples)
         : comm_(eth, can),
-          telemetry_(storage, fill_valve, dump_valve, adc, comm_),
+          telemetry_(storage_fast, storage_slow, storage_ext, fill_valve, dump_valve, adc, comm_, thermocouples),
           control_(fill_valve, dump_valve, comm_) {}
 
     /**
@@ -112,6 +118,8 @@ public:
             control_.onDatagram(datagram->payload, now_ms);
         }
 
+        telemetry_.serviceThermocouples(now_ms);  // advance the non-blocking MAX31856 round-robin
+        telemetry_.produceExtended(now_ms);  // ~10 Hz ExtendedSystemState -> GS + data_ext.bin
         telemetry_.drain(now_ms);        // flush full halves to SD + the GS
         control_.servicePending(now_ms); // resend / time out the in-flight reliable command
         control_.watchdog(now_ms);       // GS-link abort watchdog
@@ -138,9 +146,9 @@ private:
         return static_cast<PayloadType>(header.frame.payload_type) == PayloadType::Response;
     }
 
-    Communication<E, C>                     comm_;       // declared first: the others hold a ref to it
-    Telemetry<S, V, A, Communication<E, C>> telemetry_;
-    Control<V, Communication<E, C>>         control_;
+    Communication<E, C>                         comm_;       // declared first: the others hold a ref to it
+    Telemetry<S, V, A, Communication<E, C>, TC> telemetry_;
+    Control<V, Communication<E, C>>             control_;
 };
 
 } // namespace logic::fcu

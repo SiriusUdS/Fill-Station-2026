@@ -11,9 +11,11 @@
 #include "actuation/interfaces/valve.hpp"        // logic::actuation::Valve
 #include "communication/interfaces/adc.hpp"      // logic::communication::StreamingAdc + AdcInfo
 #include "communication/interfaces/can.hpp"      // logic::communication::CanFrame
-#include "control/control_flags.hpp"             // control_flags — PersistingData gates the SD write
+#include "control/control_flags.hpp"             // control_flags — surfaced in the extended record
+#include "telemetry/sd_recorder.hpp"             // logic::telemetry::SdRecorder (shared 3-file SD policy)
 
 #include "communication/protocol/telemetry/ecu_system_state.hpp"  // EcuSystemState (+ SystemStateBase)
+#include "communication/protocol/telemetry/ecu_extended_system_state.hpp"  // EcuExtendedSystemState (low-rate)
 #include "communication/system_state_codec.hpp"  // packSystemState (CAN fragments)
 #include "system/valves/ecu.hpp"                                  // EcuValves (valve identity / array index SSOT)
 #include "system/board_id.hpp"
@@ -38,12 +40,18 @@ namespace logic::ecu {
 
 namespace detail {
 
-/* Telemetry double buffer half size (sector-aligned SD writes). */
-inline constexpr std::size_t LOG_HALF_BYTES = 4096;
+/* Telemetry double buffer half size — shared with the SD recorder, which writes a
+   whole half verbatim to data_fast.bin. */
+inline constexpr std::size_t LOG_HALF_BYTES = logic::telemetry::SD_LOG_BLOCK_BYTES;
 
 /* If the ADC ring stays empty this long, the ADC is presumed silent and the record
    timer emits filler records (flagged invalid) so the downlink rate holds. */
 inline constexpr uint32_t ADC_TIMEOUT_MS = 10;
+
+/* ExtendedSystemState cadence (low-rate; for now just a timestamp, later event
+   timestamps). Logged to data_ext.bin from the foreground; the ECU does not downlink
+   it over CAN yet. */
+inline constexpr uint32_t EXTENDED_INTERVAL_MS = 100;   // ~10 Hz
 
 /* The telemetry double buffer — a plain aggregate (no member initializers) so the
    constructor does not touch its 8 KB at static-init; init() zeroes it. Pinned in
@@ -70,12 +78,15 @@ template <logic::storage::Storage S, logic::actuation::Valve V,
           logic::communication::StreamingAdc A, typename Comm>
 class Telemetry {
 public:
-    /** @brief Construct over the held drivers + the communication layer. */
-    Telemetry(S& storage, V& ipa_valve, V& nos_valve, A& adc, Comm& comm)
-        : storage_(storage), ipa_valve_(ipa_valve), nos_valve_(nos_valve),
-          adc_(adc), comm_(comm) {}
+    /** @brief Construct over the held drivers + the communication layer. The three SD
+     *         streams are the raw / 125 Hz-averaged SystemState and the ExtendedSystemState
+     *         (same shared recorder policy as the FCU). */
+    Telemetry(S& storage_fast, S& storage_slow, S& storage_ext,
+              V& ipa_valve, V& nos_valve, A& adc, Comm& comm)
+        : recorder_(storage_fast, storage_slow, storage_ext),
+          ipa_valve_(ipa_valve), nos_valve_(nos_valve), adc_(adc), comm_(comm) {}
 
-    /** @brief Zero the double buffer and bring the backing store online. */
+    /** @brief Zero the double buffer and bring the three SD log files online. */
     void init()
     {
         std::memset(log_.data, 0, sizeof(log_.data));
@@ -87,7 +98,7 @@ public:
         log_.overrun  = false;
         last_adc_ms_  = 0;
 
-        storage_.init();
+        recorder_.init();   // mounts the volume + opens data_fast/slow/ext.bin
     }
 
     /**
@@ -112,10 +123,10 @@ public:
         }
     }
 
-    /** @brief Flush any full half: persist the 4096-byte block to SD (only while the
-     *         PersistingData control flag is set — otherwise the half drains unwritten
-     *         to spare the card), and downlink the half's most recent record to the
-     *         FCU over CAN. */
+    /** @brief Flush any full half: SD-log the SystemState through the shared recorder
+     *         (raw data_fast.bin vs 125 Hz averaged data_slow.bin, per the flags), and
+     *         downlink the half's most recent record to the FCU over CAN (always — the
+     *         CAN stream is the ECU's live link, independent of SD recording mode). */
     void drain(uint32_t /*now_ms*/)
     {
         for (uint8_t h = 0; h < 2; ++h) {
@@ -124,11 +135,9 @@ public:
             }
             const uint16_t bytes = log_.used[h];
 
-            // Save only when told to: the buffer always drains (the half is released
-            // below regardless), but it reaches the card only while PersistingData is on.
-            if (logic::control::control_flags.get(ControlFlag::PersistingData)) {
-                storage_.write(std::span<const uint8_t>(log_.data[h], detail::LOG_HALF_BYTES));
-            }
+            recorder_.recordSystemState(
+                std::span<const uint8_t>(log_.data[h], detail::LOG_HALF_BYTES), bytes);
+
             if (bytes >= sizeof(EcuSystemState)) {
                 EcuSystemState latest;
                 std::memcpy(&latest, &log_.data[h][bytes - sizeof(EcuSystemState)], sizeof(EcuSystemState));
@@ -136,6 +145,23 @@ public:
             }
             log_.ready[h] = false;
         }
+    }
+
+    /** @brief Build + log the low-rate ExtendedSystemState (~10 Hz) to data_ext.bin
+     *         (gated by PersistingData). For now just a timestamp; the ECU does not
+     *         downlink it over CAN. Foreground-driven; self-throttled. */
+    void produceExtended(uint32_t now_ms)
+    {
+        if ((now_ms - last_extended_ms_) < detail::EXTENDED_INTERVAL_MS) {
+            return;
+        }
+        last_extended_ms_ = now_ms;
+
+        EcuExtendedSystemState ext = {};
+        ext.creation_timestamp_ms = now_ms;
+        ext.control_flags         = logic::control::control_flags.raw();  // live recording config
+        recorder_.recordExtended(
+            std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(&ext), sizeof(ext)));
     }
 
 private:
@@ -146,9 +172,10 @@ private:
         EcuSystemState state = {};
         state.base.creation_timestamp_ms = now_ms;
 
-        // Each peripheral OWNS its telemetry record; the pipeline only reads it.
+        // Each peripheral OWNS its telemetry record; the pipeline only reads it. The
+        // recorder reports the worst of its three SD files (any stream's failure shows).
         state.base.adc_info     = adc;
-        state.base.storage_info = storage_.info();
+        state.base.storage_info = recorder_.health();
         state.base.can_info     = comm_.canInfo();
         // The ECU has no Ethernet peripheral, so EcuSystemState carries no eth_info.
 
@@ -199,14 +226,15 @@ private:
         ++telemetry_seq_;
     }
 
-    S&    storage_;     // injected backing store, used as a Storage explicitly
+    logic::telemetry::SdRecorder<S, EcuSystemState> recorder_;  // the 3-file SD recording policy
     V&    ipa_valve_;    // injected IPA / NOS valves, read for telemetry
     V&    nos_valve_;
     A&    adc_;         // injected streaming ADC; produce() drains its ring
     Comm& comm_;        // injected communication layer; frames + downlinks records
     detail::LogBuffer log_;            // .axisram in firmware; left uninitialised until init()
-    volatile uint32_t  last_adc_ms_   = 0;  // last tick a conversion was drained; gates the silent-ADC filler
-    uint8_t            telemetry_seq_ = 0;  // 4-bit CAN telemetry record sequence (wraps)
+    volatile uint32_t  last_adc_ms_      = 0;  // last tick a conversion was drained; gates the silent-ADC filler
+    uint32_t           last_extended_ms_ = 0;  // throttles produceExtended() to ~10 Hz
+    uint8_t            telemetry_seq_     = 0;  // 4-bit CAN telemetry record sequence (wraps)
 
     static_assert(std::extent_v<decltype(SystemStateBase::valve_info)> == 2,
                   "EcuSystemState expects exactly two valves (IPA, NOS)");

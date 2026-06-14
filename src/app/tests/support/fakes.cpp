@@ -5,7 +5,7 @@
  * this file in place of the platform lets the FCU logic run on the host.
  * ------------------------------------------------------------------------- */
 
-#include "fakes.hpp"
+#include "support/fake_bus.hpp"
 
 FakeBus& bus()
 {

@@ -9,10 +9,7 @@
  * ------------------------------------------------------------------------- */
 
 #include "ecu_controller.hpp"
-#include "support/fakes.hpp"
-#include "support/fake_storage.hpp"
-#include "support/fake_valve.hpp"
-#include "support/fake_adc.hpp"
+#include "support/fakes.hpp"   // the standard set of host test doubles
 
 #include "control/persistent_state.hpp"
 #include "system/state.hpp"
@@ -92,13 +89,16 @@ CanFrame makeSetControlFlag(ControlFlag flag, uint8_t value,
 
 class EcuControllerTest : public ::testing::Test {
 protected:
-    FakeStorage      storage_;
+    FakeStorage      storage_fast_;
+    FakeStorage      storage_slow_;
+    FakeStorage      storage_ext_;
     FakeValve        ipa_valve_;
     FakeValve        nos_valve_;
     FakeStreamingAdc adc_;
     FakeCan          can_;
     logic::ecu::Controller<FakeStorage, FakeValve, FakeStreamingAdc, FakeCan>
-                     controller_{storage_, ipa_valve_, nos_valve_, adc_, can_};
+                     controller_{storage_fast_, storage_slow_, storage_ext_,
+                                 ipa_valve_, nos_valve_, adc_, can_};
     uint32_t         now_ms_ = 0;
 
     void SetUp() override
@@ -208,7 +208,7 @@ TEST_F(EcuControllerTest, UnknownControlFlagIsNotAppliedOrAcked)
     EXPECT_TRUE(bus().can_tx.empty());   // no Ack for a flag we did not apply
 }
 
-/* ---- PersistingData gates the SD write (telemetry drains regardless) ------ */
+/* ---- The shared 3-file recording policy (PersistingData + FastRecording) ---- */
 
 TEST_F(EcuControllerTest, TelemetryDrainsWithoutWritingToSdWhenFlagOff)
 {
@@ -220,20 +220,38 @@ TEST_F(EcuControllerTest, TelemetryDrainsWithoutWritingToSdWhenFlagOff)
         step();
     }
     ASSERT_FALSE(bus().can_tx.empty()) << "a full telemetry half never drained";
-    EXPECT_TRUE(storage_.writes.empty());   // drained into emptiness — nothing reached the card
+    EXPECT_TRUE(storage_fast_.writes.empty());   // nothing reached the card in any stream
+    EXPECT_TRUE(storage_slow_.writes.empty());
+    EXPECT_TRUE(storage_ext_.writes.empty());
 }
 
-TEST_F(EcuControllerTest, TelemetryPersistsToSdWhenFlagOn)
+TEST_F(EcuControllerTest, FastRecordingPersistsRawSystemStateToDataFast)
 {
     step();  // Init -> Safe
     logic::control::control_flags.set(ControlFlag::PersistingData, true);
+    logic::control::control_flags.set(ControlFlag::FastRecording, true);   // raw 2 kHz -> data_fast.bin
     const AdcInfo sample{};
-    for (int i = 0; i < 2000 && storage_.writes.empty(); ++i) {
+    for (int i = 0; i < 2000 && storage_fast_.writes.empty(); ++i) {
         adc_.push(sample);
         controller_.produceRecord(++now_ms_);
         step();
     }
-    EXPECT_FALSE(storage_.writes.empty());  // the drained half reached the SD card
+    EXPECT_FALSE(storage_fast_.writes.empty());  // the raw half reached data_fast.bin
+    EXPECT_TRUE(storage_slow_.writes.empty());   // slow file untouched in fast mode
+}
+
+TEST_F(EcuControllerTest, SlowRecordingPersistsAveragedSystemStateToDataSlow)
+{
+    step();  // Init -> Safe; FastRecording stays off -> slow (125 Hz averaged) -> data_slow.bin
+    logic::control::control_flags.set(ControlFlag::PersistingData, true);
+    const AdcInfo sample{};
+    for (int i = 0; i < 4000 && storage_slow_.writes.empty(); ++i) {
+        adc_.push(sample);
+        controller_.produceRecord(++now_ms_);
+        step();
+    }
+    EXPECT_FALSE(storage_slow_.writes.empty());  // averaged records reached data_slow.bin
+    EXPECT_TRUE(storage_fast_.writes.empty());    // fast file untouched in slow mode
 }
 
 /* ---- Telemetry (produce + drain + fragment onto CAN) --------------------- */

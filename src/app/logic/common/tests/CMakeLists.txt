@@ -34,3 +34,11 @@ add_executable(system_state_codec_test
 target_include_directories(system_state_codec_test PRIVATE ${TEST_SUPPORT} ${LOGIC_COMMON_INCLUDE_DIRS})
 target_link_libraries(system_state_codec_test PRIVATE GTest::gtest_main)
 gtest_discover_tests(system_state_codec_test PROPERTIES LABELS "unit")
+
+# Header-only main-loop liveness indicator (the DigitalOut concept + RunningIndicator).
+add_executable(running_indicator_test
+    unit/logic/indication/running_indicator_test.cpp
+)
+target_include_directories(running_indicator_test PRIVATE ${TEST_SUPPORT} ${LOGIC_COMMON_INCLUDE_DIRS})
+target_link_libraries(running_indicator_test PRIVATE GTest::gtest_main)
+gtest_discover_tests(running_indicator_test PROPERTIES LABELS "unit")
