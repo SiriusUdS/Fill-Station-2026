@@ -20,6 +20,8 @@
 #include "system/board_id.hpp"
 #include "system/state.hpp"                                    // logic::control::State
 #include "control/persistent_state.hpp"                        // logic::control::persistent_state
+#include "control/state_machine.hpp"                           // toState, isTransitionAllowed (shared)
+#include "control/refused_transition.hpp"                      // logic::control::last_refused_transition
 #include "control/control_flags.hpp"                           // logic::control::control_flags
 
 /* ------------------------------------------------------------------------- *
@@ -146,12 +148,30 @@ public:
         const auto state = logic::control::persistent_state.fill_state;
         if (state == logic::control::State::Unsafe || state == logic::control::State::Ignite) {
             if ((now_ms - last_rx_ms_) >= detail::RX_WATCHDOG_MS) {
-                logic::control::persistent_state.saveState(logic::control::State::Abort);
+                transitionTo(logic::control::State::Abort);   // routed forced safety abort
             }
         }
     }
 
+    /** @brief THE single point every FCU state change passes through: reject the change if the
+     *         shared transition table does not permit it from the current state; otherwise run
+     *         the board's per-transition action (onTransition), commit the new state, and report
+     *         acceptance. Returns true if applied, false if refused. Every path uses this —
+     *         commanded SetState, the boot Init -> Safe, the watchdog Abort. */
+    bool transitionTo(logic::control::State to)
+    {
+        const State from = logic::control::persistent_state.fill_state;
+        if (!logic::control::isTransitionAllowed(from, to)) {
+            logic::control::last_refused_transition = {from, to};  // surfaced in ExtendedSystemState
+            return false;
+        }
+        onTransition(from, to);
+        logic::control::persistent_state.saveState(to);
+        return true;
+    }
+
 private:
+
     using Command     = logic::communication::command::Command;
     using CommandType = logic::communication::command::CommandType;
     using State       = logic::control::State;
@@ -194,7 +214,7 @@ private:
         }
         switch (cmd.type) {
             case CommandType::Ping:             return handlePing(cmd, now_ms);
-            case CommandType::SetState:         return handleSetState(cmd);
+            case CommandType::SetState:         return handleSetState(cmd, now_ms);
             case CommandType::SetValvePosition: return handleSetValvePosition(cmd, now_ms);
             case CommandType::SetControlFlag:   return handleSetControlFlag(cmd, now_ms);
             case CommandType::Synchronise:      return handleSynchronise(cmd);
@@ -239,81 +259,50 @@ private:
 
     /* ---- SetState (commits through persistent_state) ------------------------- */
 
-    bool handleSetState(const Command& cmd)
+    // Route by target like handleSetControlFlag: apply to the FCU's own state machine when we
+    // are an addressee (FillingStation / Broadcast), and bridge to the ECU over CAN when the
+    // Engine is addressed (Engine / Broadcast) so both boards' state machines follow the GS
+    // command. The 2-byte SetStateFrame rides verbatim in the bridged CAN payload; the ECU
+    // applies it and Acks, and onResponse relays that Ack to the GS.
+    bool handleSetState(const Command& cmd, uint32_t now_ms)
     {
-        // The global filling-station state machine is the FCU's own: a SetState applies only
-        // when we are an addressee (FillingStation / Broadcast). An Engine-only target is not
-        // ours to apply and is not bridged — the ECU runs its own state machine and has no
-        // SetState handler — so we leave our state untouched.
         const auto target = static_cast<BoardId>(cmd.target);
-        if (target != BoardId::FillingStation && target != BoardId::Broadcast) {
-            return false;
+        bool ok = true;
+
+        if (target == BoardId::FillingStation || target == BoardId::Broadcast) {
+            ok = applyStateLocally(cmd);
         }
+        if (target == BoardId::Engine || target == BoardId::Broadcast) {
+            sendReliable(CommandType::SetState, /*sender_state=*/0,
+                         std::span<const uint8_t>(cmd.payload.data(), sizeof(SetStateFrame)),
+                         cmd.seq, now_ms);
+        }
+        return ok;
+    }
+
+    // Apply a SetState to the FCU's own (global) state machine: validate the requested id and
+    // the transition, run any per-transition action, then commit through persistent_state.
+    bool applyStateLocally(const Command& cmd)
+    {
         const auto* frame = reinterpret_cast<const SetStateFrame*>(cmd.payload.data());
-        const std::optional<State> requested = toState(frame->requestedID);
+        const std::optional<State> requested = logic::control::toState(frame->requestedID);
         if (!requested) {
             return false;  // unknown requested state id
         }
-        const State current = logic::control::persistent_state.fill_state;
-        if (!isAllowed(current, *requested)) {
-            return false;  // transition not permitted from `current`
-        }
-        // Run the per-transition action first, then commit so the change lands
-        // atomically from the caller's view.
-        runTransitionAction(current, *requested);
-        logic::control::persistent_state.saveState(*requested);
-        return true;
+        return transitionTo(*requested);   // validates, routes the action + commit, records refusals
     }
 
-    // Map a raw on-wire state id to the typed State, or nullopt if unknown. State's
-    // underlying values ARE the wire encoding, so a command can only name a defined state.
-    [[nodiscard]] static std::optional<State> toState(uint8_t id)
+    // The FCU's per-transition action hook. The legal edges are shared with the ECU (see
+    // logic::control::isTransitionAllowed); the SIDE EFFECTS are board-specific:
+    //   - Any transition INTO Safe drives the local Fill/Dump valves closed (people may
+    //     approach the system, so it must hold no flow).
+    //   - On Ignite -> Launch the FCU does nothing (the ECU drives the propellant valves).
+    void onTransition(State from, State to)
     {
-        switch (static_cast<State>(id)) {
-            case State::Init:
-            case State::Safe:
-            case State::Unsafe:
-            case State::Abort:
-            case State::Error:
-            case State::Ignite:
-            case State::Launch:
-            case State::Test:
-                return static_cast<State>(id);
+        if (to == State::Safe) {
+            (void)fill_valve_.close();
+            (void)dump_valve_.close();
         }
-        return std::nullopt;
-    }
-
-    // The filling-station transition table: is `requested` a legal operator-commanded
-    // transition from `current`? Self-transitions and any pair not listed are rejected.
-    [[nodiscard]] static bool isAllowed(State current, State requested)
-    {
-        switch (current) {
-            case State::Safe:
-                return requested == State::Test || requested == State::Unsafe;
-            case State::Test:
-                return requested == State::Safe;
-            case State::Unsafe:
-                return requested == State::Safe || requested == State::Ignite ||
-                       requested == State::Abort;
-            case State::Ignite:
-                return requested == State::Safe || requested == State::Abort;
-            case State::Abort:
-                return requested == State::Safe;
-            case State::Init:
-            case State::Error:
-            case State::Launch:
-                // No operator-commanded transitions out of these. (Launch's own
-                // transition policy is not wired yet — and nothing transitions INTO
-                // Launch above, so it stays unreachable by command for now.)
-                return false;
-        }
-        return false;
-    }
-
-    // Run the action bound to this exact from -> to transition, if any. Most
-    // transitions have none.
-    void runTransitionAction(State from, State to)
-    {
         if (from == State::Unsafe && to == State::Ignite) {
             // TODO: energise the igniter (HAL-free — e.g. a CAN command to the ECU
             // through comm_). Inert stub for now, so the transition is wired but has

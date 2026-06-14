@@ -90,6 +90,13 @@ public:
 
         comm_.init();
         telemetry_.init();   // zeroes the double buffer and mounts the SD card
+
+        // As soon as init is done, leave Init for Safe (cold boot), routed through the single
+        // transition point so onTransition runs (e.g. valves driven closed). A resumed
+        // engine/armed state from Backup SRAM is left as-is — only a fresh Init advances here.
+        if (logic::control::persistent_state.fill_state == logic::control::State::Init) {
+            (void)control_.transitionTo(logic::control::State::Safe);
+        }
     }
 
     /**
@@ -126,10 +133,6 @@ public:
         telemetry_.drain(now_ms);        // flush full halves to SD + the GS
         control_.servicePending(now_ms); // resend / time out the in-flight reliable command
         control_.watchdog(now_ms);       // GS-link abort watchdog
-
-        if (logic::control::persistent_state.fill_state == logic::control::State::Init) {
-            logic::control::persistent_state.saveState(logic::control::State::Safe);
-        }
     }
 
     /**

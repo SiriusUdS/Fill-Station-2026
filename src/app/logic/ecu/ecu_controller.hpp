@@ -75,6 +75,13 @@ public:
 
         telemetry_.init();   // zeroes the double buffer and mounts the SD card
         control_.init();
+
+        // As soon as init is done, leave Init for Safe (cold boot), routed through the single
+        // transition point so onTransition runs (both propellant valves driven closed). A
+        // resumed engine/armed state from Backup SRAM is left as-is — only a fresh Init advances.
+        if (logic::control::persistent_state.fill_state == logic::control::State::Init) {
+            (void)control_.transitionTo(logic::control::State::Safe);
+        }
     }
 
     /**
@@ -91,12 +98,6 @@ public:
 
         telemetry_.produceExtended(now_ms);  // ~10 Hz ExtendedSystemState -> data_ext.bin
         telemetry_.drain(now_ms);   // flush full halves to SD + downlink over CAN
-
-        // Minimal state machine for now: Init -> Safe on the first tick (engine states
-        // are added once routing + telemetry are in place).
-        if (logic::control::persistent_state.fill_state == logic::control::State::Init) {
-            logic::control::persistent_state.saveState(logic::control::State::Safe);
-        }
     }
 
     /**

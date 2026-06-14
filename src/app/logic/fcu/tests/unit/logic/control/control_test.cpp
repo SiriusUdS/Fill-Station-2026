@@ -69,11 +69,12 @@ std::vector<uint8_t> makeCommand(command::CommandType type, BoardId target,
     return buf;
 }
 
-std::vector<uint8_t> makeSetState(State requested, BoardId target = BoardId::FillingStation)
+std::vector<uint8_t> makeSetState(State requested, BoardId target = BoardId::FillingStation,
+                                  uint8_t seq = 0)
 {
     const SetStateFrame body{0, static_cast<uint8_t>(requested)};
     return makeCommand(command::CommandType::SetState, target,
-                       reinterpret_cast<const uint8_t*>(&body), sizeof(body));
+                       reinterpret_cast<const uint8_t*>(&body), sizeof(body), seq);
 }
 
 std::vector<uint8_t> makeSetValve(FcuValves valve, ValveCommand action, uint8_t value = 0,
@@ -113,6 +114,7 @@ protected:
         bus().reset();
         logic::control::persistent_state = logic::control::PersistentState{};
         logic::control::control_flags    = logic::control::ControlFlags{};  // all flags off
+        logic::control::last_refused_transition = {State::Init, State::Init};
         comm_.init();
         control_.init();
         clearValveCalls();   // discard the boot-safing close() so command tests start clean
@@ -232,6 +234,15 @@ TEST_F(ControlTest, IllegalStateTransitionIsRejected)
     EXPECT_EQ(current(), State::Safe);
 }
 
+TEST_F(ControlTest, RefusedTransitionIsRecorded)
+{
+    setCurrent(State::Safe);
+    deliver(makeSetState(State::Ignite));   // Safe's only exit is Unsafe -> refused
+    EXPECT_EQ(current(), State::Safe);
+    EXPECT_EQ(logic::control::last_refused_transition.from, State::Safe);
+    EXPECT_EQ(logic::control::last_refused_transition.to,   State::Ignite);
+}
+
 TEST_F(ControlTest, UnknownRequestedStateIsRejected)
 {
     setCurrent(State::Safe);
@@ -239,11 +250,55 @@ TEST_F(ControlTest, UnknownRequestedStateIsRejected)
     EXPECT_EQ(current(), State::Safe);
 }
 
-TEST_F(ControlTest, CommandForAnotherBoardIsIgnored)
+TEST_F(ControlTest, EngineSetStateBridgesOverCanWithoutLocalApply)
 {
     setCurrent(State::Safe);
-    deliver(makeSetState(State::Unsafe, BoardId::Engine));
+    deliver(makeSetState(State::Unsafe, BoardId::Engine, /*seq=*/6));
+
+    EXPECT_EQ(current(), State::Safe);   // an Engine-only target is not applied to our own state
+    EXPECT_TRUE(bus().udp_tx.empty());   // the ECU Acks; the FCU does not Ack locally
+
+    ASSERT_EQ(bus().can_tx.size(), 1u);
+    const auto& sent = bus().can_tx.front();
+    CanHeader header;
+    header.code = sent.id;
+    EXPECT_EQ(static_cast<BoardId>(header.frame.target_id), BoardId::Engine);
+    EXPECT_EQ(static_cast<PayloadType>(header.frame.payload_type), PayloadType::Command);
+    EXPECT_EQ(static_cast<command::CommandType>(header.frame.payload_id), command::CommandType::SetState);
+    EXPECT_EQ(header.frame.seq, 6u);     // GS seq propagated onto the CAN hop
+    ASSERT_GE(sent.length, sizeof(SetStateFrame));
+    EXPECT_EQ(sent.data[1], static_cast<uint8_t>(State::Unsafe));  // requested id carried verbatim
+}
+
+TEST_F(ControlTest, BroadcastSetStateAppliesLocallyAndBridges)
+{
+    setCurrent(State::Safe);
+    deliver(makeSetState(State::Unsafe, BoardId::Broadcast, /*seq=*/2));
+
+    EXPECT_EQ(current(), State::Unsafe);   // applied locally
+    EXPECT_EQ(bus().can_tx.size(), 1u);    // and bridged to the ECU
+}
+
+TEST_F(ControlTest, TransitionToSafeClosesLocalValves)
+{
+    setCurrent(State::Unsafe);
+    clearValveCalls();
+    deliver(makeSetState(State::Safe));   // any transition into Safe closes the local valves
     EXPECT_EQ(current(), State::Safe);
+    EXPECT_EQ(fill_valve_.close_calls, 1);
+    EXPECT_EQ(dump_valve_.close_calls, 1);
+}
+
+TEST_F(ControlTest, FcuIgniteToLaunchDoesNotActuateValves)
+{
+    setCurrent(State::Ignite);
+    clearValveCalls();
+    deliver(makeSetState(State::Launch));   // FCU does nothing on Ignite -> Launch (the ECU acts)
+    EXPECT_EQ(current(), State::Launch);
+    EXPECT_EQ(fill_valve_.open_calls, 0);
+    EXPECT_EQ(dump_valve_.open_calls, 0);
+    EXPECT_EQ(fill_valve_.close_calls, 0);
+    EXPECT_EQ(dump_valve_.close_calls, 0);
 }
 
 /* ---- Boot safing --------------------------------------------------------- */

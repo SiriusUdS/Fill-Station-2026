@@ -106,6 +106,8 @@ protected:
            leaks between tests; init() then commits a fresh INIT. */
         logic::control::persistent_state = logic::control::PersistentState{};
         logic::control::control_flags    = logic::control::ControlFlags{};  // all flags off
+        logic::control::last_refused_transition =
+            {logic::control::State::Init, logic::control::State::Init};
         controller_.init();
     }
 
@@ -122,10 +124,10 @@ protected:
         return logic::control::persistent_state.fill_state;
     }
 
-    /* Drive the machine into SAFE and clear recorded traffic. */
+    /* Confirm SAFE (init() already moved INIT -> SAFE), tick once, and clear recorded traffic. */
     void reachSafe()
     {
-        step();  // first tick moves INIT -> SAFE
+        step();
         ASSERT_EQ(currentState(), logic::control::State::Safe);
         bus().udp_tx.clear();
         bus().can_tx.clear();
@@ -142,11 +144,10 @@ protected:
 
 /* ---- Startup ------------------------------------------------------------- */
 
-TEST_F(FcuControllerTest, StartsAtInitAndFirstTickEntersSafe)
+TEST_F(FcuControllerTest, InitEntersSafe)
 {
-    EXPECT_EQ(currentState(), logic::control::State::Init);  // right after init(), before any tick
-    step();
-    EXPECT_EQ(currentState(), logic::control::State::Safe);  // first tick moves INIT -> SAFE
+    // Init -> Safe happens as soon as init() completes (cold boot), before any tick.
+    EXPECT_EQ(currentState(), logic::control::State::Safe);
 }
 
 /* Telemetry is no longer a per-tick heartbeat: SystemState records are produced
@@ -342,13 +343,6 @@ TEST_F(FcuControllerTest, EveryTickServicesTheLink)
 
 /* ---- Valid state transitions -------------------------------------------- */
 
-TEST_F(FcuControllerTest, SafeToTest)
-{
-    reachSafe();
-    requestState(logic::control::State::Test);
-    EXPECT_EQ(currentState(), logic::control::State::Test);
-}
-
 TEST_F(FcuControllerTest, SafeToUnsafe)
 {
     reachSafe();
@@ -356,10 +350,21 @@ TEST_F(FcuControllerTest, SafeToUnsafe)
     EXPECT_EQ(currentState(), logic::control::State::Unsafe);
 }
 
-TEST_F(FcuControllerTest, TestBackToSafe)
+TEST_F(FcuControllerTest, IgniteToLaunch)
 {
     reachSafe();
-    requestState(logic::control::State::Test);
+    requestState(logic::control::State::Unsafe);
+    requestState(logic::control::State::Ignite);
+    requestState(logic::control::State::Launch);
+    EXPECT_EQ(currentState(), logic::control::State::Launch);
+}
+
+TEST_F(FcuControllerTest, LaunchBackToSafe)
+{
+    reachSafe();
+    requestState(logic::control::State::Unsafe);
+    requestState(logic::control::State::Ignite);
+    requestState(logic::control::State::Launch);
     requestState(logic::control::State::Safe);
     EXPECT_EQ(currentState(), logic::control::State::Safe);
 }
@@ -410,7 +415,14 @@ TEST_F(FcuControllerTest, SafeRejectsIgnite)
 TEST_F(FcuControllerTest, SafeRejectsAbort)
 {
     reachSafe();
-    requestState(logic::control::State::Abort);
+    requestState(logic::control::State::Abort);   // people near: even abort is not permitted
+    EXPECT_EQ(currentState(), logic::control::State::Safe);
+}
+
+TEST_F(FcuControllerTest, SafeRejectsTest)
+{
+    reachSafe();
+    requestState(logic::control::State::Test);   // Safe's only exit is Unsafe
     EXPECT_EQ(currentState(), logic::control::State::Safe);
 }
 
@@ -434,6 +446,33 @@ TEST_F(FcuControllerTest, BroadcastCommandIsAccepted)
     reachSafe();
     requestState(logic::control::State::Unsafe, BoardId::Broadcast);
     EXPECT_EQ(currentState(), logic::control::State::Unsafe);
+}
+
+TEST_F(FcuControllerTest, RefusedTransitionAppearsInExtendedSystemState)
+{
+    reachSafe();
+    requestState(logic::control::State::Ignite);   // Safe's only exit is Unsafe -> refused
+    ASSERT_EQ(currentState(), logic::control::State::Safe);
+    bus().udp_tx.clear();
+
+    // Pump time forward until a low-rate ExtendedSystemState downlinks, then decode it.
+    FcuExtendedSystemState ext{};
+    bool found = false;
+    for (int i = 0; i < 200 && !found; ++i) {
+        stepTo(now_ms_ + 50);
+        for (const auto& d : bus().udp_tx) {
+            EthernetHeader h;
+            std::memcpy(&h, d.payload.data(), sizeof(h));
+            if (static_cast<TelemetryType>(h.payload_id) == TelemetryType::ExtendedSystemState) {
+                std::memcpy(&ext, d.payload.data() + sizeof(EthernetHeader), sizeof(ext));
+                found = true;
+                break;
+            }
+        }
+    }
+    ASSERT_TRUE(found) << "no ExtendedSystemState downlinked";
+    EXPECT_EQ(ext.last_refused_state_from, static_cast<uint8_t>(logic::control::State::Safe));
+    EXPECT_EQ(ext.last_refused_state_to,   static_cast<uint8_t>(logic::control::State::Ignite));
 }
 
 /* ---- Receive watchdog ---------------------------------------------------- */
@@ -543,13 +582,13 @@ TEST_F(FcuControllerTest, ResumesPersistedStateOnInit)
     EXPECT_EQ(currentState(), logic::control::State::Unsafe);
 }
 
-TEST_F(FcuControllerTest, ColdBootWithInvalidBlobStartsAtInit)
+TEST_F(FcuControllerTest, ColdBootWithInvalidBlobDoesNotResumeStaleState)
 {
     logic::control::persistent_state.saveState(logic::control::State::Ignite);
     logic::control::persistent_state.magic = 0;  // corrupt => looks like cold garbage
 
-    controller_.init();  // cold/corrupt boot starts at INIT (before any tick advances it)
-    EXPECT_EQ(currentState(), logic::control::State::Init);
+    controller_.init();  // cold/corrupt boot ignores the stale blob and inits fresh: Init -> Safe
+    EXPECT_EQ(currentState(), logic::control::State::Safe);
 }
 
 } // namespace

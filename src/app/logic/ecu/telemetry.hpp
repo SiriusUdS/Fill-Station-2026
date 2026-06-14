@@ -12,6 +12,7 @@
 #include "communication/interfaces/adc.hpp"      // logic::communication::StreamingAdc + AdcInfo
 #include "communication/interfaces/can.hpp"      // logic::communication::CanFrame
 #include "control/control_flags.hpp"             // control_flags — surfaced in the extended record
+#include "control/refused_transition.hpp"        // last_refused_transition — surfaced in the extended record
 #include "telemetry/sd_recorder.hpp"             // logic::telemetry::SdRecorder (shared 3-file SD policy)
 
 #include "communication/protocol/telemetry/ecu_system_state.hpp"  // EcuSystemState (+ SystemStateBase)
@@ -167,8 +168,10 @@ public:
         last_extended_ms_ = now_ms;
 
         EcuExtendedSystemState ext = {};
-        ext.creation_timestamp_ms = now_ms;
-        ext.control_flags         = logic::control::control_flags.raw();  // live recording config
+        ext.creation_timestamp_ms   = now_ms;
+        ext.control_flags           = logic::control::control_flags.raw();  // live recording config
+        ext.last_refused_state_from = static_cast<uint8_t>(logic::control::last_refused_transition.from);
+        ext.last_refused_state_to   = static_cast<uint8_t>(logic::control::last_refused_transition.to);
         recorder_.recordExtended(
             std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(&ext), sizeof(ext)));
     }

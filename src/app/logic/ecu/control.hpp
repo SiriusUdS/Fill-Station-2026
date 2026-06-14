@@ -15,7 +15,12 @@
 #include "communication/protocol/response/response_type.hpp"  // ResponseType (Pong, Ack)
 #include "communication/protocol/command/set_valve_position.hpp"  // ValveCommand
 #include "communication/protocol/command/set_control_flag.hpp"    // ControlFlag, SetControlFlagFrame, toControlFlag
+#include "communication/protocol/command/set_state.hpp"           // SetStateFrame
 #include "control/control_flags.hpp"                          // logic::control::control_flags
+#include "control/persistent_state.hpp"                       // logic::control::persistent_state
+#include "control/state_machine.hpp"                          // toState, isTransitionAllowed (shared)
+#include "control/refused_transition.hpp"                     // logic::control::last_refused_transition
+#include "system/state.hpp"                                   // logic::control::State
 #include "system/valves/ecu.hpp"                              // EcuValves
 #include "system/board_id.hpp"
 
@@ -50,6 +55,23 @@ public:
      *         today; that policy, if wanted, hooks in here as on the FCU.) */
     void init() {}
 
+    /** @brief THE single point every ECU state change passes through: reject the change if the
+     *         shared transition table does not permit it from the current state (recording the
+     *         refused transition for telemetry); otherwise run the board's per-transition action
+     *         (onTransition), commit, and report acceptance. Returns true if applied, false if
+     *         refused. Used by the bridged SetState handler and the boot Init -> Safe. */
+    bool transitionTo(logic::control::State to)
+    {
+        const auto from = logic::control::persistent_state.fill_state;
+        if (!logic::control::isTransitionAllowed(from, to)) {
+            logic::control::last_refused_transition = {from, to};  // surfaced in ExtendedSystemState
+            return false;
+        }
+        onTransition(from, to);
+        logic::control::persistent_state.saveState(to);
+        return true;
+    }
+
     /**
      * @brief Handle one inbound CAN frame: decode the header, check it is addressed
      *        to us, then dispatch the command. Telemetry/response frames and frames
@@ -75,6 +97,9 @@ public:
                 break;
             case logic::communication::command::CommandType::SetControlFlag:
                 handleSetControlFlag(frame, header);
+                break;
+            case logic::communication::command::CommandType::SetState:
+                handleSetState(frame, header);
                 break;
             case logic::communication::command::CommandType::Ping:
                 handlePing(frame, header);
@@ -141,6 +166,50 @@ private:
         comm_.sendToFcu(PayloadType::Response, static_cast<uint8_t>(ResponseType::Ack),
                         /*senderState=*/0, /*seq=*/static_cast<uint8_t>(header.frame.seq),
                         std::span<const uint8_t>{});
+    }
+
+    // Apply a SetState command bridged from the GS (relayed by the FCU over CAN): the 2-byte
+    // SetStateFrame rides verbatim in the payload (data[0] = flags, data[1] = requested id).
+    // The legal transitions are the SHARED table (logic::control::isTransitionAllowed) — the
+    // same on both boards; the ECU's own per-transition action is onTransition(). On success,
+    // Ack to the FCU echoing the seq so the reliable relay matches the reply (Gs->Fcu->Ecu,
+    // Ack: Ecu->Fcu->Gs).
+    void handleSetState(const logic::communication::CanFrame& frame, const CanHeader& header)
+    {
+        if (frame.length < sizeof(SetStateFrame)) {
+            return;  // frame too short to carry the requested state
+        }
+        SetStateFrame payload;
+        std::memcpy(&payload, frame.data.data(), sizeof(payload));
+
+        const std::optional<logic::control::State> requested =
+            logic::control::toState(payload.requestedID);
+        if (!requested) {
+            return;  // unknown requested state id — do not Ack
+        }
+        if (!transitionTo(*requested)) {
+            return;  // not a permitted transition (recorded) — do not Ack a command we did not apply
+        }
+
+        comm_.sendToFcu(PayloadType::Response, static_cast<uint8_t>(ResponseType::Ack),
+                        /*senderState=*/0, /*seq=*/static_cast<uint8_t>(header.frame.seq),
+                        std::span<const uint8_t>{});
+    }
+
+    // The ECU's per-transition action hook. The legal edges are shared with the FCU (see
+    // logic::control::isTransitionAllowed); the SIDE EFFECTS are board-specific:
+    //   - Any transition INTO Safe drives both propellant valves closed (people may approach).
+    //   - Ignite -> Launch drives both propellant valves fully open (the FCU does nothing here).
+    void onTransition(logic::control::State from, logic::control::State to)
+    {
+        if (to == logic::control::State::Safe) {
+            (void)ipa_valve_.close();
+            (void)nos_valve_.close();
+        }
+        if (from == logic::control::State::Ignite && to == logic::control::State::Launch) {
+            (void)ipa_valve_.open();
+            (void)nos_valve_.open();
+        }
     }
 
     // Answer a ping with a pong back to the FCU, echoing the payload AND the command's

@@ -13,6 +13,7 @@
 #include "communication/interfaces/thermocouple.hpp"  // logic::communication::ThermocoupleBank + ThermocoupleInfo
 #include "control/persistent_state.hpp"          // Backup-SRAM state snapshot (drain tags the source state)
 #include "control/control_flags.hpp"             // control_flags — PersistingData gates the SD write
+#include "control/refused_transition.hpp"        // last_refused_transition — surfaced in ExtendedSystemState
 #include "telemetry/sd_recorder.hpp"             // logic::telemetry::SdRecorder (shared 3-file SD policy)
 
 #include "communication/protocol/framing/payload_type.hpp"        // PayloadType
@@ -180,8 +181,10 @@ public:
         last_extended_ms_ = now_ms;
 
         FcuExtendedSystemState ext = {};
-        ext.creation_timestamp_ms = now_ms;
-        ext.control_flags         = logic::control::control_flags.raw();  // live recording config for the GS
+        ext.creation_timestamp_ms   = now_ms;
+        ext.control_flags           = logic::control::control_flags.raw();  // live recording config for the GS
+        ext.last_refused_state_from = static_cast<uint8_t>(logic::control::last_refused_transition.from);
+        ext.last_refused_state_to   = static_cast<uint8_t>(logic::control::last_refused_transition.to);
         const auto thermocouples = thermocouples_.info();
         for (std::size_t i = 0; i < THERMOCOUPLE_COUNT; ++i) {
             ext.thermocouple_info[i] = thermocouples[i];

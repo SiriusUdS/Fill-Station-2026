@@ -19,6 +19,7 @@
 #include "response/response_type.hpp"
 #include "command/set_valve_position.hpp"   // ValveCommand
 #include "command/set_control_flag.hpp"     // ControlFlag, SetControlFlagFrame
+#include "command/set_state.hpp"            // SetStateFrame
 #include "control/control_flags.hpp"        // logic::control::control_flags
 #include "system/valves/ecu.hpp"            // EcuValves
 #include "system/board_id.hpp"
@@ -77,6 +78,17 @@ CanFrame makePing(uint8_t seq = 0)
     return frame;
 }
 
+/* A SetState command FCU -> Engine: the 2-byte SetStateFrame rides in the payload
+   (data[0] = flags, data[1] = requested state id). */
+CanFrame makeSetState(State requested, BoardId target = BoardId::Engine, uint8_t seq = 0)
+{
+    CanFrame frame = makeCommand(command::CommandType::SetState, /*senderState=*/0, target, seq);
+    frame.data[0] = 0;   // flags (unused here)
+    frame.data[1] = static_cast<uint8_t>(requested);
+    frame.length  = sizeof(SetStateFrame);
+    return frame;
+}
+
 /* A SetControlFlag command FCU -> Engine: the 2-byte SetControlFlagFrame rides in
    the payload (data[0] = flag id, data[1] = value). */
 CanFrame makeSetControlFlag(ControlFlag flag, uint8_t value,
@@ -109,7 +121,12 @@ protected:
         bus().reset();
         logic::control::persistent_state = logic::control::PersistentState{};
         logic::control::control_flags    = logic::control::ControlFlags{};  // all flags off
+        logic::control::last_refused_transition = {State::Init, State::Init};
         controller_.init();
+        // init() advanced Init -> Safe, which closes both valves; discard those calls so each
+        // test counts only its own actuation.
+        ipa_valve_.open_calls = ipa_valve_.close_calls = ipa_valve_.percent_calls = 0;
+        nos_valve_.open_calls = nos_valve_.close_calls = nos_valve_.percent_calls = 0;
     }
 
     void step() { controller_.tick(++now_ms_); }
@@ -124,10 +141,9 @@ protected:
 
 /* ---- Startup ------------------------------------------------------------- */
 
-TEST_F(EcuControllerTest, StartsAtInitAndFirstTickEntersSafe)
+TEST_F(EcuControllerTest, InitEntersSafe)
 {
-    EXPECT_EQ(current(), State::Init);
-    step();
+    // Init -> Safe as soon as init() completes (cold boot), before any tick.
     EXPECT_EQ(current(), State::Safe);
 }
 
@@ -233,6 +249,70 @@ TEST_F(EcuControllerTest, UnknownControlFlagIsNotAppliedOrAcked)
     deliver(makeSetControlFlag(static_cast<ControlFlag>(0xFF), /*value=*/1));
     EXPECT_FALSE(logic::control::control_flags.get(ControlFlag::PersistingData));
     EXPECT_TRUE(bus().can_tx.empty());   // no Ack for a flag we did not apply
+}
+
+/* ---- SetState (arm/disarm the ECU's global state machine) ---------------- */
+
+TEST_F(EcuControllerTest, SetStateArmsFromSafeToUnsafeAndAcks)
+{
+    ASSERT_EQ(current(), State::Safe);   // init() already advanced Init -> Safe
+    deliver(makeSetState(State::Unsafe, BoardId::Engine, /*seq=*/9));
+
+    EXPECT_EQ(current(), State::Unsafe);
+
+    ASSERT_EQ(bus().can_tx.size(), 1u);
+    CanHeader header;
+    header.code = bus().can_tx.front().id;
+    EXPECT_EQ(static_cast<BoardId>(header.frame.sender_id), BoardId::Engine);
+    EXPECT_EQ(static_cast<BoardId>(header.frame.target_id), BoardId::FillingStation);
+    EXPECT_EQ(static_cast<PayloadType>(header.frame.payload_type), PayloadType::Response);
+    EXPECT_EQ(static_cast<ResponseType>(header.frame.payload_id), ResponseType::Ack);
+    EXPECT_EQ(header.frame.seq, 9u);   // echoes the command seq so the FCU matches it
+}
+
+TEST_F(EcuControllerTest, SetStateDisarmsFromUnsafeBackToSafe)
+{
+    deliver(makeSetState(State::Unsafe));   // Safe -> Unsafe
+    ASSERT_EQ(current(), State::Unsafe);
+    deliver(makeSetState(State::Safe));     // Unsafe -> Safe
+    EXPECT_EQ(current(), State::Safe);
+}
+
+TEST_F(EcuControllerTest, SetStateRejectsIllegalTransitionWithoutAck)
+{
+    ASSERT_EQ(current(), State::Safe);
+    deliver(makeSetState(State::Ignite, BoardId::Engine));  // Safe -> Ignite is not permitted here
+    EXPECT_EQ(current(), State::Safe);
+    EXPECT_TRUE(bus().can_tx.empty());   // no Ack for a transition we did not apply
+
+    // The refused transition is recorded for the ExtendedSystemState telemetry.
+    EXPECT_EQ(logic::control::last_refused_transition.from, State::Safe);
+    EXPECT_EQ(logic::control::last_refused_transition.to,   State::Ignite);
+}
+
+TEST_F(EcuControllerTest, IgniteToLaunchOpensBothValves)
+{
+    deliver(makeSetState(State::Unsafe));   // Safe -> Unsafe
+    deliver(makeSetState(State::Ignite));   // Unsafe -> Ignite
+    const auto ipa_before = ipa_valve_.open_calls;
+    const auto nos_before = nos_valve_.open_calls;
+
+    deliver(makeSetState(State::Launch));    // Ignite -> Launch: the ECU drives both valves open
+    EXPECT_EQ(current(), State::Launch);
+    EXPECT_GT(ipa_valve_.open_calls, ipa_before);
+    EXPECT_GT(nos_valve_.open_calls, nos_before);
+}
+
+TEST_F(EcuControllerTest, TransitionToSafeClosesBothValves)
+{
+    deliver(makeSetState(State::Unsafe));   // Safe -> Unsafe
+    const auto ipa_before = ipa_valve_.close_calls;
+    const auto nos_before = nos_valve_.close_calls;
+
+    deliver(makeSetState(State::Safe));     // Unsafe -> Safe: the ECU drives both valves closed
+    EXPECT_EQ(current(), State::Safe);
+    EXPECT_GT(ipa_valve_.close_calls, ipa_before);
+    EXPECT_GT(nos_valve_.close_calls, nos_before);
 }
 
 /* ---- The shared 3-file recording policy (PersistingData + FastRecording) ---- */
