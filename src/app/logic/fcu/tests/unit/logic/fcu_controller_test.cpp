@@ -77,7 +77,7 @@ CanFrame makeCanFrame(BoardId sender, BoardId target, uint8_t messageId,
 
     CanFrame frame;
     frame.id     = header.code;
-    frame.data   = data;
+    std::memcpy(frame.data.data(), data.data(), data.size());  // 8 bytes into the FD-sized frame
     frame.length = 8;
     return frame;
 }

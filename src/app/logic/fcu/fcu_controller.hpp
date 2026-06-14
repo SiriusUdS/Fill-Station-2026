@@ -111,6 +111,9 @@ public:
                 telemetry_.relayEcuFrame(in->frame, now_ms);
             }
         }
+        // Emit this tick's batched ECU relays as one datagram (a burst folds into a single
+        // packet; a lone record still goes out this same tick).
+        telemetry_.flushRelayedEcu(now_ms);
 
         // UDP ingress: ground-station commands.
         comm_.tick();  // service the link so receiveDatagram() can return inbound traffic

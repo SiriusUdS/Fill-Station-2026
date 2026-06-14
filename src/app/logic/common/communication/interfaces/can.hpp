@@ -26,8 +26,10 @@ enum class CanError {
     InternalError,  /**< Unspecified failure in the underlying transport. */
 };
 
-/** @brief Maximum number of payload bytes a classic CAN frame can carry. */
-inline constexpr std::size_t MAX_PAYLOAD_LENGTH_BYTES = 8;
+/** @brief Maximum payload bytes a CAN frame can carry — 64 for a CAN-FD frame (was 8 for
+ *         classic CAN). A whole EcuSystemState now fits in one FD frame, so the SystemState
+ *         codec drops from 8 fragments per record to 1. */
+inline constexpr std::size_t MAX_PAYLOAD_LENGTH_BYTES = 64;
 
 /**
  * @brief A hardware-agnostic CAN frame as seen by the logic layer.

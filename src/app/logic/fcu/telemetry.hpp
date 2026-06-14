@@ -195,18 +195,38 @@ public:
                        /*seq=*/0, bytes, now_ms);
     }
 
-    /** @brief Feed one inbound CAN frame to the ECU-telemetry reassembler; when a
-     *         full EcuSystemState rebuilds, relay it to the GS tagged BoardId::Engine
-     *         so the GS demuxes it from our own records. Non-telemetry frames are
-     *         ignored by the reassembler. */
+    /** @brief Feed one inbound CAN frame to the ECU-telemetry reassembler; when a full
+     *         EcuSystemState rebuilds, BATCH it for relay to the GS (tagged BoardId::Engine
+     *         so the GS demuxes it from our own records). The batch is flushed by
+     *         flushRelayedEcu() at the end of the tick — at the ECU's full 2 kHz this folds
+     *         a tick's worth of records into one datagram instead of one UDP packet each.
+     *         Non-telemetry frames are ignored by the reassembler. */
     void relayEcuFrame(const logic::communication::CanFrame& frame, uint32_t now_ms)
     {
         if (auto record = ecu_reassembler_.accept(frame)) {
-            const EcuSystemState ecu = *record;
-            const std::span<const uint8_t> one(reinterpret_cast<const uint8_t*>(&ecu), sizeof(ecu));
-            downlink(BoardId::Engine, /*sourceState (ECU state not yet in the record)*/ 0,
-                     one, one.size(), now_ms);
+            std::memcpy(ecu_relay_buf_.data() + ecu_relay_len_, &*record, sizeof(EcuSystemState));
+            ecu_relay_len_ += sizeof(EcuSystemState);
+            // Flush as soon as the batch can't take another whole record (one datagram's worth);
+            // the rest of the tick's records start a fresh batch.
+            if (ecu_relay_len_ + sizeof(EcuSystemState) > ecu_relay_buf_.size()) {
+                flushRelayedEcu(now_ms);
+            }
         }
+    }
+
+    /** @brief Relay any batched ECU records to the GS as a single datagram (tagged
+     *         BoardId::Engine), then empty the batch. Called from the controller each tick
+     *         after CAN ingress, so a burst drained in one tick rides one datagram while a
+     *         lone record still goes out promptly (same tick). */
+    void flushRelayedEcu(uint32_t now_ms)
+    {
+        if (ecu_relay_len_ == 0) {
+            return;
+        }
+        downlink(BoardId::Engine, /*sourceState (ECU state not yet in the record)*/ 0,
+                 std::span<const uint8_t>(ecu_relay_buf_.data(), ecu_relay_len_),
+                 sizeof(EcuSystemState), now_ms);
+        ecu_relay_len_ = 0;
     }
 
 private:
@@ -294,6 +314,15 @@ private:
     volatile uint32_t  last_adc_ms_ = 0;  // last tick a conversion was drained; gates the silent-ADC filler
     uint32_t           last_extended_ms_ = 0;  // throttles produceExtended() to ~10 Hz
     logic::communication::can::SystemStateReassembler ecu_reassembler_;  // rebuilds ECU telemetry from CAN
+
+    // Batches reassembled ECU records so they relay to the GS as datagrams (like our own
+    // telemetry) instead of one UDP packet per record — at the ECU's full 2 kHz that would be
+    // thousands of tiny packets a second. Holds up to one datagram's worth of whole records;
+    // filled + flushed entirely from the main-loop tick (no double buffer needed).
+    static constexpr std::size_t ECU_RELAY_BATCH_RECORDS =
+        Comm::GS_PAYLOAD_CAPACITY / sizeof(EcuSystemState);
+    std::array<uint8_t, ECU_RELAY_BATCH_RECORDS * sizeof(EcuSystemState)> ecu_relay_buf_;
+    std::size_t ecu_relay_len_ = 0;   // bytes currently batched (a whole number of records)
 
     static_assert(std::extent_v<decltype(SystemStateBase::valve_info)> == 2,
                   "FcuSystemState expects exactly two valves (Fill, Dump)");

@@ -56,6 +56,7 @@ public:
         header.frame.payload_type = static_cast<uint8_t>(payloadType);
         header.frame.payload_id   = payloadId;
         header.frame.seq          = static_cast<uint8_t>(seq & 0x0F);
+        header.frame.priority     = canBusPriority(payloadType);  // responses preempt the telemetry stream
 
         logic::communication::CanFrame frame;
         frame.id = header.code;

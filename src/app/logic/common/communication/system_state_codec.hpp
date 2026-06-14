@@ -34,7 +34,7 @@
 
 namespace logic::communication::can {
 
-inline constexpr std::size_t FRAGMENT_PAYLOAD_BYTES = 7;   // 8 data bytes - 1 index byte
+inline constexpr std::size_t FRAGMENT_PAYLOAD_BYTES = MAX_PAYLOAD_LENGTH_BYTES - 1;  // frame data minus the 1 index byte (63 on CAN-FD)
 inline constexpr std::size_t SYSTEM_STATE_FRAGMENTS =
     (sizeof(EcuSystemState) + FRAGMENT_PAYLOAD_BYTES - 1) / FRAGMENT_PAYLOAD_BYTES;
 
@@ -54,6 +54,7 @@ inline void packSystemState(const EcuSystemState& record, BoardId sender, BoardI
     header.frame.sender_state = seq & 0x0F;
     header.frame.payload_type = static_cast<uint8_t>(PayloadType::Telemetry);
     header.frame.payload_id   = static_cast<uint8_t>(TelemetryType::SystemState);
+    header.frame.priority     = canBusPriority(PayloadType::Telemetry);  // low: yields to commands/responses
 
     for (std::size_t i = 0; i < SYSTEM_STATE_FRAGMENTS; ++i) {
         CanFrame& f = out[i];

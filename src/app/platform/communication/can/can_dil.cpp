@@ -9,6 +9,7 @@
 
 #include "communication/can/can_dil.hpp"
 #include "communication/interfaces/can.hpp"
+#include "communication/protocol/framing/can_header.hpp"   // CAN_ID_PRIORITY_BIT (TX lane selection)
 
 #include <array>
 #include <cstddef>
@@ -29,8 +30,11 @@ constexpr uint32_t TARGET_ID_MASK =
     ((1U << TARGET_ID_WIDTH_BITS) - 1U) << TARGET_ID_SHIFT_BITS;
 
 /* Capacity of the software RX ring. Single-producer (ISR) / single-consumer
-   (main loop), so a plain head/tail index pair is enough. */
-constexpr std::size_t RX_RING_CAPACITY_FRAMES = 32;
+   (main loop), so a plain head/tail index pair is enough. Deep enough that the FCU,
+   which receives the ECU's full 2 kHz telemetry, can absorb a burst across a slow
+   main-loop tick (e.g. one stalled on an SD write) without the hardware FIFO
+   overrunning. */
+constexpr std::size_t RX_RING_CAPACITY_FRAMES = 64;
 
 struct RxFrame {
     FDCAN_RxHeaderTypeDef header{};
@@ -44,6 +48,35 @@ struct RxRing {
 };
 
 RxRing s_rxRing;
+
+/* Software TX rings, in TWO priority lanes. The ECU's full-rate telemetry drain hands off
+   a whole double-buffer half at once (~73 records = ~73 FD frames) and, if the main loop
+   stalled, possibly both halves; the 16-deep hardware TX FIFO cannot hold that, so send()
+   queues into a RAM ring and pumpTx() feeds the FIFO as it drains (from the TX-FIFO-empty
+   ISR + opportunistically on the main loop).
+
+   Two lanes so a command/response never queues behind that telemetry burst: send() lanes a
+   frame by its id priority bit (FrameCanHeader::priority, the id's MSB), and pumpTx() always
+   empties the HI lane before the LO lane. Combined with the hardware running in TX-QUEUE mode
+   (lowest id transmitted first, set in init()), an urgent frame preempts both the software
+   backlog and any telemetry already queued in the hardware — its latency drops to about one
+   in-flight frame instead of the ~24 ms it would wait behind a single FIFO ring.
+
+   LO holds both telemetry halves plus margin; HI is small — commands/responses are short and
+   infrequent, but a dropped one is serious (counted separately). send() (main loop) is the
+   sole producer; pumpTx() (under an FDCAN1_IT0 mask) is the sole consumer. */
+constexpr std::size_t TX_RING_LO_FRAMES = 192;   // telemetry (full-rate burst)
+constexpr std::size_t TX_RING_HI_FRAMES = 32;    // commands / responses (low-rate, must not drop)
+
+template <std::size_t Capacity>
+struct TxRing {
+    std::array<CanFrame, Capacity> frames{};
+    volatile uint16_t head = 0;   // producer: send() (main loop)
+    volatile uint16_t tail = 0;   // consumer: pumpTx()
+};
+
+TxRing<TX_RING_LO_FRAMES> s_txLo;   // telemetry lane
+TxRing<TX_RING_HI_FRAMES> s_txHi;   // command/response lane (drained first)
 
 /* Handle captured at init so send() can reach the peripheral. */
 FDCAN_HandleTypeDef* s_hfdcan = nullptr;
@@ -98,6 +131,76 @@ std::size_t dlcToBytes(uint32_t dlc)
     return lut[dlc & 0xFu];
 }
 
+/* Append one frame to a lane. Returns false (frame dropped) if the lane is full. Producer
+   side, called from send() with FDCAN1_IT0 masked. */
+template <std::size_t N>
+bool ringPush(TxRing<N>& r, const CanFrame& f)
+{
+    const uint16_t next = (r.head + 1) % N;
+    if (next == r.tail) {
+        return false;   // ring full
+    }
+    r.frames[r.head] = f;
+    r.head = next;
+    return true;
+}
+
+/* True while the hardware TX FIFO/queue has room for another frame. We must NOT use
+   HAL_FDCAN_GetTxFifoFreeLevel() here: it reads TXFQS.TFFL, which the hardware forces to 0
+   whenever TX-QUEUE mode is selected (TXBC.TFQM=1) — so the free level always looks "full",
+   the pump never hands a frame to the peripheral, and the FIFO idles while the software ring
+   overflows. The TXFQS.TFQF "full" flag is valid in BOTH FIFO and queue mode, so test that. */
+inline bool txHasRoom()
+{
+    return (s_hfdcan->Instance->TXFQS & FDCAN_TXFQS_TFQF) == 0u;
+}
+
+/* Drain one lane into the hardware TX FIFO/queue while it has room. Consumer side. */
+template <std::size_t N>
+void ringDrainToHw(TxRing<N>& r)
+{
+    while (r.tail != r.head && txHasRoom()) {
+        const CanFrame& f = r.frames[r.tail];
+
+        FDCAN_TxHeaderTypeDef txHeader{};
+        txHeader.Identifier          = f.id;
+        txHeader.IdType              = FDCAN_EXTENDED_ID;
+        txHeader.TxFrameType         = FDCAN_DATA_FRAME;
+        txHeader.DataLength          = bytesToDlc(f.length);
+        txHeader.ErrorStateIndicator = FDCAN_ESI_ACTIVE;
+        txHeader.BitRateSwitch       = FDCAN_BRS_ON;
+        txHeader.FDFormat            = FDCAN_FD_CAN;
+        txHeader.TxEventFifoControl  = FDCAN_NO_TX_EVENTS;
+        txHeader.MessageMarker       = 0;
+
+        if (HAL_FDCAN_AddMessageToTxFifoQ(
+                s_hfdcan, &txHeader, const_cast<uint8_t*>(f.data.data())) != HAL_OK) {
+            s_info.status.tx_error = 1u;
+            return;   // leave it queued; retry on the next pump
+        }
+        s_info.status.tx_error = 0u;
+        r.tail = (r.tail + 1) % N;
+    }
+}
+
+/* Move queued frames into the hardware TX FIFO/queue, HI lane (commands/responses) first so
+   they preempt telemetry. The decoupling point of the full-rate downlink: send() drops a
+   whole drained half into the LO ring in microseconds, and this drains it onto the wire over
+   the following milliseconds. Re-armed by the TX-FIFO-empty interrupt, and kicked by send()
+   so an idle FIFO starts transmitting immediately.
+
+   NOT re-entrant: send() (main loop) calls it with FDCAN1_IT0 masked, and the ISR runs on
+   that same line, so the two can never overlap — each tail is advanced from one context at a
+   time. */
+void pumpTx()
+{
+    if (s_hfdcan == nullptr) {
+        return;
+    }
+    ringDrainToHw(s_txHi);   // commands / responses first
+    ringDrainToHw(s_txLo);   // then telemetry
+}
+
 } // namespace
 
 /* -------------------------------------------------------------------------- */
@@ -105,77 +208,6 @@ std::size_t dlcToBytes(uint32_t dlc)
 /* -------------------------------------------------------------------------- */
 
 namespace platform::communication::can {
-
-/* ---- Live FDCAN diagnostics (debug aid; watch g_can_diag in the debugger) -------- *
- * Snapshotted from the peripheral every receive() (i.e. every controller tick). Tells
- * apart the two failure modes of a bench-less FD bring-up:
- *   - wire / data-phase problem: tec/rec climb, ep/bo set, dlec != 0, busoff_events rises.
- *   - overrun:                   rxf0_lost rises (RX FIFO0 message lost), rxf0_full,
- *                                tx_fifo_full rises, or s_info.rx_dropped (ring) climbs.
- *   - link is actually working:  redl == 1 and rbrs == 1 (an FD/BRS frame was received),
- *                                tdcv ~= 10 (measured loop delay in tq), counters near 0.
- * Pure status reads (non-destructive) except the deliberate RF0L clear. */
-struct CanDiag {
-    uint32_t psr;            // raw protocol status register
-    uint32_t ecr;            // raw error counter register
-    uint8_t  tec;            // transmit error counter
-    uint8_t  rec;            // receive error counter
-    uint8_t  lec;            // last error code (arbitration phase): 0 none .. 6 crc, 7 no change
-    uint8_t  dlec;           // last error code (DATA phase) — the key one for FD/BRS
-    uint8_t  act;            // activity: 0 sync, 1 idle, 2 receiver, 3 transmitter
-    uint8_t  tdcv;           // measured transmitter delay comp value (data tq)
-    bool     ep;             // error passive
-    bool     ew;             // error warning
-    bool     bo;             // bus off
-    bool     redl;           // an FD (EDL) frame was received since reset
-    bool     rbrs;           // a bit-rate-switched (BRS) frame was received since reset
-    uint8_t  rxf0_fill;      // RX FIFO0 fill level
-    bool     rxf0_full;      // RX FIFO0 full
-    uint32_t rxf0_lost;      // RX FIFO0 message-lost (overrun) events
-    uint32_t busoff_events;  // times the node entered bus-off
-    uint32_t tx_fifo_full;   // times send() found the TX FIFO full
-};
-__attribute__((used)) CanDiag g_can_diag{};
-
-void snapshotDiag()
-{
-    if (s_hfdcan == nullptr) {
-        return;
-    }
-    FDCAN_GlobalTypeDef* const p = s_hfdcan->Instance;
-    const uint32_t psr = p->PSR;
-    const uint32_t ecr = p->ECR;
-
-    g_can_diag.psr  = psr;
-    g_can_diag.ecr  = ecr;
-    g_can_diag.tec  = static_cast<uint8_t>(ecr & 0xFFu);
-    g_can_diag.rec  = static_cast<uint8_t>((ecr >> 8) & 0x7Fu);
-    g_can_diag.lec  = static_cast<uint8_t>(psr & 0x7u);
-    g_can_diag.dlec = static_cast<uint8_t>((psr >> 8) & 0x7u);
-    g_can_diag.act  = static_cast<uint8_t>((psr >> 3) & 0x3u);
-    g_can_diag.tdcv = static_cast<uint8_t>((psr >> 16) & 0x7Fu);
-    g_can_diag.ep   = (psr & FDCAN_PSR_EP)   != 0u;
-    g_can_diag.ew   = (psr & FDCAN_PSR_EW)   != 0u;
-    g_can_diag.redl = (psr & FDCAN_PSR_REDL) != 0u;
-    g_can_diag.rbrs = (psr & FDCAN_PSR_RBRS) != 0u;
-
-    const bool bo = (psr & FDCAN_PSR_BO) != 0u;
-    static bool s_prev_bo = false;
-    if (bo && !s_prev_bo) {
-        ++g_can_diag.busoff_events;   // rising edge: entered bus-off
-    }
-    s_prev_bo     = bo;
-    g_can_diag.bo = bo;
-
-    const uint32_t rxf0s = p->RXF0S;
-    g_can_diag.rxf0_fill = static_cast<uint8_t>(rxf0s & 0x7Fu);
-    g_can_diag.rxf0_full = (rxf0s & FDCAN_RXF0S_F0F) != 0u;
-
-    if ((p->IR & FDCAN_IR_RF0L) != 0u) {   // RX FIFO0 message lost = overrun
-        ++g_can_diag.rxf0_lost;
-        p->IR = FDCAN_IR_RF0L;             // clear (write 1)
-    }
-}
 
 std::optional<CanError> Can::init(FDCAN_HandleTypeDef* hfdcan, uint8_t nodeId)
 {
@@ -199,8 +231,8 @@ std::optional<CanError> Can::init(FDCAN_HandleTypeDef* hfdcan, uint8_t nodeId)
     //   data phase (BRS):     presc 1, 1 + 19 +  5 = 25 tq -> 2 Mbit (SP 80%)
     // 2 Mbit (not the ISOW1044's 5 Mbit max) keeps its ~205 ns isolated loop delay at ~41%
     // of the data bit -> wide TDC margin, safe without bench validation. To dial back, edit
-    // the seg/prescaler values below, or clear FDOE/BRSE for classic CAN. (Element sizes
-    // stay 8 bytes here; widening to 64 — collapsing 8 fragments/record to 1 — lands later.)
+    // the seg/prescaler values below, or clear FDOE/BRSE for classic CAN. (The 64-byte
+    // element size — one whole record per frame — is set in the .ioc, not here.)
     SET_BIT(hfdcan->Instance->CCCR, FDCAN_CCCR_FDOE | FDCAN_CCCR_BRSE);  // FD + bit-rate switch
 
     hfdcan->Instance->NBTP =
@@ -228,10 +260,19 @@ std::optional<CanError> Can::init(FDCAN_HandleTypeDef* hfdcan, uint8_t nodeId)
     // than the CubeMX .ioc, while the peripheral is still in config mode (INIT/CCE set
     // by MX_FDCAN1_Init, before HAL_FDCAN_Start below).
     //
-    // The trade: CAN TX is now best-effort. That is fine for ECU->FCU telemetry (already
-    // downsampled / best-effort), but FCU->ECU commands must NOT be fire-and-forget —
-    // each needs its own response + retry at the application layer (see Control).
+    // The trade: CAN TX is now best-effort. That is fine for ECU->FCU telemetry (a live
+    // full-rate stream — a dropped frame is just one stale sample), but FCU->ECU commands
+    // must NOT be fire-and-forget — each needs its own response + retry at the application
+    // layer (see Control).
     SET_BIT(hfdcan->Instance->CCCR, FDCAN_CCCR_DAR);
+
+    // TX QUEUE mode (TXBC.TFQM): transmit the LOWEST-id pending frame first instead of in FIFO
+    // order. Our id carries priority in its MSB (FrameCanHeader::priority), so this makes the
+    // hardware send a queued command/response ahead of any telemetry already sitting in the TX
+    // buffers — the last-leg companion to the two software lanes. MX_FDCAN1_Init wrote the TX
+    // buffer addresses/count into TXBC; we only flip the mode bit, in the same config window
+    // (INIT/CCE set) as the timing/DAR writes, so the RAM layout is untouched.
+    SET_BIT(hfdcan->Instance->TXBC, FDCAN_TXBC_TFQM);
 
     FDCAN_FilterTypeDef filter{};
     filter.IdType       = FDCAN_EXTENDED_ID;
@@ -254,6 +295,13 @@ std::optional<CanError> Can::init(FDCAN_HandleTypeDef* hfdcan, uint8_t nodeId)
     if (HAL_FDCAN_ActivateNotification(s_hfdcan, FDCAN_IT_RX_FIFO0_NEW_MESSAGE, 0) != HAL_OK) {
         return fail();
     }
+    // TX FIFO empty: re-arms pumpTx() to refill the hardware FIFO from the software TX ring
+    // as it drains, so the ECU's full-rate downlink burst clocks out in the background
+    // without the main loop having to pump it. Both notifications land on interrupt line 0
+    // (FDCAN1_IT0), already NVIC-enabled below.
+    if (HAL_FDCAN_ActivateNotification(s_hfdcan, FDCAN_IT_TX_FIFO_EMPTY, 0) != HAL_OK) {
+        return fail();
+    }
 
     /* ActivateNotification only unmasks the interrupt at the peripheral; the CPU
        still won't vector unless the NVIC line is enabled. CubeMX does not emit this
@@ -270,39 +318,43 @@ std::optional<CanError> Can::init(FDCAN_HandleTypeDef* hfdcan, uint8_t nodeId)
 
 std::optional<CanError> Can::send(const CanFrame& frame)
 {
-    FDCAN_TxHeaderTypeDef txHeader{};
-    txHeader.Identifier          = frame.id;
-    txHeader.IdType              = FDCAN_EXTENDED_ID;
-    txHeader.TxFrameType         = FDCAN_DATA_FRAME;
-    txHeader.DataLength          = bytesToDlc(frame.length);  // FD DLC for the payload length
-    txHeader.ErrorStateIndicator = FDCAN_ESI_ACTIVE;
-    txHeader.BitRateSwitch       = FDCAN_BRS_ON;    // switch to the fast (2 Mbit) data phase
-    txHeader.FDFormat            = FDCAN_FD_CAN;     // CAN-FD frame (was classic)
-    txHeader.TxEventFifoControl  = FDCAN_NO_TX_EVENTS;
-    txHeader.MessageMarker       = 0;
+    // Lane the frame by its id priority bit (0 = command/response -> HI, 1 = telemetry -> LO),
+    // then pump as much as the hardware will take. The ring absorbs the ECU's full-rate drain
+    // burst (a whole telemetry half at once), which the 16-deep hardware FIFO could not;
+    // pumpTx() drains it onto the wire over the following milliseconds, re-armed by the
+    // TX-FIFO-empty interrupt. send() therefore returns in microseconds and never blocks.
+    //
+    // FDCAN1_IT0 carries both the RX-FIFO0 and TX-FIFO-empty interrupts; mask it for the brief
+    // enqueue + pump so the ISR pump cannot run concurrently (single consumer of each lane's
+    // tail). Masking only this line leaves the 2 kHz record timer and the SD DMA untouched.
+    const bool urgent = ((frame.id >> CAN_ID_PRIORITY_BIT) & 1u) == 0u;
 
-    if (HAL_FDCAN_GetTxFifoFreeLevel(s_hfdcan) == 0) {
-        s_info.status.tx_error = 1u;
-        ++g_can_diag.tx_fifo_full;
-        return CanError::InternalError;  // TX FIFO full
-    }
+    HAL_NVIC_DisableIRQ(FDCAN1_IT0_IRQn);
 
-    // The HAL signature takes a non-const payload pointer although it only reads it.
-    if (HAL_FDCAN_AddMessageToTxFifoQ(
-            s_hfdcan, &txHeader,
-            const_cast<uint8_t*>(frame.data.data())) != HAL_OK) {
+    const bool queued = urgent ? ringPush(s_txHi, frame) : ringPush(s_txLo, frame);
+    if (!queued) {   // lane full: drop (best-effort), like the old full-FIFO path
+        HAL_NVIC_EnableIRQ(FDCAN1_IT0_IRQn);
         s_info.status.tx_error = 1u;
         return CanError::InternalError;
     }
 
-    s_info.status.tx_error = 0u;
+    pumpTx();   // kick the hardware (it may be idle, awaiting the first frame of a burst)
+
+    HAL_NVIC_EnableIRQ(FDCAN1_IT0_IRQn);
     return std::nullopt;
 }
 
 std::optional<CanFrame> Can::receive()
 {
     recoverIfBusOff();  // self-heal a latched bus-off (e.g. after the peer power-cycled)
-    snapshotDiag();     // refresh g_can_diag (error counters / FD status) for the debugger
+
+    // Opportunistic top-up: the TX-FIFO-empty ISR is the primary pump, but receive() runs
+    // every controller tick, so draining the ring here too keeps it moving even if the
+    // FIFO never fully emptied (TFE would not have fired). Mask FDCAN1_IT0 so it cannot
+    // race the ISR pump on the ring tail.
+    HAL_NVIC_DisableIRQ(FDCAN1_IT0_IRQn);
+    pumpTx();
+    HAL_NVIC_EnableIRQ(FDCAN1_IT0_IRQn);
 
     if (s_rxRing.tail == s_rxRing.head) {
         return std::nullopt;  // ring empty
@@ -333,6 +385,15 @@ CanInfo Can::info() const
 /* -------------------------------------------------------------------------- */
 /* Interrupt service routine                                                  */
 /* -------------------------------------------------------------------------- */
+
+/* FDCAN TX FIFO empty interrupt: refill the hardware FIFO from the software TX ring.
+   Keeps C linkage so it overrides the HAL's weak symbol. Runs on FDCAN1_IT0 (the same
+   line send()/receive() mask around their pumps), so it is the sole pump in flight. */
+extern "C" void HAL_FDCAN_TxFifoEmptyCallback(FDCAN_HandleTypeDef* hfdcan)
+{
+    (void)hfdcan;
+    pumpTx();
+}
 
 /* FDCAN RX FIFO0 "new message" interrupt: producer side of the ring buffer.
    Keeps C linkage so it overrides the HAL's weak symbol. */

@@ -26,11 +26,13 @@
  * The CAN-only sibling of logic::fcu::Telemetry (no Ethernet egress).
  *
  * It owns the telemetry double buffer (log_), turns each ADC conversion into an
- * EcuSystemState record (produce), and flushes full halves to SD while downsampling
- * one record per drained half onto the CAN bus (drain): the SD gets the full-rate
- * log, the bus cannot (a record is many frames), so the CAN downlink is a downsampled
- * live stream the FCU relays to the ground station. It speaks through the injected
- * Communication layer; the shared SystemState codec does the CAN fragmentation.
+ * EcuSystemState record (produce), and flushes full halves to SD AND downlinks every
+ * record in the half onto the CAN bus (drain): the SD and the CAN downlink both carry
+ * the full-rate log, so the FCU relays the ECU's live stream to the ground station at
+ * the same rate the FCU sends its own. A record is one CAN-FD frame now (the codec is
+ * a single fragment); the platform CAN driver paces the per-drain burst through a
+ * software TX ring so it cannot overflow the hardware FIFO. It speaks through the
+ * injected Communication layer; the shared SystemState codec does the CAN framing.
  *
  * In firmware the owning controller instance is placed in D1 AXI-SRAM (see main.cpp)
  * so the SD write can hand a buffer half straight to the SDMMC DMA.
@@ -125,8 +127,11 @@ public:
 
     /** @brief Flush any full half: SD-log the SystemState through the shared recorder
      *         (raw data_fast.bin vs 125 Hz averaged data_slow.bin, per the flags), and
-     *         downlink the half's most recent record to the FCU over CAN (always — the
-     *         CAN stream is the ECU's live link, independent of SD recording mode). */
+     *         downlink EVERY record in the half to the FCU over CAN (always, full-rate —
+     *         the CAN stream is the ECU's live link, independent of SD recording mode, and
+     *         now carries the same 2 kHz the SD log does). This only fills the driver's
+     *         software TX ring and returns; the ring paces the burst onto the bus in the
+     *         background (TX-FIFO-empty ISR), so the loop never waits on the wire. */
     void drain(uint32_t /*now_ms*/)
     {
         for (uint8_t h = 0; h < 2; ++h) {
@@ -138,10 +143,14 @@ public:
             recorder_.recordSystemState(
                 std::span<const uint8_t>(log_.data[h], detail::LOG_HALF_BYTES), bytes);
 
-            if (bytes >= sizeof(EcuSystemState)) {
-                EcuSystemState latest;
-                std::memcpy(&latest, &log_.data[h][bytes - sizeof(EcuSystemState)], sizeof(EcuSystemState));
-                sendRecordCan(latest);
+            // Hand off every whole record in the half (one FD frame each). The platform
+            // CAN driver queues them in its software TX ring, so this is a run of cheap
+            // RAM copies, not a blocking wait on the ~24 ms it takes to clock the burst out.
+            for (std::size_t off = 0; off + sizeof(EcuSystemState) <= bytes;
+                 off += sizeof(EcuSystemState)) {
+                EcuSystemState rec;
+                std::memcpy(&rec, &log_.data[h][off], sizeof(EcuSystemState));
+                sendRecordCan(rec);
             }
             log_.ready[h] = false;
         }

@@ -38,10 +38,6 @@ namespace logic::fcu {
 
 namespace detail {
 
-/* Ground-station endpoint (telemetry / response destination). */
-inline constexpr std::array<uint8_t, 6> GS_MAC  = {0x00, 0xE0, 0x4C, 0x33, 0x0F, 0x98};
-inline constexpr uint16_t               GS_PORT = 7520;
-
 /* The link's UDP payload limit (EthernetHeader + payload + CRC must fit; keep in
    sync with the platform stack). */
 inline constexpr std::size_t UDP_MAX_PAYLOAD_BYTES = 1432;
@@ -51,6 +47,23 @@ inline constexpr uint32_t make_ipv4(uint8_t b1, uint8_t b2, uint8_t b3, uint8_t 
     return (static_cast<uint32_t>(b1) << 24) | (static_cast<uint32_t>(b2) << 16) |
            (static_cast<uint32_t>(b3) << 8) | static_cast<uint32_t>(b4);
 }
+
+/* The two ground-station hosts the FCU talks to — DIFFERENT machines:
+ *   - the telemetry sink receives all telemetry (our own FcuSystemState / Extended AND the
+ *     ECU records we relay);
+ *   - the commander sends us commands, and is where we return responses (Ack / Pong).
+ * sendToGs() routes by payload class: Response -> commander, everything else -> sink. The
+ * platform stack does no outbound ARP, so each endpoint carries its peer MAC.
+ *
+ * The commander's real address is not known yet; for bring-up it MIRRORS the telemetry sink
+ * so a single test machine can do both ends. TODO: set the real commander MAC / IP / port. */
+inline constexpr std::array<uint8_t, 6> TELEMETRY_MAC  = {0x00, 0xE0, 0x4C, 0x33, 0x0F, 0x98};
+inline constexpr uint32_t               TELEMETRY_IPV4 = make_ipv4(192, 168, 0, 111);
+inline constexpr uint16_t               TELEMETRY_PORT = 7520;
+
+inline constexpr std::array<uint8_t, 6> COMMANDER_MAC  = TELEMETRY_MAC;   // TODO: real commander MAC
+inline constexpr uint32_t               COMMANDER_IPV4 = TELEMETRY_IPV4;  // TODO: real commander IP
+inline constexpr uint16_t               COMMANDER_PORT = TELEMETRY_PORT;  // TODO: real commander port
 
 } // namespace detail
 
@@ -77,12 +90,17 @@ public:
     /** @brief Construct over the two transports; does not touch hardware. */
     Communication(E& eth, C& can) : eth_(eth), can_(can) {}
 
-    /** @brief Resolve the ground-station endpoint. Call once before the first send. */
+    /** @brief Resolve the two ground-station endpoints (telemetry sink + commander). Call
+     *         once before the first send. */
     void init()
     {
-        gs_.mac  = detail::GS_MAC;
-        gs_.ipv4 = detail::make_ipv4(192, 168, 0, 111);
-        gs_.port = detail::GS_PORT;
+        telemetry_endpoint_.mac  = detail::TELEMETRY_MAC;
+        telemetry_endpoint_.ipv4 = detail::TELEMETRY_IPV4;
+        telemetry_endpoint_.port = detail::TELEMETRY_PORT;
+
+        command_endpoint_.mac  = detail::COMMANDER_MAC;
+        command_endpoint_.ipv4 = detail::COMMANDER_IPV4;
+        command_endpoint_.port = detail::COMMANDER_PORT;
     }
 
     /** @brief Service the link so receiveDatagram() can return inbound traffic. */
@@ -96,6 +114,9 @@ public:
      *        @p sourceState / @p seq / @p now_ms) + the payload + a CRC over the header
      *        AND the payload (the header has no checksum of its own).
      *
+     * Routed by payload class: a Response goes back to the COMMANDER (the host that sends us
+     * commands); all telemetry goes to the telemetry SINK. The two are distinct hosts.
+     *
      * @p payloadId is opaque here — a TelemetryType, ResponseType, etc. @p seq is the
      * GS's command sequence echoed back on a relayed response (0 for telemetry). The
      * caller owns their meaning; this layer only routes and frames.
@@ -104,6 +125,11 @@ public:
                   uint8_t sourceState, uint8_t seq, std::span<const uint8_t> payload, uint32_t now_ms)
     {
         static std::array<uint8_t, detail::UDP_MAX_PAYLOAD_BYTES> packet;
+
+        // A response answers a command, so it returns to the commander; telemetry streams to
+        // the sink. (The FCU never sends a Command to the GS, so those are the only classes.)
+        const logic::communication::Endpoint& dest =
+            (payloadType == PayloadType::Response) ? command_endpoint_ : telemetry_endpoint_;
 
         const std::size_t chunk =
             payload.size() < GS_PAYLOAD_CAPACITY ? payload.size() : GS_PAYLOAD_CAPACITY;
@@ -127,7 +153,7 @@ public:
         const uint32_t crc = logic::data_integrity::crc32(packet.data(), sizeof(header) + chunk);
         std::memcpy(packet.data() + sizeof(header) + chunk, &crc, sizeof(crc));
 
-        (void)eth_.send(gs_, std::span<const uint8_t>(packet.data(), sizeof(header) + chunk + sizeof(crc)));
+        (void)eth_.send(dest, std::span<const uint8_t>(packet.data(), sizeof(header) + chunk + sizeof(crc)));
     }
 
     /**
@@ -147,6 +173,7 @@ public:
         header.frame.payload_type = static_cast<uint8_t>(payloadType);
         header.frame.payload_id   = payloadId;
         header.frame.seq          = static_cast<uint8_t>(seq & 0x0F);
+        header.frame.priority     = canBusPriority(payloadType);  // commands preempt the telemetry stream
 
         logic::communication::CanFrame frame;
         frame.id = header.code;
@@ -217,7 +244,8 @@ private:
 
     E&                             eth_;   // injected UDP link to the GS
     C&                             can_;   // injected CAN bus to the ECU
-    logic::communication::Endpoint gs_{};  // ground-station endpoint (resolved in init())
+    logic::communication::Endpoint telemetry_endpoint_{};  // telemetry sink (resolved in init())
+    logic::communication::Endpoint command_endpoint_{};    // commander: where responses return
     uint32_t                       rx_crc_errors_ = 0;  // inbound datagrams dropped for a bad CRC
 };
 
