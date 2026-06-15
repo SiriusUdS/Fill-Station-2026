@@ -39,10 +39,11 @@ EcuSystemState makeRecord(uint8_t seed)
     return s;
 }
 
-std::array<CanFrame, SYSTEM_STATE_FRAGMENTS> pack(const EcuSystemState& s, uint8_t seq)
+std::array<CanFrame, SYSTEM_STATE_FRAGMENTS> pack(const EcuSystemState& s, uint8_t seq,
+                                                 uint8_t senderState = 0)
 {
     std::array<CanFrame, SYSTEM_STATE_FRAGMENTS> frames{};
-    codec::packSystemState(s, BoardId::Engine, BoardId::FillingStation, seq,
+    codec::packSystemState(s, BoardId::Engine, BoardId::FillingStation, senderState, seq,
                            std::span<CanFrame, SYSTEM_STATE_FRAGMENTS>(frames));
     return frames;
 }
@@ -131,6 +132,20 @@ TEST(SystemStateCodec, NewSequenceResetsInProgressRecord)
 
     ASSERT_TRUE(out.has_value());
     EXPECT_TRUE(bytesEqual(*out, b));
+}
+
+// The sender's state and the record sequence ride in their own distinct header fields
+// (sender_state and seq), so the FCU can relay the ECU's state to the ground station. Every
+// fragment carries both.
+TEST(SystemStateCodec, HeaderCarriesSenderStateAndSequence)
+{
+    const auto frames = pack(makeRecord(0x44), /*seq*/ 9, /*senderState*/ 0x06);
+    for (const auto& f : frames) {
+        CanHeader h{};
+        h.code = f.id;
+        EXPECT_EQ(static_cast<uint8_t>(h.frame.sender_state), 0x06u);
+        EXPECT_EQ(static_cast<uint8_t>(h.frame.seq), 9u);
+    }
 }
 
 TEST(SystemStateCodec, FragmentsCoverTheWholeRecord)

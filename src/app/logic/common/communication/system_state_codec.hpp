@@ -24,12 +24,15 @@
  * FcuSystemState straight over Ethernet, so it never needs this codec.
  *
  * Wire format, per fragment (one CAN frame):
- *   - 29-bit id  = CanHeader { sender_id, target_id, payload_id = TelemetryType::SystemState,
- *                              sender_state = 4-bit record sequence }
+ *   - 29-bit id  = CanHeader { sender_id, target_id, sender_state = the ECU's state-machine
+ *                              state, payload_id = TelemetryType::SystemState,
+ *                              seq = 4-bit record sequence }
  *   - data[0]    = fragment index (0 .. SYSTEM_STATE_FRAGMENTS-1)
  *   - data[1..]  = up to FRAGMENT_PAYLOAD_BYTES of the record's bytes
- * The record sequence lets the receiver detect record boundaries and drop a record
- * cleanly if a fragment is lost (a new sequence resets the in-progress record).
+ * sender_state carries the engine board's state on every fragment, so the FCU relays it to the
+ * ground station (in EthernetHeader.sender_state) exactly as it does its own. seq is the record
+ * sequence: it lets the receiver detect record boundaries and drop a record cleanly if a
+ * fragment is lost (a new sequence resets the in-progress record).
  * ------------------------------------------------------------------------- */
 
 namespace logic::communication::can {
@@ -42,18 +45,21 @@ static_assert(SYSTEM_STATE_FRAGMENTS <= 16,
               "fragment index/mask scheme assumes <=16 fragments; SystemState too large");
 
 /* Split one EcuSystemState into SYSTEM_STATE_FRAGMENTS CAN frames addressed
-   sender -> target, tagged with the 4-bit record sequence seq. Fills `out`. */
+   sender -> target, tagging every fragment with the sender's state-machine state
+   senderState and the 4-bit record sequence seq. Fills `out`. */
 inline void packSystemState(const EcuSystemState& record, BoardId sender, BoardId target,
-                            uint8_t seq, std::span<CanFrame, SYSTEM_STATE_FRAGMENTS> out)
+                            uint8_t senderState, uint8_t seq,
+                            std::span<CanFrame, SYSTEM_STATE_FRAGMENTS> out)
 {
     const auto* bytes = reinterpret_cast<const uint8_t*>(&record);
 
     CanHeader header = {};
     header.frame.sender_id    = static_cast<uint8_t>(sender);
     header.frame.target_id    = static_cast<uint8_t>(target);
-    header.frame.sender_state = seq & 0x0F;
+    header.frame.sender_state = senderState & 0x0F;  // the sender board's state-machine state
     header.frame.payload_type = static_cast<uint8_t>(PayloadType::Telemetry);
     header.frame.payload_id   = static_cast<uint8_t>(TelemetryType::SystemState);
+    header.frame.seq          = seq & 0x0F;          // record sequence: boundary / drop detection
     header.frame.priority     = canBusPriority(PayloadType::Telemetry);  // low: yields to commands/responses
 
     for (std::size_t i = 0; i < SYSTEM_STATE_FRAGMENTS; ++i) {
@@ -81,7 +87,7 @@ public:
             || frame.length < 1) {
             return std::nullopt;
         }
-        const uint8_t seq = static_cast<uint8_t>(header.frame.sender_state) & 0x0F;
+        const uint8_t seq = static_cast<uint8_t>(header.frame.seq) & 0x0F;
         const uint8_t idx = frame.data[0];
         if (idx >= SYSTEM_STATE_FRAGMENTS) {
             return std::nullopt;

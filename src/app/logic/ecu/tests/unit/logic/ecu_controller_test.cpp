@@ -382,6 +382,7 @@ TEST_F(EcuControllerTest, TelemetryIsDownlinkedToTheFcuOverCan)
     EXPECT_EQ(static_cast<BoardId>(header.frame.target_id), BoardId::FillingStation);
     EXPECT_EQ(static_cast<PayloadType>(header.frame.payload_type), PayloadType::Telemetry);
     EXPECT_EQ(static_cast<TelemetryType>(header.frame.payload_id), TelemetryType::SystemState);
+    EXPECT_EQ(static_cast<State>(header.frame.sender_state), State::Safe);  // ECU stamps its state
 }
 
 } // namespace

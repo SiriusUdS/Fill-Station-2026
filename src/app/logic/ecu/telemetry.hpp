@@ -13,6 +13,7 @@
 #include "communication/interfaces/can.hpp"      // logic::communication::CanFrame
 #include "control/control_flags.hpp"             // control_flags — surfaced in the extended record
 #include "control/refused_transition.hpp"        // last_refused_transition — surfaced in the extended record
+#include "control/persistent_state.hpp"          // fill_state — tags each downlinked record with the ECU's state
 #include "telemetry/sd_recorder.hpp"             // logic::telemetry::SdRecorder (shared 3-file SD policy)
 
 #include "communication/protocol/telemetry/ecu_system_state.hpp"  // EcuSystemState (+ SystemStateBase)
@@ -230,7 +231,8 @@ private:
         namespace codec = logic::communication::can;
         std::array<logic::communication::CanFrame, codec::SYSTEM_STATE_FRAGMENTS> frames;
         codec::packSystemState(
-            record, BoardId::Engine, BoardId::FillingStation, telemetry_seq_,
+            record, BoardId::Engine, BoardId::FillingStation,
+            static_cast<uint8_t>(logic::control::persistent_state.fill_state), telemetry_seq_,
             std::span<logic::communication::CanFrame, codec::SYSTEM_STATE_FRAGMENTS>(frames));
         for (const auto& f : frames) {
             comm_.sendFrame(f);

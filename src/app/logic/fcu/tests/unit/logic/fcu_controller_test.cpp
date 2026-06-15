@@ -539,8 +539,11 @@ TEST_F(FcuControllerTest, EcuTelemetryIsReassembledAndRelayedToGs)
     EcuSystemState record{};
     record.base.creation_timestamp_ms = 0xABCDEF01;  // a marker to find on the GS side
 
+    // The ECU stamps its state-machine state into each fragment's header; the relay must carry
+    // it onto the GS datagram (EthernetHeader.sender_state).
+    constexpr auto ECU_STATE = static_cast<uint8_t>(logic::control::State::Unsafe);
     std::array<CanFrame, codec::SYSTEM_STATE_FRAGMENTS> frames;
-    codec::packSystemState(record, BoardId::Engine, BoardId::FillingStation, /*seq=*/0,
+    codec::packSystemState(record, BoardId::Engine, BoardId::FillingStation, ECU_STATE, /*seq=*/0,
                            std::span<CanFrame, codec::SYSTEM_STATE_FRAGMENTS>(frames));
     for (const auto& f : frames) {
         bus().push_can(f);
@@ -555,6 +558,7 @@ TEST_F(FcuControllerTest, EcuTelemetryIsReassembledAndRelayedToGs)
     std::memcpy(&header, payload.data(), sizeof(EthernetHeader));
     EXPECT_EQ(header.sender_id, static_cast<uint8_t>(BoardId::Engine));  // tagged as the ECU's
     EXPECT_EQ(header.payload_id, static_cast<uint8_t>(TelemetryType::SystemState));
+    EXPECT_EQ(header.sender_state, ECU_STATE);  // the ECU's state relayed through to the GS
 
     EcuSystemState relayed{};
     std::memcpy(&relayed, payload.data() + sizeof(EthernetHeader), sizeof(EcuSystemState));

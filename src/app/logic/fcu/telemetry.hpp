@@ -17,6 +17,7 @@
 #include "telemetry/sd_recorder.hpp"             // logic::telemetry::SdRecorder (shared 3-file SD policy)
 
 #include "communication/protocol/framing/payload_type.hpp"        // PayloadType
+#include "communication/protocol/framing/can_header.hpp"          // CanHeader (decode the relayed ECU state)
 #include "communication/protocol/telemetry/fcu_system_state.hpp"  // FcuSystemState
 #include "communication/protocol/telemetry/fcu_extended_system_state.hpp"  // FcuExtendedSystemState (low-rate)
 #include "communication/system_state_codec.hpp"  // EcuSystemState + SystemStateReassembler
@@ -207,6 +208,14 @@ public:
     void relayEcuFrame(const logic::communication::CanFrame& frame, uint32_t now_ms)
     {
         if (auto record = ecu_reassembler_.accept(frame)) {
+            // The ECU stamps its state-machine state into every fragment's header; carry it onto
+            // the GS datagram (EthernetHeader.sender_state) so the ground reads the ECU's state
+            // the same way it reads ours. All fragments share the header, so the completing
+            // frame's is the record's.
+            CanHeader header;
+            header.code = frame.id;
+            ecu_relay_state_ = static_cast<uint8_t>(header.frame.sender_state);
+
             std::memcpy(ecu_relay_buf_.data() + ecu_relay_len_, &*record, sizeof(EcuSystemState));
             ecu_relay_len_ += sizeof(EcuSystemState);
             // Flush as soon as the batch can't take another whole record (one datagram's worth);
@@ -226,7 +235,7 @@ public:
         if (ecu_relay_len_ == 0) {
             return;
         }
-        downlink(BoardId::Engine, /*sourceState (ECU state not yet in the record)*/ 0,
+        downlink(BoardId::Engine, ecu_relay_state_,
                  std::span<const uint8_t>(ecu_relay_buf_.data(), ecu_relay_len_),
                  sizeof(EcuSystemState), now_ms);
         ecu_relay_len_ = 0;
@@ -326,6 +335,7 @@ private:
         Comm::GS_PAYLOAD_CAPACITY / sizeof(EcuSystemState);
     std::array<uint8_t, ECU_RELAY_BATCH_RECORDS * sizeof(EcuSystemState)> ecu_relay_buf_;
     std::size_t ecu_relay_len_ = 0;   // bytes currently batched (a whole number of records)
+    uint8_t     ecu_relay_state_ = 0; // ECU state from the last reassembled record; tags the relay datagram
 
     static_assert(std::extent_v<decltype(SystemStateBase::valve_info)> == 2,
                   "FcuSystemState expects exactly two valves (Fill, Dump)");
