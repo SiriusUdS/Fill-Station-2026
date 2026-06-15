@@ -16,8 +16,12 @@
 #include "acquisition/power_monitor/ina3221.hpp"
 #include "storage/sd_card.hpp"
 #include "actuation/valve/ball_valve.hpp"
+#include "gpio/digital_output.hpp"
+#include "gpio/digital_input.hpp"
 #include "indication/led.hpp"
 #include "indication/running_indicator.hpp"
+#include "gpio_ematch.hpp"
+#include "gpio_solenoid.hpp"
 #include "fcu_controller.hpp"
 
 namespace fcu_app {
@@ -29,15 +33,24 @@ namespace max31856   = platform::acquisition::thermocouple::max31856;
 namespace ina3221    = platform::acquisition::power_monitor::ina3221;
 namespace valve      = platform::actuation::valve;
 namespace indication = platform::indication;
+namespace gpio       = platform::gpio;
 
 /* The main-loop liveness indicator, blinking a status LED straight from the
  * for(;;) loop (a frozen LED means the loop stalled). */
 using RunningIndicator = logic::indication::RunningIndicator<indication::Led>;
 
+/* The FCU e-match: firing output + present-detect input + continuity LED, all plain
+ * GPIO behind the logic seams (EMATCH_STATE / EMATCH_DET / EMATCH_CONT on GPIOD). */
+using Ematch = logic::fcu::GpioEmatch<gpio::DigitalOutput, gpio::DigitalInput, gpio::DigitalOutput>;
+
+/* The FCU solenoid valve: coil output + present-detect input + continuity LED, same
+ * GPIO shape as the e-match (SOL_VALVE_STATE / SOL_VALVE_DET / SOL_VALVE_CONT on GPIOD). */
+using Solenoid = logic::fcu::GpioSolenoid<gpio::DigitalOutput, gpio::DigitalInput, gpio::DigitalOutput>;
+
 /* The FCU's concrete controller type, instantiated over its real drivers. */
 using FcuController = logic::fcu::Controller<platform::storage::SdCard, valve::BallValve,
                                              ads131m08::Ads131m08, eth::Ethernet, can::Can,
-                                             max31856::Max31856Bank, ina3221::Ina3221>;
+                                             max31856::Max31856Bank, ina3221::Ina3221, Ematch, Solenoid>;
 
 /* Fill/Dump ball valves, the streaming ADC, the Ethernet link and CAN node, the
  * SD card, and the controller built over them all. Defined in main.cpp. */
@@ -53,6 +66,21 @@ extern platform::storage::SdCard g_card_slow;  // data_slow.bin (125 Hz averaged
 extern platform::storage::SdCard g_card_ext;   // data_ext.bin  (ExtendedSystemState)
 extern indication::Led        g_run_led;
 extern RunningIndicator       g_running_indicator;
+
+/* The e-match GPIO lines (EMATCH_STATE / EMATCH_DET / EMATCH_CONT on GPIOD) and the
+ * GpioEmatch composed over them. Bound to their pins by board::wireDrivers(). */
+extern gpio::DigitalOutput    g_ematch_fire;    // EMATCH_STATE  (firing output)
+extern gpio::DigitalInput     g_ematch_detect;  // EMATCH_DET    (e-match-present input)
+extern gpio::DigitalOutput    g_ematch_cont;    // EMATCH_CONT   (continuity LED)
+extern Ematch                 g_ematch;
+
+/* The solenoid-valve GPIO lines (SOL_VALVE_STATE / SOL_VALVE_DET / SOL_VALVE_CONT on
+ * GPIOD) and the GpioSolenoid composed over them. Bound to their pins by wireDrivers(). */
+extern gpio::DigitalOutput    g_solenoid_drive;   // SOL_VALVE_STATE (coil output)
+extern gpio::DigitalInput     g_solenoid_detect;  // SOL_VALVE_DET   (present input)
+extern gpio::DigitalOutput    g_solenoid_cont;    // SOL_VALVE_CONT  (continuity LED)
+extern Solenoid               g_solenoid;
+
 extern FcuController          g_controller;
 
 }  // namespace fcu_app

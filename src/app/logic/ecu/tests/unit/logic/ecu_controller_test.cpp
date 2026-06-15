@@ -20,10 +20,13 @@
 #include "command/set_valve_position.hpp"   // ValveCommand
 #include "command/set_control_flag.hpp"     // ControlFlag, SetControlFlagFrame
 #include "command/set_state.hpp"            // SetStateFrame
-#include "control/control_flags.hpp"        // logic::control::control_flags
+#include "control/control_flags.hpp"        // logic::control::base_control_flags
+#include "control/refused_transition.hpp"   // last_refused_transition (+ count)
+#include "control/refused_control_flag.hpp" // last_refused_control_flag (+ count)
 #include "system/valves/ecu.hpp"            // EcuValves
 #include "system/board_id.hpp"
 #include "telemetry/telemetry_type.hpp"
+#include "telemetry/ecu_extended_system_state.hpp"   // EcuExtendedSystemState (decoded off the CAN bus)
 
 #include <gtest/gtest.h>
 
@@ -89,16 +92,16 @@ CanFrame makeSetState(State requested, BoardId target = BoardId::Engine, uint8_t
     return frame;
 }
 
-/* A SetControlFlag command FCU -> Engine: the 2-byte SetControlFlagFrame rides in
-   the payload (data[0] = flag id, data[1] = value). */
-CanFrame makeSetControlFlag(ControlFlag flag, uint8_t value,
+/* A SetControlFlag command FCU -> Engine: the SetControlFlagFrame {16-bit flag id, value}
+   rides verbatim in the payload. */
+CanFrame makeSetControlFlag(uint16_t flag, uint8_t value,
                             BoardId target = BoardId::Engine, uint8_t seq = 0)
 {
     CanFrame frame = makeCommand(command::CommandType::SetControlFlag, /*senderState=*/0,
                                  target, seq);
-    frame.data[0] = static_cast<uint8_t>(flag);
-    frame.data[1] = value;
-    frame.length  = sizeof(SetControlFlagFrame);
+    const SetControlFlagFrame body{flag, value, /*reserved=*/0};
+    std::memcpy(frame.data.data(), &body, sizeof(body));
+    frame.length = sizeof(SetControlFlagFrame);
     return frame;
 }
 
@@ -121,8 +124,13 @@ protected:
     {
         bus().reset();
         logic::control::persistent_state = logic::control::PersistentState{};
-        logic::control::control_flags    = logic::control::ControlFlags{};  // all flags off
+        logic::control::base_control_flags = logic::control::ControlFlags<ControlFlagBase>{};  // base flags off
+        logic::control::fcu_control_flags  = logic::control::ControlFlags<FcuControlFlag>{};   // per-board flags off
         logic::control::last_refused_transition = {State::Init, State::Init};
+        logic::control::refused_transition_count = 0;
+        logic::control::last_refused_control_flag =
+            {logic::control::REFUSED_CONTROL_FLAG_NONE, 0, State::Init};
+        logic::control::refused_control_flag_count = 0;
         controller_.init();
         // init() advanced Init -> Safe, which closes both valves; discard those calls so each
         // test counts only its own actuation.
@@ -224,9 +232,10 @@ TEST_F(EcuControllerTest, PongEchoesThePingSeq)
 
 TEST_F(EcuControllerTest, SetControlFlagAppliesTheFlagAndAcksTheFcu)
 {
-    deliver(makeSetControlFlag(ControlFlag::PersistingData, /*value=*/1, BoardId::Engine, /*seq=*/4));
+    deliver(makeSetControlFlag(static_cast<uint16_t>(ControlFlagBase::PersistingData),
+                               /*value=*/1, BoardId::Engine, /*seq=*/4));
 
-    EXPECT_TRUE(logic::control::control_flags.get(ControlFlag::PersistingData));
+    EXPECT_TRUE(logic::control::base_control_flags.get(ControlFlagBase::PersistingData));
 
     ASSERT_EQ(bus().can_tx.size(), 1u);
     CanHeader header;
@@ -240,15 +249,15 @@ TEST_F(EcuControllerTest, SetControlFlagAppliesTheFlagAndAcksTheFcu)
 
 TEST_F(EcuControllerTest, SetControlFlagWithZeroValueClearsTheFlag)
 {
-    logic::control::control_flags.set(ControlFlag::PersistingData, true);
-    deliver(makeSetControlFlag(ControlFlag::PersistingData, /*value=*/0));
-    EXPECT_FALSE(logic::control::control_flags.get(ControlFlag::PersistingData));
+    logic::control::base_control_flags.set(ControlFlagBase::PersistingData, true);
+    deliver(makeSetControlFlag(static_cast<uint16_t>(ControlFlagBase::PersistingData), /*value=*/0));
+    EXPECT_FALSE(logic::control::base_control_flags.get(ControlFlagBase::PersistingData));
 }
 
 TEST_F(EcuControllerTest, UnknownControlFlagIsNotAppliedOrAcked)
 {
-    deliver(makeSetControlFlag(static_cast<ControlFlag>(0xFF), /*value=*/1));
-    EXPECT_FALSE(logic::control::control_flags.get(ControlFlag::PersistingData));
+    deliver(makeSetControlFlag(/*unknown per-board flag id=*/0xFF, /*value=*/1));
+    EXPECT_FALSE(logic::control::base_control_flags.get(ControlFlagBase::PersistingData));
     EXPECT_TRUE(bus().can_tx.empty());   // no Ack for a flag we did not apply
 }
 
@@ -336,8 +345,8 @@ TEST_F(EcuControllerTest, TelemetryDrainsWithoutWritingToSdWhenFlagOff)
 TEST_F(EcuControllerTest, FastRecordingPersistsRawSystemStateToDataFast)
 {
     step();  // Init -> Safe
-    logic::control::control_flags.set(ControlFlag::PersistingData, true);
-    logic::control::control_flags.set(ControlFlag::FastRecording, true);   // raw 2 kHz -> data_fast.bin
+    logic::control::base_control_flags.set(ControlFlagBase::PersistingData, true);
+    logic::control::base_control_flags.set(ControlFlagBase::FastRecording, true);   // raw 2 kHz -> data_fast.bin
     const AdcInfo sample{};
     for (int i = 0; i < 2000 && storage_fast_.writes.empty(); ++i) {
         adc_.push(sample);
@@ -351,7 +360,7 @@ TEST_F(EcuControllerTest, FastRecordingPersistsRawSystemStateToDataFast)
 TEST_F(EcuControllerTest, SlowRecordingPersistsAveragedSystemStateToDataSlow)
 {
     step();  // Init -> Safe; FastRecording stays off -> slow (125 Hz averaged) -> data_slow.bin
-    logic::control::control_flags.set(ControlFlag::PersistingData, true);
+    logic::control::base_control_flags.set(ControlFlagBase::PersistingData, true);
     const AdcInfo sample{};
     for (int i = 0; i < 4000 && storage_slow_.writes.empty(); ++i) {
         adc_.push(sample);
@@ -369,21 +378,106 @@ TEST_F(EcuControllerTest, TelemetryIsDownlinkedToTheFcuOverCan)
     step();  // Init -> Safe
     bus().can_tx.clear();
 
+    // Pump conversions until a full SystemState half drains onto the bus. The low-rate
+    // ExtendedSystemState rides the same bus (~10 Hz, separate payload_id), so scan for the
+    // SystemState frame rather than assuming the first frame on the bus is one.
+    bool      found = false;
+    CanHeader header;
     const AdcInfo sample{};
-    for (int i = 0; i < 2000 && bus().can_tx.empty(); ++i) {
+    for (int i = 0; i < 4000 && !found; ++i) {
         adc_.push(sample);                     // one conversion into the ADC ring
         controller_.produceRecord(++now_ms_);  // drain it into the telemetry buffer
         step();                                // drainTick flushes any full half over CAN
+        for (const auto& f : bus().can_tx) {
+            CanHeader h;
+            h.code = f.id;
+            if (static_cast<TelemetryType>(h.frame.payload_id) == TelemetryType::SystemState) {
+                header = h;
+                found  = true;
+                break;
+            }
+        }
     }
 
-    ASSERT_FALSE(bus().can_tx.empty()) << "a full telemetry half never downlinked over CAN";
-    CanHeader header;
-    header.code = bus().can_tx.front().id;
+    ASSERT_TRUE(found) << "a full telemetry half never downlinked a SystemState over CAN";
     EXPECT_EQ(static_cast<BoardId>(header.frame.sender_id), BoardId::Engine);
     EXPECT_EQ(static_cast<BoardId>(header.frame.target_id), BoardId::FillingStation);
     EXPECT_EQ(static_cast<PayloadType>(header.frame.payload_type), PayloadType::Telemetry);
-    EXPECT_EQ(static_cast<TelemetryType>(header.frame.payload_id), TelemetryType::SystemState);
     EXPECT_EQ(static_cast<State>(header.frame.sender_state), State::Safe);  // ECU stamps its state
+}
+
+/* The low-rate ExtendedSystemState is downlinked to the FCU over CAN too — unbatched, one
+   send per ~10 Hz record (separate payload_id from the batched SystemState stream) — so the
+   FCU can relay the ECU's slow state straight to the GS. Cross the extended interval, then
+   find + decode the ExtendedSystemState frame off the bus and read its live control flags. */
+TEST_F(EcuControllerTest, ExtendedStateIsDownlinkedToTheFcuOverCan)
+{
+    step();  // Init -> Safe
+    bus().can_tx.clear();
+    logic::control::base_control_flags.set(ControlFlagBase::FastRecording, true);  // a distinctive live flag
+
+    for (int i = 0; i < 150; ++i) {  // cross the ~10 Hz extended interval (100 ms); each step +1 ms
+        step();
+    }
+
+    bool                   found = false;
+    CanHeader              header;
+    EcuExtendedSystemState ext{};
+    for (const auto& f : bus().can_tx) {
+        CanHeader h;
+        h.code = f.id;
+        if (static_cast<TelemetryType>(h.frame.payload_id) != TelemetryType::ExtendedSystemState) {
+            continue;
+        }
+        header = h;
+        std::memcpy(&ext, &f.data[1], sizeof(ext));  // data[0] is the fragment index; record follows
+        found  = true;
+        break;
+    }
+
+    ASSERT_TRUE(found) << "no ExtendedSystemState downlinked over CAN";
+    EXPECT_EQ(static_cast<BoardId>(header.frame.sender_id), BoardId::Engine);
+    EXPECT_EQ(static_cast<BoardId>(header.frame.target_id), BoardId::FillingStation);
+    EXPECT_EQ(static_cast<PayloadType>(header.frame.payload_type), PayloadType::Telemetry);
+    EXPECT_EQ(static_cast<State>(header.frame.sender_state), State::Safe);  // ECU stamps its state
+    EXPECT_NE(ext.base.control_flags_base & (1u << static_cast<uint8_t>(ControlFlagBase::FastRecording)), 0u);
+}
+
+/* The ECU records refused commands too (parity with the FCU): a refused SetState (Safe's only
+   exit is Unsafe) and a refused SetControlFlag (the ECU has no per-board flags, so a per-board
+   id is rejected) both ride the ECU's ExtendedSystemState via the shared base. */
+TEST_F(EcuControllerTest, RefusedCommandsRideTheExtendedRecord)
+{
+    step();  // Init -> Safe
+    deliver(makeSetState(State::Ignite));                       // Safe -> Ignite: refused
+    deliver(makeSetControlFlag(/*per-board id=*/CONTROL_FLAG_BOARD_OFFSET, /*value=*/1));  // ECU has none: refused
+    bus().can_tx.clear();
+
+    EcuExtendedSystemState ext{};
+    bool found = false;
+    for (int i = 0; i < 150 && !found; ++i) {
+        step();
+        for (const auto& f : bus().can_tx) {
+            CanHeader h;
+            h.code = f.id;
+            if (static_cast<TelemetryType>(h.frame.payload_id) != TelemetryType::ExtendedSystemState) {
+                continue;
+            }
+            std::memcpy(&ext, &f.data[1], sizeof(ext));
+            found = true;
+            break;
+        }
+    }
+
+    ASSERT_TRUE(found) << "no ExtendedSystemState downlinked over CAN";
+    const auto& rc = ext.base.refused_command_info;
+    EXPECT_EQ(rc.set_state_from, static_cast<uint8_t>(State::Safe));
+    EXPECT_EQ(rc.set_state_to,   static_cast<uint8_t>(State::Ignite));
+    EXPECT_EQ(rc.set_state_refused_count, 1u);
+    EXPECT_EQ(rc.set_flag_id,    static_cast<uint16_t>(CONTROL_FLAG_BOARD_OFFSET));
+    EXPECT_EQ(rc.set_flag_value, 1u);
+    EXPECT_EQ(rc.set_flag_state, static_cast<uint8_t>(State::Safe));
+    EXPECT_EQ(rc.set_flag_refused_count, 1u);
 }
 
 } // namespace

@@ -17,3 +17,6 @@
 #include "support/fake_thermocouple.hpp" // FakeThermocoupleBank
 #include "support/fake_power_monitor.hpp" // FakePowerMonitor
 #include "support/fake_digital_out.hpp"  // FakeDigitalOut
+#include "support/fake_digital_in.hpp"   // FakeDigitalIn
+#include "support/fake_ematch.hpp"       // FakeEmatch
+#include "support/fake_solenoid.hpp"     // FakeSolenoid

@@ -78,10 +78,10 @@ public:
      */
     void recordSystemState(std::span<const uint8_t> block, std::size_t used)
     {
-        if (!logic::control::control_flags.get(ControlFlag::PersistingData)) {
+        if (!logic::control::base_control_flags.get(ControlFlagBase::PersistingData)) {
             return;
         }
-        if (logic::control::control_flags.get(ControlFlag::FastRecording)) {
+        if (logic::control::base_control_flags.get(ControlFlagBase::FastRecording)) {
             fast_.write(block);
         } else {
             averageSlow(block.data(), used);
@@ -92,7 +92,7 @@ public:
      *         PersistingData is set. Independent of the Fast/Slow flag. */
     void recordExtended(std::span<const uint8_t> bytes)
     {
-        if (logic::control::control_flags.get(ControlFlag::PersistingData)) {
+        if (logic::control::base_control_flags.get(ControlFlagBase::PersistingData)) {
             ext_.write(bytes);
         }
     }

@@ -81,6 +81,29 @@ void wireDrivers(void)
   g_run_led.init({.port = GPIOF, .pin = GPIO_PIN_1});
   g_running_indicator.init();
 
+  /* Bring up the e-match (igniter) lines on GPIOD (clock enabled by MX_GPIO_Init):
+       - EMATCH_STATE (PD12) firing output  — driven high ONLY during the Ignite state
+         (Control::onTransition); init() drives it low (safe).
+       - EMATCH_DET  (PD13) present input   — active-high "an e-match is plugged in"; flip
+         active_high here if the board's polarity changes.
+       - EMATCH_CONT (PD8)  continuity LED  — lit while an e-match is detected.
+     The GpioEmatch composes these; the controller energises/polls it. */
+  g_ematch_fire.init({.port = EMATCH_STATE_GPIO_Port, .pin = EMATCH_STATE_Pin, .active_high = true});
+  g_ematch_cont.init({.port = EMATCH_CONT_GPIO_Port,  .pin = EMATCH_CONT_Pin,  .active_high = true});
+  g_ematch_detect.init({.port = EMATCH_DET_GPIO_Port, .pin = EMATCH_DET_Pin,
+                        .active_high = true, .pull = GPIO_NOPULL});
+
+  /* Bring up the solenoid-valve lines on GPIOD (same shape as the e-match):
+       - SOL_VALVE_STATE (PD14) coil output — driven open ONLY while the SolenoidValve flag is
+         set AND the board is in Unsafe (Control::serviceSolenoid); init() drives it low (closed).
+       - SOL_VALVE_DET  (PD15) present input — active-high "solenoid wired up"; flip active_high here
+         if the board's polarity changes.
+       - SOL_VALVE_CONT (PD9) continuity LED — lit while the solenoid is detected. */
+  g_solenoid_drive.init({.port = SOL_VALVE_STATE_GPIO_Port, .pin = SOL_VALVE_STATE_Pin, .active_high = true});
+  g_solenoid_cont.init({.port = SOL_VALVE_CONT_GPIO_Port,   .pin = SOL_VALVE_CONT_Pin,  .active_high = true});
+  g_solenoid_detect.init({.port = SOL_VALVE_DET_GPIO_Port,  .pin = SOL_VALVE_DET_Pin,
+                          .active_high = true, .pull = GPIO_NOPULL});
+
   /* Bring up the backup domain first, so the battery-backed Backup SRAM that
      holds the persistent state is clocked, writable and retained on VBAT before
      the FCU logic reads it. A regulator-timeout only means VBAT retention is

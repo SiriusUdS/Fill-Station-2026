@@ -9,6 +9,8 @@
 #include "communication/interfaces/power_monitor.hpp"  // logic::communication::PowerMonitor
 #include "communication/interfaces/ethernet.hpp" // logic::communication::Ethernet
 #include "communication/interfaces/can.hpp"      // logic::communication::Can
+#include "actuation/interfaces/ematch.hpp"       // logic::actuation::Ematch (the FCU igniter seam)
+#include "actuation/interfaces/solenoid.hpp"     // logic::actuation::Solenoid (the FCU solenoid-valve seam)
 #include "control/persistent_state.hpp"          // Backup-SRAM state snapshot
 
 #include "communication/protocol/framing/can_header.hpp"      // CanHeader (inbound demux)
@@ -55,11 +57,14 @@ namespace logic::fcu {
  * @tparam C logic::communication::Can (the FDCAN bus to the ECU).
  * @tparam TC logic::communication::ThermocoupleBank (the 4 MAX31856 on SPI6).
  * @tparam PM logic::communication::PowerMonitor (the INA3221 on I2C4).
+ * @tparam EM logic::actuation::Ematch (the e-match igniter line; 3 GPIOs on GPIOD).
+ * @tparam SOL logic::actuation::Solenoid (the solenoid valve; 3 GPIOs on GPIOD).
  */
 template <logic::storage::Storage S, logic::actuation::Valve V,
           logic::communication::StreamingAdc A, logic::communication::Ethernet E,
           logic::communication::Can C, logic::communication::ThermocoupleBank TC,
-          logic::communication::PowerMonitor PM>
+          logic::communication::PowerMonitor PM, logic::actuation::Ematch EM,
+          logic::actuation::Solenoid SOL>
 class Controller {
 public:
     /** @brief Construct over the held drivers; does not touch hardware. Call init() next.
@@ -67,11 +72,12 @@ public:
      *         (data_slow.bin) SystemState plus the low-rate ExtendedSystemState
      *         (data_ext.bin); which SystemState file is written is the FastRecording flag's. */
     Controller(S& storage_fast, S& storage_slow, S& storage_ext,
-               V& fill_valve, V& dump_valve, A& adc, E& eth, C& can, TC& thermocouples, PM& power_monitor)
+               V& fill_valve, V& dump_valve, A& adc, E& eth, C& can, TC& thermocouples,
+               PM& power_monitor, EM& ematch, SOL& solenoid)
         : comm_(eth, can),
           telemetry_(storage_fast, storage_slow, storage_ext, fill_valve, dump_valve, adc, comm_,
-                     thermocouples, power_monitor),
-          control_(fill_valve, dump_valve, comm_) {}
+                     thermocouples, power_monitor, ematch, solenoid),
+          control_(fill_valve, dump_valve, comm_, ematch, solenoid) {}
 
     /**
      * @brief  Initialise the FCU logic: communication endpoint, telemetry buffer +
@@ -99,7 +105,7 @@ public:
         // transition point so onTransition runs (e.g. valves driven closed). A resumed
         // engine/armed state from Backup SRAM is left as-is — only a fresh Init advances here.
         if (logic::control::persistent_state.fill_state == logic::control::State::Init) {
-            (void)control_.transitionTo(logic::control::State::Safe);
+            (void)control_.transitionTo(logic::control::State::Safe, 0);  // boot transition; t=0
         }
     }
 
@@ -119,7 +125,7 @@ public:
                 control_.onResponse(static_cast<uint8_t>(in->header.frame.payload_id),
                                     static_cast<uint8_t>(in->header.frame.seq), now_ms);
             } else {
-                telemetry_.relayEcuFrame(in->frame);
+                telemetry_.relayEcuFrame(in->frame, now_ms);
             }
         }
         // Stream any relay half that filled this tick to the GS — drained like our own
@@ -135,6 +141,8 @@ public:
 
         telemetry_.serviceThermocouples(now_ms);  // advance the non-blocking MAX31856 round-robin
         telemetry_.servicePowerMonitor(now_ms);   // advance the non-blocking INA3221 round-robin
+        control_.serviceEmatch();        // sample EMATCH_DET -> continuity LED (and the extended record)
+        control_.serviceSolenoid(now_ms);  // SOL_VALVE_DET -> cont LED + enforce open-only-in-Unsafe
         telemetry_.produceExtended(now_ms);  // ~10 Hz ExtendedSystemState -> GS + data_ext.bin
         telemetry_.drain(now_ms);        // flush full halves to SD + the GS
         control_.servicePending(now_ms); // resend / time out the in-flight reliable command
@@ -158,9 +166,9 @@ private:
         return static_cast<PayloadType>(header.frame.payload_type) == PayloadType::Response;
     }
 
-    Communication<E, C>                             comm_;   // declared first: the others hold a ref to it
-    Telemetry<S, V, A, Communication<E, C>, TC, PM> telemetry_;
-    Control<V, Communication<E, C>>                 control_;
+    Communication<E, C>                                      comm_;   // declared first: the others hold a ref to it
+    Telemetry<S, V, A, Communication<E, C>, TC, PM, EM, SOL> telemetry_;
+    Control<V, Communication<E, C>, EM, SOL>                 control_;
 };
 
 } // namespace logic::fcu

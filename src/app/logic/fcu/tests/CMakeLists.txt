@@ -28,6 +28,22 @@ target_include_directories(adc_test PRIVATE ${FCU_INCLUDE_DIRS})
 target_link_libraries(adc_test PRIVATE GTest::gtest_main)
 gtest_discover_tests(adc_test PROPERTIES LABELS "unit")
 
+# --- E-match (GpioEmatch over the digital seams) (unit) -------------------
+add_executable(gpio_ematch_test
+    unit/logic/gpio_ematch_test.cpp
+)
+target_include_directories(gpio_ematch_test PRIVATE ${FCU_INCLUDE_DIRS})
+target_link_libraries(gpio_ematch_test PRIVATE GTest::gtest_main)
+gtest_discover_tests(gpio_ematch_test PROPERTIES LABELS "unit")
+
+# --- Solenoid valve (GpioSolenoid over the digital seams) (unit) ----------
+add_executable(gpio_solenoid_test
+    unit/logic/gpio_solenoid_test.cpp
+)
+target_include_directories(gpio_solenoid_test PRIVATE ${FCU_INCLUDE_DIRS})
+target_link_libraries(gpio_solenoid_test PRIVATE GTest::gtest_main)
+gtest_discover_tests(gpio_solenoid_test PROPERTIES LABELS "unit")
+
 # --- Control layer (unit) -------------------------------------------------
 add_executable(control_test
     unit/logic/control/control_test.cpp

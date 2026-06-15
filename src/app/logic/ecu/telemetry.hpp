@@ -12,10 +12,9 @@
 #include "communication/interfaces/adc.hpp"      // logic::communication::StreamingAdc + AdcInfo
 #include "communication/interfaces/can.hpp"      // logic::communication::CanFrame
 #include "communication/interfaces/power_monitor.hpp"  // logic::communication::PowerMonitor + PowerMonitorInfo
-#include "control/control_flags.hpp"             // control_flags — surfaced in the extended record
-#include "control/refused_transition.hpp"        // last_refused_transition — surfaced in the extended record
 #include "control/persistent_state.hpp"          // fill_state — tags each downlinked record with the ECU's state
 #include "telemetry/sd_recorder.hpp"             // logic::telemetry::SdRecorder (shared 3-file SD policy)
+#include "telemetry/extended_base.hpp"           // logic::telemetry::fillExtendedBase (shared prefix)
 
 #include "communication/protocol/telemetry/ecu_system_state.hpp"  // EcuSystemState (+ SystemStateBase)
 #include "communication/protocol/telemetry/ecu_extended_system_state.hpp"  // EcuExtendedSystemState (low-rate)
@@ -53,9 +52,10 @@ inline constexpr std::size_t LOG_HALF_BYTES = logic::telemetry::SD_LOG_BLOCK_BYT
    timer emits filler records (flagged invalid) so the downlink rate holds. */
 inline constexpr uint32_t ADC_TIMEOUT_MS = 10;
 
-/* ExtendedSystemState cadence (low-rate; for now just a timestamp, later event
-   timestamps). Logged to data_ext.bin from the foreground; the ECU does not downlink
-   it over CAN yet. */
+/* ExtendedSystemState cadence (low-rate; for now control flags + refused transition +
+   power monitor, later event timestamps). Logged to data_ext.bin from the foreground AND
+   downlinked to the FCU over CAN once per record (unbatched), so the FCU can relay the
+   ECU's slow state to the GS the moment it lands. */
 inline constexpr uint32_t EXTENDED_INTERVAL_MS = 100;   // ~10 Hz
 
 /* The telemetry double buffer — a plain aggregate (no member initializers) so the
@@ -162,9 +162,11 @@ public:
         }
     }
 
-    /** @brief Build + log the low-rate ExtendedSystemState (~10 Hz) to data_ext.bin
-     *         (gated by PersistingData). For now just a timestamp; the ECU does not
-     *         downlink it over CAN. Foreground-driven; self-throttled. */
+    /** @brief Build the low-rate ExtendedSystemState (~10 Hz), log it to data_ext.bin
+     *         (gated by PersistingData), AND downlink it to the FCU over CAN — one record
+     *         per send, unbatched (unlike the SystemState stream, which drains a full half
+     *         at a time), so the FCU relays it straight on to the GS. Foreground-driven;
+     *         self-throttled. */
     void produceExtended(uint32_t now_ms)
     {
         if ((now_ms - last_extended_ms_) < detail::EXTENDED_INTERVAL_MS) {
@@ -173,13 +175,13 @@ public:
         last_extended_ms_ = now_ms;
 
         EcuExtendedSystemState ext = {};
-        ext.creation_timestamp_ms   = now_ms;
-        ext.control_flags           = logic::control::control_flags.raw();  // live recording config
-        ext.last_refused_state_from = static_cast<uint8_t>(logic::control::last_refused_transition.from);
-        ext.last_refused_state_to   = static_cast<uint8_t>(logic::control::last_refused_transition.to);
-        ext.power_monitor           = power_monitor_.info();  // INA3221 (stubbed on the current PCB)
+        // Shared prefix: timestamp + base control flags + refused-command diagnostics. The ECU
+        // has no per-board flags, so its per-board control-flags byte is 0.
+        logic::telemetry::fillExtendedBase(ext.base, now_ms, /*control_flags_board=*/0);
+        ext.power_monitor = power_monitor_.info();  // INA3221 (stubbed on the current PCB)
         recorder_.recordExtended(
             std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(&ext), sizeof(ext)));
+        sendExtendedCan(ext);   // downlink to the FCU (unbatched), which relays it to the GS
     }
 
     /** @brief Advance the power monitor's non-blocking acquisition one step (off the record-timer
@@ -250,6 +252,24 @@ private:
         ++telemetry_seq_;
     }
 
+    // Fragment one EcuExtendedSystemState into CAN frames (shared codec) and send them to the
+    // FCU. Unbatched: produceExtended emits one record at ~10 Hz and hands it straight to the
+    // bus, so the FCU relays the ECU's slow state to the GS the moment it arrives. Its own 4-bit
+    // sequence (separate from the SystemState stream the FCU reassembles independently).
+    void sendExtendedCan(const EcuExtendedSystemState& record)
+    {
+        namespace codec = logic::communication::can;
+        std::array<logic::communication::CanFrame, codec::EXTENDED_STATE_FRAGMENTS> frames;
+        codec::packExtendedSystemState(
+            record, BoardId::Engine, BoardId::FillingStation,
+            static_cast<uint8_t>(logic::control::persistent_state.fill_state), extended_seq_,
+            std::span<logic::communication::CanFrame, codec::EXTENDED_STATE_FRAGMENTS>(frames));
+        for (const auto& f : frames) {
+            comm_.sendFrame(f);
+        }
+        ++extended_seq_;
+    }
+
     logic::telemetry::SdRecorder<S, EcuSystemState> recorder_;  // the 3-file SD recording policy
     V&    ipa_valve_;    // injected IPA / NOS valves, read for telemetry
     V&    nos_valve_;
@@ -259,7 +279,8 @@ private:
     detail::LogBuffer log_;            // .axisram in firmware; left uninitialised until init()
     volatile uint32_t  last_adc_ms_      = 0;  // last tick a conversion was drained; gates the silent-ADC filler
     uint32_t           last_extended_ms_ = 0;  // throttles produceExtended() to ~10 Hz
-    uint8_t            telemetry_seq_     = 0;  // 4-bit CAN telemetry record sequence (wraps)
+    uint8_t            telemetry_seq_     = 0;  // 4-bit CAN SystemState record sequence (wraps)
+    uint8_t            extended_seq_      = 0;  // 4-bit CAN ExtendedSystemState record sequence (wraps)
 
     static_assert(std::extent_v<decltype(SystemStateBase::valve_info)> == 2,
                   "EcuSystemState expects exactly two valves (IPA, NOS)");

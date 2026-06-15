@@ -36,12 +36,28 @@ can::Can              g_can;
 indication::Led      g_run_led;
 RunningIndicator     g_running_indicator{g_run_led};
 
+/* The e-match: three GPIO lines + the GpioEmatch composed over them. Constructed before
+ * g_controller (which holds a reference to it via Control/Telemetry). Bound to their pins
+ * by board::wireDrivers(); plain RAM (no DMA), so no .axisram placement needed. */
+gpio::DigitalOutput  g_ematch_fire;
+gpio::DigitalInput   g_ematch_detect;
+gpio::DigitalOutput  g_ematch_cont;
+Ematch               g_ematch{g_ematch_fire, g_ematch_detect, g_ematch_cont};
+
+/* The solenoid valve: same GPIO shape as the e-match. Constructed before g_controller
+ * (which holds a reference to it via Control/Telemetry). Plain RAM (no DMA). */
+gpio::DigitalOutput  g_solenoid_drive;
+gpio::DigitalInput   g_solenoid_detect;
+gpio::DigitalOutput  g_solenoid_cont;
+Solenoid             g_solenoid{g_solenoid_drive, g_solenoid_detect, g_solenoid_cont};
+
 __attribute__((section(".axisram"))) platform::storage::SdCard g_card_fast;
 __attribute__((section(".axisram"))) platform::storage::SdCard g_card_slow;
 __attribute__((section(".axisram"))) platform::storage::SdCard g_card_ext;
 __attribute__((section(".axisram")))
 FcuController g_controller{g_card_fast, g_card_slow, g_card_ext, g_fill_valve, g_dump_valve,
-                           g_ads131, g_eth, g_can, g_thermocouples, g_power_monitor};
+                           g_ads131, g_eth, g_can, g_thermocouples, g_power_monitor,
+                           g_ematch, g_solenoid};
 
 }  // namespace fcu_app
 

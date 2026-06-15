@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+
 #include "system/state.hpp"  // logic::control::State
 
 /* ------------------------------------------------------------------------- *
@@ -23,5 +25,9 @@ struct RefusedTransition {
 
 /** @brief The last transition Control::transitionTo() refused. {Init, Init} = none yet. */
 inline RefusedTransition last_refused_transition{State::Init, State::Init};
+
+/** @brief Count of refused SetState transitions since boot (wraps at 16 bits; a diagnostic).
+ *         Incremented alongside last_refused_transition; surfaced in the ExtendedSystemState. */
+inline uint16_t refused_transition_count = 0;
 
 } // namespace logic::control

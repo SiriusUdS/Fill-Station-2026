@@ -9,12 +9,14 @@
 
 #include "storage/interfaces/storage.hpp"        // logic::storage::Storage + StorageInfo
 #include "actuation/interfaces/valve.hpp"        // logic::actuation::Valve
+#include "actuation/interfaces/ematch.hpp"       // logic::actuation::Ematch (read into the extended record)
+#include "actuation/interfaces/solenoid.hpp"     // logic::actuation::Solenoid (read into the extended record)
 #include "communication/interfaces/adc.hpp"      // logic::communication::StreamingAdc + AdcInfo
 #include "communication/interfaces/thermocouple.hpp"  // logic::communication::ThermocoupleBank + ThermocoupleInfo
 #include "communication/interfaces/power_monitor.hpp"  // logic::communication::PowerMonitor + PowerMonitorInfo
 #include "control/persistent_state.hpp"          // Backup-SRAM state snapshot (drain tags the source state)
-#include "control/control_flags.hpp"             // control_flags — PersistingData gates the SD write
-#include "control/refused_transition.hpp"        // last_refused_transition — surfaced in ExtendedSystemState
+#include "control/control_flags.hpp"             // fcu_control_flags — the FCU per-board flags byte
+#include "telemetry/extended_base.hpp"           // logic::telemetry::fillExtendedBase (shared prefix)
 #include "telemetry/sd_recorder.hpp"             // logic::telemetry::SdRecorder (shared 3-file SD policy)
 
 #include "communication/protocol/framing/payload_type.hpp"        // PayloadType
@@ -86,17 +88,21 @@ struct LogBuffer {
  */
 template <logic::storage::Storage S, logic::actuation::Valve V,
           logic::communication::StreamingAdc A, typename Comm,
-          logic::communication::ThermocoupleBank TC, logic::communication::PowerMonitor PM>
+          logic::communication::ThermocoupleBank TC, logic::communication::PowerMonitor PM,
+          logic::actuation::Ematch EM, logic::actuation::Solenoid SOL>
 class Telemetry {
 public:
     /** @brief Construct over the held drivers + the communication layer. The three
      *         SD streams are the high-rate SystemState (fast/slow, picked by the
-     *         FastRecording flag) and the low-rate ExtendedSystemState. */
+     *         FastRecording flag) and the low-rate ExtendedSystemState. The e-match and
+     *         solenoid are read-only here: their info() rides the extended record. */
     Telemetry(S& storage_fast, S& storage_slow, S& storage_ext,
-              V& fill_valve, V& dump_valve, A& adc, Comm& comm, TC& thermocouples, PM& power_monitor)
+              V& fill_valve, V& dump_valve, A& adc, Comm& comm, TC& thermocouples, PM& power_monitor,
+              EM& ematch, SOL& solenoid)
         : recorder_(storage_fast, storage_slow, storage_ext),
           fill_valve_(fill_valve), dump_valve_(dump_valve),
-          adc_(adc), comm_(comm), thermocouples_(thermocouples), power_monitor_(power_monitor) {}
+          adc_(adc), comm_(comm), thermocouples_(thermocouples), power_monitor_(power_monitor),
+          ematch_(ematch), solenoid_(solenoid) {}
 
     /** @brief Zero the double buffer and bring the three SD log files online. */
     void init()
@@ -186,15 +192,16 @@ public:
         last_extended_ms_ = now_ms;
 
         FcuExtendedSystemState ext = {};
-        ext.creation_timestamp_ms   = now_ms;
-        ext.control_flags           = logic::control::control_flags.raw();  // live recording config for the GS
-        ext.last_refused_state_from = static_cast<uint8_t>(logic::control::last_refused_transition.from);
-        ext.last_refused_state_to   = static_cast<uint8_t>(logic::control::last_refused_transition.to);
+        // Shared prefix: timestamp + base control flags + this board's per-board (FCU) flags +
+        // the refused-command diagnostics (SetState + SetControlFlag, with counts).
+        logic::telemetry::fillExtendedBase(ext.base, now_ms, logic::control::fcu_control_flags.raw());
         const auto thermocouples = thermocouples_.info();
         for (std::size_t i = 0; i < THERMOCOUPLE_COUNT; ++i) {
             ext.thermocouple_info[i] = thermocouples[i];
         }
         ext.power_monitor = power_monitor_.info();   // INA3221 (I2C4), polled at ~10 Hz
+        ext.ematch_info   = ematch_.info();          // presence + firing-line state + last energise/deenergise ticks
+        ext.solenoid_info = solenoid_.info();        // presence + open/closed state + last open/close ticks
 
         const std::span<const uint8_t> bytes(reinterpret_cast<const uint8_t*>(&ext), sizeof(ext));
         recorder_.recordExtended(bytes);   // -> data_ext.bin (gated by PersistingData)
@@ -204,24 +211,38 @@ public:
                        /*seq=*/0, bytes, now_ms);
     }
 
-    /** @brief Feed one inbound CAN frame to the ECU-telemetry reassembler; when a full
-     *         EcuSystemState rebuilds, append it to the relay double buffer (tagged
-     *         BoardId::Engine so the GS demuxes it from our own records). Like our own
-     *         telemetry, the records are BATCHED: a half is streamed to the GS only once it
-     *         FILLS (drainRelayedEcu) — not one tiny datagram per record. Non-telemetry frames
-     *         are ignored by the reassembler. */
-    void relayEcuFrame(const logic::communication::CanFrame& frame)
+    /** @brief Feed one inbound CAN frame to the ECU-telemetry reassemblers and relay whatever
+     *         completes to the GS (tagged BoardId::Engine so the GS demuxes it from our own
+     *         records, and carrying the ECU's state from the fragment header in
+     *         EthernetHeader.sender_state — read the same way the GS reads ours). The two ECU
+     *         record streams relay differently:
+     *           - the high-rate EcuSystemState is BATCHED — appended to the relay double buffer
+     *             and streamed to the GS only once a half FILLS (drainRelayedEcu), so the 2 kHz
+     *             stream rides full datagrams instead of one tiny packet per record;
+     *           - the low-rate EcuExtendedSystemState is relayed UNBATCHED — streamed to the GS
+     *             the instant a record reassembles (at ~10 Hz a datagram per record is cheap, and
+     *             the slow state reaches the ground without waiting on a relay half to fill).
+     *         Each reassembler ignores the other's fragments (payload_id discriminates), and
+     *         non-telemetry frames are ignored by both. */
+    void relayEcuFrame(const logic::communication::CanFrame& frame, uint32_t now_ms)
     {
         if (auto record = ecu_reassembler_.accept(frame)) {
-            // The ECU stamps its state-machine state into every fragment's header; carry it onto
-            // the GS datagram (EthernetHeader.sender_state) so the ground reads the ECU's state
-            // the same way it reads ours. All fragments share the header, so the completing
-            // frame's is the record's.
+            // All fragments share the header, so the completing frame's carries the record's state.
             CanHeader header;
             header.code = frame.id;
             ecu_relay_state_ = static_cast<uint8_t>(header.frame.sender_state);
 
             ecuLogAppend(*record);
+        }
+        if (auto record = ecu_extended_reassembler_.accept(frame)) {
+            CanHeader header;
+            header.code = frame.id;
+            const std::span<const uint8_t> bytes(
+                reinterpret_cast<const uint8_t*>(&*record), sizeof(*record));
+            comm_.sendToGs(BoardId::Engine, PayloadType::Telemetry,
+                           static_cast<uint8_t>(TelemetryType::ExtendedSystemState),
+                           static_cast<uint8_t>(header.frame.sender_state),
+                           /*seq=*/0, bytes, now_ms);
         }
     }
 
@@ -358,10 +379,13 @@ private:
     Comm& comm_;        // injected communication layer; frames + downlinks records
     TC&   thermocouples_;  // injected MAX31856 bank; serviced off-ISR, read into the extended record
     PM&   power_monitor_;  // injected INA3221; serviced off-ISR, read into the extended record
+    EM&   ematch_;         // injected e-match (read-only here); its info() rides the extended record
+    SOL&  solenoid_;       // injected solenoid valve (read-only here); its info() rides the extended record
     detail::LogBuffer log_;            // .axisram in firmware; left uninitialised until init()
     volatile uint32_t  last_adc_ms_ = 0;  // last tick a conversion was drained; gates the silent-ADC filler
     uint32_t           last_extended_ms_ = 0;  // throttles produceExtended() to ~10 Hz
-    logic::communication::can::SystemStateReassembler ecu_reassembler_;  // rebuilds ECU telemetry from CAN
+    logic::communication::can::SystemStateReassembler   ecu_reassembler_;           // rebuilds ECU SystemState from CAN (batched relay)
+    logic::communication::can::ExtendedStateReassembler ecu_extended_reassembler_;  // rebuilds ECU ExtendedSystemState from CAN (relayed straight to the GS)
 
     // Relay double buffer: reassembled ECU records are appended to the active half, and a half
     // is streamed to the GS only once it FILLS (drainRelayedEcu) — the same batching as our own

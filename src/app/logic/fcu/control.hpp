@@ -13,7 +13,7 @@
 #include "communication/command/parser/command_ethernet_parser.hpp"  // fromEthernet
 #include "communication/protocol/command/set_state.hpp"        // SetStateFrame
 #include "communication/protocol/command/set_valve_position.hpp"  // SetValvePositionFrame, ValveCommand
-#include "communication/protocol/command/set_control_flag.hpp"    // ControlFlag, SetControlFlagFrame, toControlFlag
+#include "communication/protocol/command/set_control_flag.hpp"    // ControlFlagBase / FcuControlFlag, SetControlFlagFrame, toControlFlagBase
 #include "communication/protocol/framing/payload_type.hpp"     // PayloadType
 #include "communication/protocol/response/response_type.hpp"   // ResponseType (Pong, Ack)
 #include "system/valves/fcu.hpp"                               // FcuValves
@@ -22,7 +22,10 @@
 #include "control/persistent_state.hpp"                        // logic::control::persistent_state
 #include "control/state_machine.hpp"                           // toState, isTransitionAllowed (shared)
 #include "control/refused_transition.hpp"                      // logic::control::last_refused_transition
-#include "control/control_flags.hpp"                           // logic::control::control_flags
+#include "control/refused_control_flag.hpp"                     // logic::control::last_refused_control_flag
+#include "control/control_flags.hpp"                           // logic::control::base_control_flags / fcu_control_flags
+#include "actuation/interfaces/ematch.hpp"                     // logic::actuation::Ematch (the igniter seam)
+#include "actuation/interfaces/solenoid.hpp"                   // logic::actuation::Solenoid (the solenoid-valve seam)
 
 /* ------------------------------------------------------------------------- *
  * FCU control layer (HAL-free) — command handling + execution, the receive side
@@ -58,13 +61,17 @@ inline constexpr uint8_t  MAX_COMMAND_RETRIES = 3;
  *        the communication layer it forwards through.
  * @tparam V    logic::actuation::Valve (a BallValve in firmware; both Fill and Dump).
  * @tparam Comm The FCU Communication layer (forwards commands to the ECU, the pong to the GS).
+ * @tparam EM   logic::actuation::Ematch (the igniter line, energised in the Ignite state).
+ * @tparam SOL  logic::actuation::Solenoid (the solenoid valve, open only in the Unsafe state).
  */
-template <logic::actuation::Valve V, typename Comm>
+template <logic::actuation::Valve V, typename Comm, logic::actuation::Ematch EM,
+          logic::actuation::Solenoid SOL>
 class Control {
 public:
-    /** @brief Construct over the local valves + the communication layer. */
-    Control(V& fill_valve, V& dump_valve, Comm& comm)
-        : fill_valve_(fill_valve), dump_valve_(dump_valve), comm_(comm) {}
+    /** @brief Construct over the local valves, the communication layer, the e-match, and the solenoid. */
+    Control(V& fill_valve, V& dump_valve, Comm& comm, EM& ematch, SOL& solenoid)
+        : fill_valve_(fill_valve), dump_valve_(dump_valve), comm_(comm), ematch_(ematch),
+          solenoid_(solenoid) {}
 
     /** @brief Boot-init the control layer: reset the GS-link liveness clock and drive
      *         the local valves to a safe (closed) position.
@@ -79,6 +86,30 @@ public:
         last_rx_ms_ = 0;
         (void)fill_valve_.close();
         (void)dump_valve_.close();
+        ematch_.deenergise(0);  // boot-safe the firing line through the logic seam (like the valves); t=0
+        solenoid_.close(0);     // boot-safe the solenoid closed through the logic seam; t=0
+    }
+
+    /** @brief Sample the e-match detect line and mirror it onto the continuity LED. Called
+     *         every controller tick; cheap and non-blocking (a GPIO read + a GPIO write). */
+    void serviceEmatch() { (void)ematch_.poll(); }
+
+    /** @brief Service the solenoid valve each tick: sample its detect line onto the continuity
+     *         LED, then enforce its actuation policy — open ONLY while the SolenoidValve flag is
+     *         set AND the board is in Unsafe; closed otherwise (so it auto-closes on leaving
+     *         Unsafe). Cheap and non-blocking; the open/close edge ticks are stamped by the
+     *         solenoid only on an actual state change. */
+    void serviceSolenoid(uint32_t now_ms)
+    {
+        (void)solenoid_.poll();
+        const bool want_open =
+            logic::control::fcu_control_flags.get(FcuControlFlag::SolenoidValve) &&
+            logic::control::persistent_state.fill_state == logic::control::State::Unsafe;
+        if (want_open) {
+            solenoid_.open(now_ms);
+        } else {
+            solenoid_.close(now_ms);
+        }
     }
 
     /**
@@ -148,7 +179,7 @@ public:
         const auto state = logic::control::persistent_state.fill_state;
         if (state == logic::control::State::Unsafe || state == logic::control::State::Ignite) {
             if ((now_ms - last_rx_ms_) >= detail::RX_WATCHDOG_MS) {
-                transitionTo(logic::control::State::Abort);   // routed forced safety abort
+                transitionTo(logic::control::State::Abort, now_ms);   // routed forced safety abort
             }
         }
     }
@@ -157,15 +188,17 @@ public:
      *         shared transition table does not permit it from the current state; otherwise run
      *         the board's per-transition action (onTransition), commit the new state, and report
      *         acceptance. Returns true if applied, false if refused. Every path uses this —
-     *         commanded SetState, the boot Init -> Safe, the watchdog Abort. */
-    bool transitionTo(logic::control::State to)
+     *         commanded SetState, the boot Init -> Safe, the watchdog Abort. now_ms timestamps
+     *         the per-transition side effects (e.g. the e-match energise/deenergise edges). */
+    bool transitionTo(logic::control::State to, uint32_t now_ms)
     {
         const State from = logic::control::persistent_state.fill_state;
         if (!logic::control::isTransitionAllowed(from, to)) {
             logic::control::last_refused_transition = {from, to};  // surfaced in ExtendedSystemState
+            ++logic::control::refused_transition_count;
             return false;
         }
-        onTransition(from, to);
+        onTransition(from, to, now_ms);
         logic::control::persistent_state.saveState(to);
         return true;
     }
@@ -270,7 +303,7 @@ private:
         bool ok = true;
 
         if (target == BoardId::FillingStation || target == BoardId::Broadcast) {
-            ok = applyStateLocally(cmd);
+            ok = applyStateLocally(cmd, now_ms);
         }
         if (target == BoardId::Engine || target == BoardId::Broadcast) {
             sendReliable(CommandType::SetState, /*sender_state=*/0,
@@ -282,31 +315,39 @@ private:
 
     // Apply a SetState to the FCU's own (global) state machine: validate the requested id and
     // the transition, run any per-transition action, then commit through persistent_state.
-    bool applyStateLocally(const Command& cmd)
+    bool applyStateLocally(const Command& cmd, uint32_t now_ms)
     {
         const auto* frame = reinterpret_cast<const SetStateFrame*>(cmd.payload.data());
         const std::optional<State> requested = logic::control::toState(frame->requestedID);
         if (!requested) {
             return false;  // unknown requested state id
         }
-        return transitionTo(*requested);   // validates, routes the action + commit, records refusals
+        return transitionTo(*requested, now_ms);   // validates, routes the action + commit, records refusals
     }
 
     // The FCU's per-transition action hook. The legal edges are shared with the ECU (see
     // logic::control::isTransitionAllowed); the SIDE EFFECTS are board-specific:
     //   - Any transition INTO Safe drives the local Fill/Dump valves closed (people may
     //     approach the system, so it must hold no flow).
-    //   - On Ignite -> Launch the FCU does nothing (the ECU drives the propellant valves).
-    void onTransition(State from, State to)
+    //   - On Unsafe -> Ignite the FCU energises the e-match firing line; on leaving Ignite
+    //     by ANY path (Launch, Abort, Safe) it de-energises it, so the igniter is never left
+    //     hot once Ignite is exited. (Only Unsafe reaches Ignite per the transition table.)
+    void onTransition(State from, State to, uint32_t now_ms)
     {
         if (to == State::Safe) {
             (void)fill_valve_.close();
             (void)dump_valve_.close();
         }
+        if (from == State::Unsafe) {
+            // The solenoid valve is only armable in Unsafe; clear its flag on the way out so it
+            // can't re-open on a later re-entry into Unsafe without a fresh command. serviceSolenoid
+            // closes the valve itself once the flag is clear / the state is no longer Unsafe.
+            logic::control::fcu_control_flags.set(FcuControlFlag::SolenoidValve, false);
+        }
         if (from == State::Unsafe && to == State::Ignite) {
-            // TODO: energise the igniter (HAL-free — e.g. a CAN command to the ECU
-            // through comm_). Inert stub for now, so the transition is wired but has
-            // no physical effect yet.
+            ematch_.energise(now_ms);    // hold the e-match firing line high for the Ignite state
+        } else if (from == State::Ignite) {
+            ematch_.deenergise(now_ms);  // leaving Ignite (Launch / Abort / Safe): drop the firing line
         }
     }
 
@@ -389,19 +430,53 @@ private:
     }
 
     // Apply a SetControlFlag to the FCU's own control-flag state and Ack the GS directly
-    // (we handled it ourselves; no ECU round-trip). Echoes the GS's seq in the Ack.
+    // (we handled it ourselves; no ECU round-trip). Echoes the GS's seq in the Ack. A refused
+    // command (unknown flag, or a state-gated flag commanded in the wrong state) is recorded in
+    // last_refused_control_flag and NOT Acked.
     bool applyControlFlagLocally(const Command& cmd, uint32_t now_ms)
     {
         const auto* frame = reinterpret_cast<const SetControlFlagFrame*>(cmd.payload.data());
-        const std::optional<ControlFlag> flag = toControlFlag(static_cast<uint8_t>(frame->flag));
-        if (!flag) {
-            return false;  // unknown flag id — do not Ack a command we did not apply
+        const uint16_t id = frame->flag;
+
+        if (id < CONTROL_FLAG_BOARD_OFFSET) {
+            // A BASE flag (common to every board): low-byte id, applied to base_control_flags.
+            const std::optional<ControlFlagBase> flag = toControlFlagBase(id);
+            if (!flag) {
+                recordRefusedFlag(*frame);
+                return false;  // unknown base flag — do not Ack a command we did not apply
+            }
+            logic::control::base_control_flags.set(*flag, frame->value != 0);
+        } else {
+            // A PER-BOARD (FCU) flag: high-byte id, applied to fcu_control_flags.
+            const std::optional<FcuControlFlag> flag =
+                toFcuControlFlag(static_cast<uint16_t>(id - CONTROL_FLAG_BOARD_OFFSET));
+            if (!flag) {
+                recordRefusedFlag(*frame);
+                return false;  // unknown per-board flag
+            }
+            // The solenoid valve is hazardous unless the area is clear: its flag is only honoured
+            // in Unsafe. Reject (and record) a SetControlFlag(SolenoidValve) in any other state.
+            if (*flag == FcuControlFlag::SolenoidValve &&
+                logic::control::persistent_state.fill_state != logic::control::State::Unsafe) {
+                recordRefusedFlag(*frame);
+                return false;
+            }
+            logic::control::fcu_control_flags.set(*flag, frame->value != 0);
         }
-        logic::control::control_flags.set(*flag, frame->value != 0);
+
         comm_.sendToGs(BoardId::FillingStation, PayloadType::Response,
                        static_cast<uint8_t>(ResponseType::Ack), /*sourceState=*/0,
                        /*seq=*/cmd.seq, std::span<const uint8_t>{}, now_ms);
         return true;
+    }
+
+    // Record a refused SetControlFlag (the 16-bit flag id + value + the state we were in) for the
+    // ground station, surfaced in the ExtendedSystemState. Mirrors last_refused_transition.
+    static void recordRefusedFlag(const SetControlFlagFrame& frame)
+    {
+        logic::control::last_refused_control_flag = {
+            frame.flag, frame.value, logic::control::persistent_state.fill_state};
+        ++logic::control::refused_control_flag_count;
     }
 
     /* ---- Synchronise --------------------------------------------------------- */
@@ -431,6 +506,8 @@ private:
     V&       fill_valve_;   // injected Fill / Dump valves, actuated by SetValvePosition
     V&       dump_valve_;
     Comm&    comm_;         // injected communication layer; forwards to ECU / GS
+    EM&      ematch_;       // injected e-match: energised in Ignite, polled each tick for the cont LED
+    SOL&     solenoid_;     // injected solenoid valve: open only while its flag is set AND in Unsafe
     uint32_t last_rx_ms_ = 0;  // last tick a datagram arrived; feeds the GS-link watchdog
     Pending  pending_{};       // the in-flight relayed GS->ECU command (Ping for now)
 };

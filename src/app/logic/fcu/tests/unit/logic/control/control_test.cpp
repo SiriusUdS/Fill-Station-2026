@@ -25,7 +25,7 @@
 #include "communication/protocol/command/set_control_flag.hpp"    // ControlFlag, SetControlFlagFrame
 #include "system/valves/fcu.hpp"                              // FcuValves
 #include "control/persistent_state.hpp"
-#include "control/control_flags.hpp"                          // logic::control::control_flags
+#include "control/control_flags.hpp"                          // logic::control::base_control_flags / fcu_control_flags
 #include "system/state.hpp"
 #include "framing/can_header.hpp"
 #include "framing/ethernet_header.hpp"
@@ -90,10 +90,10 @@ std::vector<uint8_t> makePing(uint8_t seq = 0)
     return makeCommand(command::CommandType::Ping, BoardId::FillingStation, nullptr, 0, seq);
 }
 
-std::vector<uint8_t> makeSetControlFlag(ControlFlag flag, uint8_t value, BoardId target,
+std::vector<uint8_t> makeSetControlFlag(ControlFlagBase flag, uint8_t value, BoardId target,
                                         uint8_t seq = 0)
 {
-    const SetControlFlagFrame body{flag, value};
+    const SetControlFlagFrame body{static_cast<uint16_t>(flag), value, /*reserved=*/0};
     return makeCommand(command::CommandType::SetControlFlag, target,
                        reinterpret_cast<const uint8_t*>(&body), sizeof(body), seq);
 }
@@ -105,16 +105,24 @@ protected:
     logic::fcu::Communication<FakeEthernet, FakeCan> comm_{eth_, can_};
     FakeValve    fill_valve_;
     FakeValve    dump_valve_;
-    logic::fcu::Control<FakeValve, logic::fcu::Communication<FakeEthernet, FakeCan>>
-                 control_{fill_valve_, dump_valve_, comm_};
+    FakeEmatch   ematch_;
+    FakeSolenoid solenoid_;
+    logic::fcu::Control<FakeValve, logic::fcu::Communication<FakeEthernet, FakeCan>,
+                        FakeEmatch, FakeSolenoid>
+                 control_{fill_valve_, dump_valve_, comm_, ematch_, solenoid_};
     uint32_t     now_ms_ = 0;
 
     void SetUp() override
     {
         bus().reset();
         logic::control::persistent_state = logic::control::PersistentState{};
-        logic::control::control_flags    = logic::control::ControlFlags{};  // all flags off
+        logic::control::base_control_flags = logic::control::ControlFlags<ControlFlagBase>{};  // base flags off
+        logic::control::fcu_control_flags  = logic::control::ControlFlags<FcuControlFlag>{};   // per-board flags off
         logic::control::last_refused_transition = {State::Init, State::Init};
+        logic::control::refused_transition_count = 0;
+        logic::control::last_refused_control_flag =
+            {logic::control::REFUSED_CONTROL_FLAG_NONE, 0, State::Init};
+        logic::control::refused_control_flag_count = 0;
         comm_.init();
         control_.init();
         clearValveCalls();   // discard the boot-safing close() so command tests start clean
@@ -398,10 +406,10 @@ TEST_F(ControlTest, PongIsRelayedToGsOverEthernet)
 TEST_F(ControlTest, LocalSetControlFlagAppliesAndAcksGs)
 {
     setCurrent(State::Safe);
-    deliver(makeSetControlFlag(ControlFlag::PersistingData, /*value=*/1,
+    deliver(makeSetControlFlag(ControlFlagBase::PersistingData, /*value=*/1,
                                BoardId::FillingStation, /*seq=*/3));
 
-    EXPECT_TRUE(logic::control::control_flags.get(ControlFlag::PersistingData));
+    EXPECT_TRUE(logic::control::base_control_flags.get(ControlFlagBase::PersistingData));
     EXPECT_TRUE(bus().can_tx.empty());   // FillingStation-targeted: applied here, no ECU hop
 
     ASSERT_EQ(bus().udp_tx.size(), 1u);
@@ -416,10 +424,10 @@ TEST_F(ControlTest, LocalSetControlFlagAppliesAndAcksGs)
 TEST_F(ControlTest, EngineSetControlFlagBridgesOverCanWithoutLocalApply)
 {
     setCurrent(State::Safe);
-    deliver(makeSetControlFlag(ControlFlag::PersistingData, /*value=*/1,
+    deliver(makeSetControlFlag(ControlFlagBase::PersistingData, /*value=*/1,
                                BoardId::Engine, /*seq=*/6));
 
-    EXPECT_FALSE(logic::control::control_flags.get(ControlFlag::PersistingData));  // not ours to set
+    EXPECT_FALSE(logic::control::base_control_flags.get(ControlFlagBase::PersistingData));  // not ours to set
     EXPECT_TRUE(bus().udp_tx.empty());   // the ECU Acks; the FCU does not Ack locally
 
     ASSERT_EQ(bus().can_tx.size(), 1u);
@@ -432,17 +440,19 @@ TEST_F(ControlTest, EngineSetControlFlagBridgesOverCanWithoutLocalApply)
               command::CommandType::SetControlFlag);
     EXPECT_EQ(header.frame.seq, 6u);     // GS seq propagated onto the CAN hop
     ASSERT_GE(sent.length, sizeof(SetControlFlagFrame));
-    EXPECT_EQ(sent.data[0], static_cast<uint8_t>(ControlFlag::PersistingData));
-    EXPECT_EQ(sent.data[1], 1u);         // flag + value carried verbatim
+    SetControlFlagFrame bridged{};
+    std::memcpy(&bridged, sent.data.data(), sizeof(bridged));   // the frame rides verbatim over CAN
+    EXPECT_EQ(bridged.flag, static_cast<uint16_t>(ControlFlagBase::PersistingData));
+    EXPECT_EQ(bridged.value, 1u);
 }
 
 TEST_F(ControlTest, BroadcastSetControlFlagAppliesLocallyAndBridges)
 {
     setCurrent(State::Safe);
-    deliver(makeSetControlFlag(ControlFlag::PersistingData, /*value=*/1,
+    deliver(makeSetControlFlag(ControlFlagBase::PersistingData, /*value=*/1,
                                BoardId::Broadcast, /*seq=*/2));
 
-    EXPECT_TRUE(logic::control::control_flags.get(ControlFlag::PersistingData));  // applied locally
+    EXPECT_TRUE(logic::control::base_control_flags.get(ControlFlagBase::PersistingData));  // applied locally
     EXPECT_EQ(bus().can_tx.size(), 1u);   // and bridged to the ECU
     EXPECT_EQ(bus().udp_tx.size(), 1u);   // local Ack to the GS
 }
@@ -450,7 +460,7 @@ TEST_F(ControlTest, BroadcastSetControlFlagAppliesLocallyAndBridges)
 TEST_F(ControlTest, AckFromEcuClearsThePendingBridgedCommand)
 {
     setCurrent(State::Safe);
-    deliver(makeSetControlFlag(ControlFlag::PersistingData, /*value=*/1,
+    deliver(makeSetControlFlag(ControlFlagBase::PersistingData, /*value=*/1,
                                BoardId::Engine, /*seq=*/8));
     ASSERT_EQ(bus().can_tx.size(), 1u);   // bridged once
 
