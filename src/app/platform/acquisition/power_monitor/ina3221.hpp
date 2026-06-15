@@ -59,6 +59,12 @@ struct Config {
     uint8_t            address = DEFAULT_ADDRESS;    /**< 7-bit device address (A0 strap). */
     IRQn_Type          ev_irqn = I2C4_EV_IRQn;       /**< I2C event NVIC line; armed by init(). */
     IRQn_Type          er_irqn = I2C4_ER_IRQn;       /**< I2C error NVIC line; armed by init(). */
+    bool               stubbed = false;              /**< If set, the driver NEVER touches the bus:
+                                                          init() skips the config write + NVIC, service()
+                                                          is a no-op, and info() stays Unknown / invalid.
+                                                          For boards where I2C is unusable in hardware
+                                                          (e.g. the ECU's swapped SDA/SCL); clear it (one
+                                                          line) to enable once the PCB is fixed. */
 };
 
 class Ina3221 {

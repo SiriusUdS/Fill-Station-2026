@@ -47,6 +47,13 @@ void Ina3221::init(const Config& config)
 
     s_instance = this;
 
+    // Stubbed (I2C unusable in hardware on this board): do not touch the bus at all. Leave the
+    // record Unknown / data_valid 0 so the GS sees "no power data" rather than zeros that look
+    // real. service() is a no-op too. Clear Config::stubbed to enable once the PCB is fixed.
+    if (cfg_.stubbed) {
+        return;
+    }
+
     // Write CONFIG (continuous shunt+bus on all 3 channels). Short bounded blocking — one-time,
     // before the loop runs — and doubles as a presence check: a missing device NACKs, so the
     // write fails and we start Faulted instead of streaming zeros as if they were real.
@@ -130,6 +137,9 @@ void Ina3221::finishRegister(uint32_t now_ms, bool ok)
 
 void Ina3221::service(uint32_t now_ms)
 {
+    if (cfg_.stubbed) {
+        return;   // I2C disabled in hardware on this board; never drive the bus.
+    }
     if (phase_ == Phase::InFlight) {
         harvestOrTimeout(now_ms);
         return;

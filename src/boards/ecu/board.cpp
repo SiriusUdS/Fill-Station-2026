@@ -19,6 +19,7 @@
 #include "fdcan.h"
 #include "dma.h"
 #include "spi.h"
+#include "i2c.h"
 #include "sdmmc.h"
 #include "fatfs.h"
 #include "tim.h"
@@ -33,23 +34,28 @@ using namespace ecu_app;
 namespace backup_ram = platform::memory::backup_ram;
 
 static void SystemClock_Config(void);
+static void PeriphCommonClock_Config(void);
 static void MPU_Config(void);
 
 namespace board {
 
 void halInit(void)
 {
-  /* MPU + HAL + system clock (the ECU uses default kernel clocks — no
-     PeriphCommonClock_Config), then every CubeMX-configured peripheral. */
+  /* MPU + HAL + system clock, then the shared peripheral kernel clocks (SPI1 + I2C4 off
+     PLL3 — CubeMX moved these out of the per-peripheral MspInit into PeriphCommonClock_Config
+     when I2C4 was added; main.c is excluded from the build, so we call it here), then every
+     CubeMX-configured peripheral. */
   MPU_Config();
   HAL_Init();
   SystemClock_Config();
+  PeriphCommonClock_Config();
 
   MX_GPIO_Init();
   MX_CRC_Init();
   MX_FDCAN1_Init();
   MX_DMA_Init();         // must precede MX_SPI1_Init: SPI1 MspInit calls HAL_DMA_Init + arms the stream NVICs
   MX_SPI1_Init();        // ADS131M08 ADC bus
+  MX_I2C4_Init();        // INA3221 power monitor bus (driver runs stubbed: PCB has SDA/SCL swapped)
   MX_SDMMC1_SD_Init();   // SD card
   MX_FATFS_Init();
   MX_TIM15_Init();       // valve servo PWM (CH1=IPA/PE5, CH2=NOS/PE6)
@@ -85,6 +91,19 @@ void wireDrivers(void)
       .drdy_irqn = EXTI4_IRQn,
   });
   g_ads131.start();
+
+  /* INA3221 power monitor on I2C4. STUBBED: this PCB has the SDA/SCL lines swapped, so the
+     bus is unusable — the driver is configured with stubbed=true, so init() touches nothing,
+     service() is a no-op, and the extended record's power_monitor reads Unknown / invalid.
+     Once the board is reworked, drop `.stubbed = true` (and confirm the address) to enable; the
+     I2C4 EV/ER vector handlers are already below. Default 7-bit address 0x40 (A0 = GND). */
+  g_power_monitor.init({
+      .hi2c    = &hi2c4,
+      .address = ina3221::DEFAULT_ADDRESS,
+      .ev_irqn = I2C4_EV_IRQn,
+      .er_irqn = I2C4_ER_IRQn,
+      .stubbed = true,
+  });
 
   /* Bind the three SD log files on SDMMC1 (the app composition left them unbound). They
      share one card: g_controller.init() mounts the volume + creates this boot's session
@@ -160,6 +179,18 @@ extern "C" void EXTI4_IRQHandler(void)
   HAL_GPIO_EXTI_IRQHandler(ADS_DRDY_Pin);   // GPIO_PIN_4
 }
 
+/* INA3221 I2C4 event + error vectors. Inert while the driver is stubbed (it arms no I2C
+   transfers), but kept ready so enabling the power monitor is just clearing Config::stubbed. */
+extern "C" void I2C4_EV_IRQHandler(void)
+{
+  HAL_I2C_EV_IRQHandler(&hi2c4);
+}
+
+extern "C" void I2C4_ER_IRQHandler(void)
+{
+  HAL_I2C_ER_IRQHandler(&hi2c4);
+}
+
 /**
   * @brief  This function is executed in case of error occurrence.
   */
@@ -178,6 +209,34 @@ extern "C" void assert_failed(uint8_t *file, uint32_t line)
   (void)line;
 }
 #endif /* USE_FULL_ASSERT */
+
+/**
+  * @brief Shared peripheral kernel-clock configuration (SPI1 + I2C4 off PLL3).
+  *        Mirrors the CubeMX-generated PeriphCommonClock_Config() in main.c, which is
+  *        excluded from the build — so halInit() calls this copy instead. Keep in sync
+  *        with the .ioc / main.c on regen.
+  * @retval None
+  */
+static void PeriphCommonClock_Config(void)
+{
+  RCC_PeriphCLKInitTypeDef PeriphClkInitStruct = {0};
+
+  PeriphClkInitStruct.PeriphClockSelection = RCC_PERIPHCLK_I2C4 | RCC_PERIPHCLK_SPI1;
+  PeriphClkInitStruct.PLL3.PLL3M = 25;
+  PeriphClkInitStruct.PLL3.PLL3N = 192;
+  PeriphClkInitStruct.PLL3.PLL3P = 12;
+  PeriphClkInitStruct.PLL3.PLL3Q = 12;
+  PeriphClkInitStruct.PLL3.PLL3R = 4;
+  PeriphClkInitStruct.PLL3.PLL3RGE = RCC_PLL3VCIRANGE_0;
+  PeriphClkInitStruct.PLL3.PLL3VCOSEL = RCC_PLL3VCOWIDE;
+  PeriphClkInitStruct.PLL3.PLL3FRACN = 0;
+  PeriphClkInitStruct.Spi123ClockSelection = RCC_SPI123CLKSOURCE_PLL3;
+  PeriphClkInitStruct.I2c4ClockSelection = RCC_I2C4CLKSOURCE_PLL3;
+  if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInitStruct) != HAL_OK)
+  {
+    Error_Handler();
+  }
+}
 
 /**
   * @brief System Clock Configuration

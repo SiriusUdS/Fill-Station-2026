@@ -25,6 +25,7 @@ namespace ecu_app {
 valve::BallValve     g_ipa_valve;
 valve::BallValve     g_nos_valve;
 ads131m08::Ads131m08 g_ads131;
+ina3221::Ina3221     g_power_monitor;
 can::Can             g_can;
 
 __attribute__((section(".axisram"))) platform::storage::SdCard g_card_fast;
@@ -32,7 +33,7 @@ __attribute__((section(".axisram"))) platform::storage::SdCard g_card_slow;
 __attribute__((section(".axisram"))) platform::storage::SdCard g_card_ext;
 __attribute__((section(".axisram")))
 EcuController g_controller{g_card_fast, g_card_slow, g_card_ext,
-                           g_ipa_valve, g_nos_valve, g_ads131, g_can};
+                           g_ipa_valve, g_nos_valve, g_ads131, g_can, g_power_monitor};
 
 }  // namespace ecu_app
 

@@ -11,6 +11,7 @@
 #include "actuation/interfaces/valve.hpp"        // logic::actuation::Valve
 #include "communication/interfaces/adc.hpp"      // logic::communication::StreamingAdc + AdcInfo
 #include "communication/interfaces/can.hpp"      // logic::communication::CanFrame
+#include "communication/interfaces/power_monitor.hpp"  // logic::communication::PowerMonitor + PowerMonitorInfo
 #include "control/control_flags.hpp"             // control_flags — surfaced in the extended record
 #include "control/refused_transition.hpp"        // last_refused_transition — surfaced in the extended record
 #include "control/persistent_state.hpp"          // fill_state — tags each downlinked record with the ECU's state
@@ -77,18 +78,21 @@ struct LogBuffer {
  * @tparam V logic::actuation::Valve (read for telemetry; both IPA and NOS).
  * @tparam A logic::communication::StreamingAdc (the ADS131M08).
  * @tparam Comm The ECU Communication layer (frames + sends to the FCU).
+ * @tparam PM logic::communication::PowerMonitor (the INA3221 on I2C4; stubbed on the current PCB).
  */
 template <logic::storage::Storage S, logic::actuation::Valve V,
-          logic::communication::StreamingAdc A, typename Comm>
+          logic::communication::StreamingAdc A, typename Comm,
+          logic::communication::PowerMonitor PM>
 class Telemetry {
 public:
     /** @brief Construct over the held drivers + the communication layer. The three SD
      *         streams are the raw / 125 Hz-averaged SystemState and the ExtendedSystemState
      *         (same shared recorder policy as the FCU). */
     Telemetry(S& storage_fast, S& storage_slow, S& storage_ext,
-              V& ipa_valve, V& nos_valve, A& adc, Comm& comm)
+              V& ipa_valve, V& nos_valve, A& adc, Comm& comm, PM& power_monitor)
         : recorder_(storage_fast, storage_slow, storage_ext),
-          ipa_valve_(ipa_valve), nos_valve_(nos_valve), adc_(adc), comm_(comm) {}
+          ipa_valve_(ipa_valve), nos_valve_(nos_valve), adc_(adc), comm_(comm),
+          power_monitor_(power_monitor) {}
 
     /** @brief Zero the double buffer and bring the three SD log files online. */
     void init()
@@ -173,9 +177,15 @@ public:
         ext.control_flags           = logic::control::control_flags.raw();  // live recording config
         ext.last_refused_state_from = static_cast<uint8_t>(logic::control::last_refused_transition.from);
         ext.last_refused_state_to   = static_cast<uint8_t>(logic::control::last_refused_transition.to);
+        ext.power_monitor           = power_monitor_.info();  // INA3221 (stubbed on the current PCB)
         recorder_.recordExtended(
             std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(&ext), sizeof(ext)));
     }
+
+    /** @brief Advance the power monitor's non-blocking acquisition one step (off the record-timer
+     *         ISR). A no-op while the driver is stubbed; the latest reading is folded into the
+     *         extended record by produceExtended. */
+    void servicePowerMonitor(uint32_t now_ms) { power_monitor_.service(now_ms); }
 
 private:
     // Build an EcuSystemState from the ADC's info record (a fresh conversion on the
@@ -245,6 +255,7 @@ private:
     V&    nos_valve_;
     A&    adc_;         // injected streaming ADC; produce() drains its ring
     Comm& comm_;        // injected communication layer; frames + downlinks records
+    PM&   power_monitor_;  // injected INA3221 (stubbed on the current PCB); read into the extended record
     detail::LogBuffer log_;            // .axisram in firmware; left uninitialised until init()
     volatile uint32_t  last_adc_ms_      = 0;  // last tick a conversion was drained; gates the silent-ADC filler
     uint32_t           last_extended_ms_ = 0;  // throttles produceExtended() to ~10 Hz

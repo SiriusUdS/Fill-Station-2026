@@ -6,6 +6,7 @@
 #include "actuation/interfaces/valve.hpp"        // logic::actuation::Valve
 #include "communication/interfaces/adc.hpp"      // logic::communication::StreamingAdc
 #include "communication/interfaces/can.hpp"      // logic::communication::Can
+#include "communication/interfaces/power_monitor.hpp"  // logic::communication::PowerMonitor
 #include "control/persistent_state.hpp"          // Backup-SRAM state snapshot (shared with the FCU)
 #include "system/state.hpp"
 
@@ -47,18 +48,22 @@ namespace logic::ecu {
  *           both the IPA and NOS valves are of this type.
  * @tparam A A type modelling logic::communication::StreamingAdc (the ADS131M08).
  * @tparam C A type modelling logic::communication::Can (the FDCAN bus to the FCU).
+ * @tparam PM A type modelling logic::communication::PowerMonitor (the INA3221 on I2C4; stubbed
+ *            on the current PCB until the swapped SDA/SCL lines are fixed).
  */
 template <logic::storage::Storage S, logic::actuation::Valve V,
-          logic::communication::StreamingAdc A, logic::communication::Can C>
+          logic::communication::StreamingAdc A, logic::communication::Can C,
+          logic::communication::PowerMonitor PM>
 class Controller {
 public:
     /** @brief Construct over the held drivers; does not touch hardware. Call init() next.
      *         The three SD streams (data_fast/slow/ext.bin) use the same shared recording
      *         policy as the FCU; which SystemState file is written is the FastRecording flag's. */
     Controller(S& storage_fast, S& storage_slow, S& storage_ext,
-               V& ipa_valve, V& nos_valve, A& adc, C& can)
+               V& ipa_valve, V& nos_valve, A& adc, C& can, PM& power_monitor)
         : comm_(can),
-          telemetry_(storage_fast, storage_slow, storage_ext, ipa_valve, nos_valve, adc, comm_),
+          telemetry_(storage_fast, storage_slow, storage_ext, ipa_valve, nos_valve, adc, comm_,
+                     power_monitor),
           control_(ipa_valve, nos_valve, comm_) {}
 
     /**
@@ -96,6 +101,7 @@ public:
             control_.onCommand(*frame, now_ms);
         }
 
+        telemetry_.servicePowerMonitor(now_ms);  // advance the non-blocking INA3221 (no-op while stubbed)
         telemetry_.produceExtended(now_ms);  // ~10 Hz ExtendedSystemState -> data_ext.bin
         telemetry_.drain(now_ms);   // flush full halves to SD + downlink over CAN
     }
@@ -109,9 +115,9 @@ public:
     void produceRecord(uint32_t now_ms) { telemetry_.produce(now_ms); }
 
 private:
-    Communication<C>                     comm_;       // declared first: the others hold a ref to it
-    Telemetry<S, V, A, Communication<C>> telemetry_;
-    Control<V, Communication<C>>         control_;
+    Communication<C>                         comm_;   // declared first: the others hold a ref to it
+    Telemetry<S, V, A, Communication<C>, PM> telemetry_;
+    Control<V, Communication<C>>             control_;
 };
 
 } // namespace logic::ecu

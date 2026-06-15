@@ -111,9 +111,10 @@ protected:
     FakeValve        nos_valve_;
     FakeStreamingAdc adc_;
     FakeCan          can_;
-    logic::ecu::Controller<FakeStorage, FakeValve, FakeStreamingAdc, FakeCan>
+    FakePowerMonitor pm_;
+    logic::ecu::Controller<FakeStorage, FakeValve, FakeStreamingAdc, FakeCan, FakePowerMonitor>
                      controller_{storage_fast_, storage_slow_, storage_ext_,
-                                 ipa_valve_, nos_valve_, adc_, can_};
+                                 ipa_valve_, nos_valve_, adc_, can_, pm_};
     uint32_t         now_ms_ = 0;
 
     void SetUp() override

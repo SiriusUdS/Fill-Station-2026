@@ -97,6 +97,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${REPO_ROOT}/src/app/platform/actuation/servomotor/hbl388.cpp
     ${REPO_ROOT}/src/app/platform/actuation/valve/ball_valve.cpp
     ${REPO_ROOT}/src/app/platform/acquisition/adc/ads131m08.cpp
+    ${REPO_ROOT}/src/app/platform/acquisition/power_monitor/ina3221.cpp
     ${REPO_ROOT}/src/app/platform/communication/spi/spi_dil.cpp
     ${REPO_ROOT}/src/app/platform/communication/spi/spi_dma.cpp
     ${REPO_ROOT}/src/app/platform/communication/spi/spi_irq.cpp
