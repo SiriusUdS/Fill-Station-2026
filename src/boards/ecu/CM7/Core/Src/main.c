@@ -19,6 +19,7 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "crc.h"
+#include "dma.h"
 #include "fatfs.h"
 #include "fdcan.h"
 #include "sdmmc.h"

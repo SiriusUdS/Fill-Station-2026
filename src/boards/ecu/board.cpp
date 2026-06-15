@@ -17,6 +17,7 @@
 #include "gpio.h"
 #include "crc.h"
 #include "fdcan.h"
+#include "dma.h"
 #include "spi.h"
 #include "sdmmc.h"
 #include "fatfs.h"
@@ -47,6 +48,7 @@ void halInit(void)
   MX_GPIO_Init();
   MX_CRC_Init();
   MX_FDCAN1_Init();
+  MX_DMA_Init();         // must precede MX_SPI1_Init: SPI1 MspInit calls HAL_DMA_Init + arms the stream NVICs
   MX_SPI1_Init();        // ADS131M08 ADC bus
   MX_SDMMC1_SD_Init();   // SD card
   MX_FATFS_Init();
@@ -64,11 +66,15 @@ void wireDrivers(void)
   (void)g_can.init(&hfdcan1, static_cast<uint8_t>(BoardId::Engine));
 
   /* ADS131M08 ADC on SPI1. The board owns the DRDY (PA4) pin: configure it as a
-     falling-edge EXTI input, then let the driver arm it. CS is PC5. */
+     falling-edge EXTI input, then let the driver arm it. CS is PC5.
+     DRDY is active-low (idles high, pulses low when a conversion is ready). Enable the
+     internal pull-up so the falling-edge EXTI line rests at its correct idle-high level
+     whenever the device is not driving it (boot / reset / no CLKIN) instead of floating
+     and firing on noise — this board has no hardware pull-up on DRDY (the FCU does). */
   GPIO_InitTypeDef drdy = {};
   drdy.Pin  = ADS_DRDY_Pin;     // PA4
   drdy.Mode = GPIO_MODE_IT_FALLING;
-  drdy.Pull = GPIO_NOPULL;
+  drdy.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(ADS_DRDY_GPIO_Port, &drdy);   // GPIOA
 
   g_ads131.init({
