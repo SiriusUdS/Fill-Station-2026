@@ -15,4 +15,5 @@
 #include "support/fake_valve.hpp"        // FakeValve
 #include "support/fake_adc.hpp"          // FakeAdc + FakeStreamingAdc
 #include "support/fake_thermocouple.hpp" // FakeThermocoupleBank
+#include "support/fake_power_monitor.hpp" // FakePowerMonitor
 #include "support/fake_digital_out.hpp"  // FakeDigitalOut

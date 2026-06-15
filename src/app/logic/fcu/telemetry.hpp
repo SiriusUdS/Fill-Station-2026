@@ -11,6 +11,7 @@
 #include "actuation/interfaces/valve.hpp"        // logic::actuation::Valve
 #include "communication/interfaces/adc.hpp"      // logic::communication::StreamingAdc + AdcInfo
 #include "communication/interfaces/thermocouple.hpp"  // logic::communication::ThermocoupleBank + ThermocoupleInfo
+#include "communication/interfaces/power_monitor.hpp"  // logic::communication::PowerMonitor + PowerMonitorInfo
 #include "control/persistent_state.hpp"          // Backup-SRAM state snapshot (drain tags the source state)
 #include "control/control_flags.hpp"             // control_flags — PersistingData gates the SD write
 #include "control/refused_transition.hpp"        // last_refused_transition — surfaced in ExtendedSystemState
@@ -81,20 +82,21 @@ struct LogBuffer {
  * @tparam A logic::communication::StreamingAdc (the ADS131M08).
  * @tparam Comm The FCU Communication layer (frames + sends to the GS).
  * @tparam TC logic::communication::ThermocoupleBank (the 4 MAX31856 on SPI6).
+ * @tparam PM logic::communication::PowerMonitor (the INA3221 on I2C4).
  */
 template <logic::storage::Storage S, logic::actuation::Valve V,
           logic::communication::StreamingAdc A, typename Comm,
-          logic::communication::ThermocoupleBank TC>
+          logic::communication::ThermocoupleBank TC, logic::communication::PowerMonitor PM>
 class Telemetry {
 public:
     /** @brief Construct over the held drivers + the communication layer. The three
      *         SD streams are the high-rate SystemState (fast/slow, picked by the
      *         FastRecording flag) and the low-rate ExtendedSystemState. */
     Telemetry(S& storage_fast, S& storage_slow, S& storage_ext,
-              V& fill_valve, V& dump_valve, A& adc, Comm& comm, TC& thermocouples)
+              V& fill_valve, V& dump_valve, A& adc, Comm& comm, TC& thermocouples, PM& power_monitor)
         : recorder_(storage_fast, storage_slow, storage_ext),
           fill_valve_(fill_valve), dump_valve_(dump_valve),
-          adc_(adc), comm_(comm), thermocouples_(thermocouples) {}
+          adc_(adc), comm_(comm), thermocouples_(thermocouples), power_monitor_(power_monitor) {}
 
     /** @brief Zero the double buffer and bring the three SD log files online. */
     void init()
@@ -139,6 +141,12 @@ public:
      *         bank talks to SPI6; it self-paces and never blocks. The latest readings
      *         are folded into each record by produce()/buildSystemState. */
     void serviceThermocouples(uint32_t now_ms) { thermocouples_.service(now_ms); }
+
+    /** @brief Advance the power monitor's non-blocking acquisition one step. Driven from the
+     *         foreground loop (NOT the record-timer ISR), since it talks to I2C4; it self-paces
+     *         (~10 Hz) and never blocks. The latest reading is folded into the extended record
+     *         by produceExtended. */
+    void servicePowerMonitor(uint32_t now_ms) { power_monitor_.service(now_ms); }
 
     /** @brief Flush any full half: stream its records to the GS (always, full-rate),
      *         and — while PersistingData is set — log the SystemState to SD per the
@@ -186,6 +194,7 @@ public:
         for (std::size_t i = 0; i < THERMOCOUPLE_COUNT; ++i) {
             ext.thermocouple_info[i] = thermocouples[i];
         }
+        ext.power_monitor = power_monitor_.info();   // INA3221 (I2C4), polled at ~10 Hz
 
         const std::span<const uint8_t> bytes(reinterpret_cast<const uint8_t*>(&ext), sizeof(ext));
         recorder_.recordExtended(bytes);   // -> data_ext.bin (gated by PersistingData)
@@ -348,6 +357,7 @@ private:
     A&    adc_;         // injected streaming ADC; produce() drains its ring
     Comm& comm_;        // injected communication layer; frames + downlinks records
     TC&   thermocouples_;  // injected MAX31856 bank; serviced off-ISR, read into the extended record
+    PM&   power_monitor_;  // injected INA3221; serviced off-ISR, read into the extended record
     detail::LogBuffer log_;            // .axisram in firmware; left uninitialised until init()
     volatile uint32_t  last_adc_ms_ = 0;  // last tick a conversion was drained; gates the silent-ADC filler
     uint32_t           last_extended_ms_ = 0;  // throttles produceExtended() to ~10 Hz

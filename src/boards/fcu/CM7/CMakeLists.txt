@@ -108,6 +108,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${REPO_ROOT}/src/app/platform/communication/spi/spi_irq.cpp
     ${REPO_ROOT}/src/app/platform/acquisition/adc/ads131m08.cpp
     ${REPO_ROOT}/src/app/platform/acquisition/thermocouple/max31856.cpp
+    ${REPO_ROOT}/src/app/platform/acquisition/power_monitor/ina3221.cpp
     ${REPO_ROOT}/src/app/platform/storage/sd_card.cpp
     ${REPO_ROOT}/src/app/platform/communication/can/can_dil.cpp
     ${REPO_ROOT}/src/app/platform/data_integrity/crc/crc.cpp

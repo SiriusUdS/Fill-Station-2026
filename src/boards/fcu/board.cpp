@@ -18,6 +18,7 @@
 #include "eth.h"
 #include "fatfs.h"
 #include "fdcan.h"
+#include "i2c.h"
 #include "sdmmc.h"
 #include "spi.h"
 #include "tim.h"
@@ -65,6 +66,7 @@ void halInit(void)
   MX_FDCAN1_Init();
   MX_SPI4_Init();
   MX_SPI6_Init();
+  MX_I2C4_Init();   // INA3221 power monitor bus (PF14/PF15)
   MX_TIM1_Init();   // Fill valve servo PWM (PE9 / TIM1_CH1)
   MX_TIM15_Init();  // Dump valve servo PWM (PE6 / TIM15_CH2)
   MX_TIM6_Init();   // record-production cadence (drives g_controller.produceRecord)
@@ -135,6 +137,17 @@ void wireDrivers(void)
       .hspi     = &hspi6,
       .cs_ports = { TC1_CS_GPIO_Port, TC2_CS_GPIO_Port, TC3_CS_GPIO_Port, TC4_CS_GPIO_Port },
       .cs_pins  = { TC1_CS_Pin, TC2_CS_Pin, TC3_CS_Pin, TC4_CS_Pin },
+  });
+
+  /* Bring up the INA3221 power monitor on I2C4 (PF14 SCL / PF15 SDA). init() writes the
+     config (also a presence check) and arms the I2C4 event/error interrupts; the controller
+     then services it non-blocking from the loop and folds it into the extended record. The
+     EV/ER vector handlers are below. Default 7-bit address 0x40 (A0 = GND). */
+  g_power_monitor.init({
+      .hi2c    = &hi2c4,
+      .address = ina3221::DEFAULT_ADDRESS,
+      .ev_irqn = I2C4_EV_IRQn,
+      .er_irqn = I2C4_ER_IRQn,
   });
 
   /* Bind the three SD log files to the HAL handle + FatFs drive + file name (the app
@@ -222,6 +235,19 @@ extern "C" void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef* htim)
 extern "C" void EXTI9_5_IRQHandler(void)
 {
   HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_7);
+}
+
+/* INA3221 I2C4 event + error vectors. The driver runs the per-loop reads in interrupt mode
+   (I2C4 is D3/BDMA-only, same as SPI6), so these drive the HAL I2C state machine, which
+   dispatches to the driver's HAL_I2C_MemRxCpltCallback / HAL_I2C_ErrorCallback. */
+extern "C" void I2C4_EV_IRQHandler(void)
+{
+  HAL_I2C_EV_IRQHandler(&hi2c4);
+}
+
+extern "C" void I2C4_ER_IRQHandler(void)
+{
+  HAL_I2C_ER_IRQHandler(&hi2c4);
 }
 
 /**

@@ -93,10 +93,11 @@ protected:
     FakeEthernet     eth_;
     FakeCan          can_;
     FakeThermocoupleBank tc_;
+    FakePowerMonitor     pm_;
     logic::fcu::Controller<FakeStorage, FakeValve, FakeStreamingAdc, FakeEthernet, FakeCan,
-                           FakeThermocoupleBank>
+                           FakeThermocoupleBank, FakePowerMonitor>
                      controller_{storage_fast_, storage_slow_, storage_ext_,
-                                 fill_valve_, dump_valve_, adc_, eth_, can_, tc_};
+                                 fill_valve_, dump_valve_, adc_, eth_, can_, tc_, pm_};
     uint32_t         now_ms_ = 0;
 
     void SetUp() override
@@ -256,6 +257,43 @@ TEST_F(FcuControllerTest, ThermocouplesDownlinkInTheLowRateExtendedRecord)
         EXPECT_EQ(ext.thermocouple_info[0].cold_junction_code, 0x0210);
         EXPECT_EQ(static_cast<uint8_t>(ext.thermocouple_info[0].state),
                   static_cast<uint8_t>(ThermocoupleState::Active));
+        found = true;
+    }
+    EXPECT_TRUE(found) << "no ExtendedSystemState was downlinked";
+}
+
+/* The INA3221 power monitor also rides the low-rate ExtendedSystemState. Script a reading,
+   cross the extended interval, and read the per-channel codes back out of the datagram. */
+TEST_F(FcuControllerTest, PowerMonitorDownlinksInTheLowRateExtendedRecord)
+{
+    reachSafe();  // also clears udp_tx
+
+    PowerMonitorInfo pm{};
+    pm.state                  = PowerMonitorState::Active;
+    pm.status.data_valid      = 1u;
+    pm.channels[0].shunt_code = 0x0123;
+    pm.channels[0].bus_code   = 0x0456;
+    pm.channels[2].bus_code   = 0x0789;
+    pm_.set(pm);
+
+    // Cross the ~10 Hz extended interval (100 ms) so produceExtended emits one record.
+    controller_.tick(now_ms_ += 150);
+
+    bool found = false;
+    for (const auto& d : bus().udp_tx) {
+        EthernetHeader h;
+        std::memcpy(&h, d.payload.data(), sizeof(h));
+        if (static_cast<TelemetryType>(h.payload_id) != TelemetryType::ExtendedSystemState) {
+            continue;
+        }
+        ASSERT_GE(d.payload.size(), sizeof(EthernetHeader) + sizeof(FcuExtendedSystemState));
+        FcuExtendedSystemState ext;
+        std::memcpy(&ext, d.payload.data() + sizeof(EthernetHeader), sizeof(ext));
+        EXPECT_EQ(ext.power_monitor.channels[0].shunt_code, 0x0123);
+        EXPECT_EQ(ext.power_monitor.channels[0].bus_code, 0x0456);
+        EXPECT_EQ(ext.power_monitor.channels[2].bus_code, 0x0789);
+        EXPECT_EQ(static_cast<uint8_t>(ext.power_monitor.state),
+                  static_cast<uint8_t>(PowerMonitorState::Active));
         found = true;
     }
     EXPECT_TRUE(found) << "no ExtendedSystemState was downlinked";

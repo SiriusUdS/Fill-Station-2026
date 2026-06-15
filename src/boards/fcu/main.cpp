@@ -27,6 +27,7 @@ valve::BallValve      g_fill_valve;
 valve::BallValve      g_dump_valve;
 ads131m08::Ads131m08  g_ads131;
 max31856::Max31856Bank g_thermocouples;
+ina3221::Ina3221      g_power_monitor;
 eth::Ethernet         g_eth;
 can::Can              g_can;
 
@@ -40,7 +41,7 @@ __attribute__((section(".axisram"))) platform::storage::SdCard g_card_slow;
 __attribute__((section(".axisram"))) platform::storage::SdCard g_card_ext;
 __attribute__((section(".axisram")))
 FcuController g_controller{g_card_fast, g_card_slow, g_card_ext, g_fill_valve, g_dump_valve,
-                           g_ads131, g_eth, g_can, g_thermocouples};
+                           g_ads131, g_eth, g_can, g_thermocouples, g_power_monitor};
 
 }  // namespace fcu_app
 
@@ -59,6 +60,6 @@ int main(void)
     fcu_app::g_running_indicator.tick(now);  // main-loop liveness blink (steady = loop alive)
     fcu_app::g_fill_valve.tick(now);  // advance each valve's open/close + limit-switch state machine
     fcu_app::g_dump_valve.tick(now);
-    fcu_app::g_controller.tick(now);
+    fcu_app::g_controller.tick(now);  // also services the INA3221 + folds it into the extended record
   }
 }
