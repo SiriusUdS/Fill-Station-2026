@@ -528,41 +528,66 @@ TEST_F(FcuControllerTest, AllQueuedCanFramesAreDrainedInOneTick)
     EXPECT_TRUE(bus().can_tx.empty());  // and never answered
 }
 
-/* A full EcuSystemState, fragmented over CAN exactly as the ECU sends it, must be
-   reassembled and relayed to the GS tagged as the ECU's (sender BoardId::Engine).
-   This drives the real codec end to end, so it pins the relay path the GS depends on. */
-TEST_F(FcuControllerTest, EcuTelemetryIsReassembledAndRelayedToGs)
+/* ECU telemetry, fragmented over CAN exactly as the ECU sends it, must be reassembled and
+   relayed to the GS tagged as the ECU's (sender BoardId::Engine) — and BATCHED like our own
+   telemetry: records accumulate in a relay half and stream out only once it fills, NOT one tiny
+   datagram per record. This drives the real codec end to end and pins the relay path the GS
+   depends on. */
+TEST_F(FcuControllerTest, EcuTelemetryIsBatchedAndRelayedToGs)
 {
     namespace codec = logic::communication::can;
     reachSafe();  // clears udp_tx / can_tx
 
-    EcuSystemState record{};
-    record.base.creation_timestamp_ms = 0xABCDEF01;  // a marker to find on the GS side
-
     // The ECU stamps its state-machine state into each fragment's header; the relay must carry
     // it onto the GS datagram (EthernetHeader.sender_state).
     constexpr auto ECU_STATE = static_cast<uint8_t>(logic::control::State::Unsafe);
-    std::array<CanFrame, codec::SYSTEM_STATE_FRAGMENTS> frames;
-    codec::packSystemState(record, BoardId::Engine, BoardId::FillingStation, ECU_STATE, /*seq=*/0,
-                           std::span<CanFrame, codec::SYSTEM_STATE_FRAGMENTS>(frames));
-    for (const auto& f : frames) {
-        bus().push_can(f);
+
+    // The first relayed datagram tagged as the ECU's (own telemetry shares the egress, so
+    // filter by sender_id == Engine).
+    auto findEngineSystemState = []() -> const SentDatagram* {
+        for (const auto& d : bus().udp_tx) {
+            EthernetHeader h;
+            std::memcpy(&h, d.payload.data(), sizeof(h));
+            if (h.sender_id == static_cast<uint8_t>(BoardId::Engine) &&
+                static_cast<TelemetryType>(h.payload_id) == TelemetryType::SystemState) {
+                return &d;
+            }
+        }
+        return nullptr;
+    };
+
+    // Stream reassembled ECU records until a relay half fills and drains. A single record no
+    // longer goes out on its own — the relay batches into a half buffer like our own telemetry.
+    EcuSystemState record{};
+    record.base.creation_timestamp_ms = 0xABCDEF01;  // marker on every record
+    for (int i = 0; i < 4000 && findEngineSystemState() == nullptr; ++i) {
+        std::array<CanFrame, codec::SYSTEM_STATE_FRAGMENTS> frames;
+        codec::packSystemState(record, BoardId::Engine, BoardId::FillingStation, ECU_STATE,
+                               static_cast<uint8_t>(i & 0x0F),
+                               std::span<CanFrame, codec::SYSTEM_STATE_FRAGMENTS>(frames));
+        for (const auto& f : frames) {
+            bus().push_can(f);
+        }
+        step();  // drains CAN, reassembles + appends; drainRelayedEcu sends any FULL half
     }
 
-    step();  // controller drains CAN, reassembles, relays to the GS
+    const SentDatagram* relayed = findEngineSystemState();
+    ASSERT_NE(relayed, nullptr) << "a full relay half never downlinked to the GS";
 
-    ASSERT_FALSE(bus().udp_tx.empty()) << "reassembled ECU record was not relayed to the GS";
-    const auto& payload = bus().udp_tx.back().payload;
-    ASSERT_GE(payload.size(), sizeof(EthernetHeader) + sizeof(EcuSystemState));
     EthernetHeader header;
-    std::memcpy(&header, payload.data(), sizeof(EthernetHeader));
+    std::memcpy(&header, relayed->payload.data(), sizeof(header));
     EXPECT_EQ(header.sender_id, static_cast<uint8_t>(BoardId::Engine));  // tagged as the ECU's
     EXPECT_EQ(header.payload_id, static_cast<uint8_t>(TelemetryType::SystemState));
     EXPECT_EQ(header.sender_state, ECU_STATE);  // the ECU's state relayed through to the GS
 
-    EcuSystemState relayed{};
-    std::memcpy(&relayed, payload.data() + sizeof(EthernetHeader), sizeof(EcuSystemState));
-    EXPECT_EQ(relayed.base.creation_timestamp_ms, 0xABCDEF01u);  // bytes round-tripped intact
+    // Batched, not one-per-record: the datagram carries many WHOLE records (the point of the fix).
+    EXPECT_EQ(header.payload_size_bytes % sizeof(EcuSystemState), 0u);
+    EXPECT_GT(header.payload_size_bytes / sizeof(EcuSystemState), 1u);
+
+    // And the bytes round-trip: the first relayed record is one we sent.
+    EcuSystemState first{};
+    std::memcpy(&first, relayed->payload.data() + sizeof(EthernetHeader), sizeof(EcuSystemState));
+    EXPECT_EQ(first.base.creation_timestamp_ms, 0xABCDEF01u);  // bytes round-tripped intact
 }
 
 /* ---- Persistent state (Backup SRAM) -------------------------------------- */

@@ -115,12 +115,13 @@ public:
                 control_.onResponse(static_cast<uint8_t>(in->header.frame.payload_id),
                                     static_cast<uint8_t>(in->header.frame.seq), now_ms);
             } else {
-                telemetry_.relayEcuFrame(in->frame, now_ms);
+                telemetry_.relayEcuFrame(in->frame);
             }
         }
-        // Emit this tick's batched ECU relays as one datagram (a burst folds into a single
-        // packet; a lone record still goes out this same tick).
-        telemetry_.flushRelayedEcu(now_ms);
+        // Stream any relay half that filled this tick to the GS — drained like our own
+        // telemetry, so only full halves go out and the ECU stream rides full datagrams
+        // instead of one tiny packet per record.
+        telemetry_.drainRelayedEcu(now_ms);
 
         // UDP ingress: ground-station commands.
         comm_.tick();  // service the link so receiveDatagram() can return inbound traffic

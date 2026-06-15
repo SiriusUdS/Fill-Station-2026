@@ -99,15 +99,11 @@ public:
     /** @brief Zero the double buffer and bring the three SD log files online. */
     void init()
     {
-        // The telemetry double buffer lives in NOLOAD .axisram — clear it and its
-        // indices before the producer starts.
-        std::memset(log_.data, 0, sizeof(log_.data));
-        log_.used[0]  = 0;
-        log_.used[1]  = 0;
-        log_.ready[0] = false;
-        log_.ready[1] = false;
-        log_.active   = 0;
-        log_.overrun  = false;
+        // Both double buffers live in NOLOAD .axisram — clear them (and their indices)
+        // before the producers start: our own records (log_) and the relayed ECU
+        // records (ecu_log_).
+        clearLog(log_);
+        clearLog(ecu_log_);
         last_adc_ms_  = 0;
 
         recorder_.init();   // mounts the volume + opens data_fast/slow/ext.bin
@@ -200,12 +196,12 @@ public:
     }
 
     /** @brief Feed one inbound CAN frame to the ECU-telemetry reassembler; when a full
-     *         EcuSystemState rebuilds, BATCH it for relay to the GS (tagged BoardId::Engine
-     *         so the GS demuxes it from our own records). The batch is flushed by
-     *         flushRelayedEcu() at the end of the tick — at the ECU's full 2 kHz this folds
-     *         a tick's worth of records into one datagram instead of one UDP packet each.
-     *         Non-telemetry frames are ignored by the reassembler. */
-    void relayEcuFrame(const logic::communication::CanFrame& frame, uint32_t now_ms)
+     *         EcuSystemState rebuilds, append it to the relay double buffer (tagged
+     *         BoardId::Engine so the GS demuxes it from our own records). Like our own
+     *         telemetry, the records are BATCHED: a half is streamed to the GS only once it
+     *         FILLS (drainRelayedEcu) — not one tiny datagram per record. Non-telemetry frames
+     *         are ignored by the reassembler. */
+    void relayEcuFrame(const logic::communication::CanFrame& frame)
     {
         if (auto record = ecu_reassembler_.accept(frame)) {
             // The ECU stamps its state-machine state into every fragment's header; carry it onto
@@ -216,29 +212,25 @@ public:
             header.code = frame.id;
             ecu_relay_state_ = static_cast<uint8_t>(header.frame.sender_state);
 
-            std::memcpy(ecu_relay_buf_.data() + ecu_relay_len_, &*record, sizeof(EcuSystemState));
-            ecu_relay_len_ += sizeof(EcuSystemState);
-            // Flush as soon as the batch can't take another whole record (one datagram's worth);
-            // the rest of the tick's records start a fresh batch.
-            if (ecu_relay_len_ + sizeof(EcuSystemState) > ecu_relay_buf_.size()) {
-                flushRelayedEcu(now_ms);
-            }
+            ecuLogAppend(*record);
         }
     }
 
-    /** @brief Relay any batched ECU records to the GS as a single datagram (tagged
-     *         BoardId::Engine), then empty the batch. Called from the controller each tick
-     *         after CAN ingress, so a burst drained in one tick rides one datagram while a
-     *         lone record still goes out promptly (same tick). */
-    void flushRelayedEcu(uint32_t now_ms)
+    /** @brief Stream any FULL relay half to the GS (tagged BoardId::Engine), then release it —
+     *         the relay counterpart of drain(). Called from the controller each tick; a half
+     *         only goes out once filled, so the ECU's 2 kHz stream rides a few full datagrams
+     *         instead of one tiny packet per record. */
+    void drainRelayedEcu(uint32_t now_ms)
     {
-        if (ecu_relay_len_ == 0) {
-            return;
+        for (uint8_t h = 0; h < 2; ++h) {
+            if (!ecu_log_.ready[h]) {
+                continue;
+            }
+            downlink(BoardId::Engine, ecu_relay_state_,
+                     std::span<const uint8_t>(ecu_log_.data[h], ecu_log_.used[h]),
+                     sizeof(EcuSystemState), now_ms);
+            ecu_log_.ready[h] = false;
         }
-        downlink(BoardId::Engine, ecu_relay_state_,
-                 std::span<const uint8_t>(ecu_relay_buf_.data(), ecu_relay_len_),
-                 sizeof(EcuSystemState), now_ms);
-        ecu_relay_len_ = 0;
     }
 
 private:
@@ -316,6 +308,40 @@ private:
         log_.used[a] = static_cast<uint16_t>(log_.used[a] + sizeof(FcuSystemState));
     }
 
+    // Append one reassembled ECU record to the relay double buffer's active half (single
+    // producer: relayEcuFrame on the main-loop CAN ingress). When a half fills it is marked
+    // ready for drainRelayedEcu(); if the other half is still unsent the record is dropped and
+    // overrun is flagged. Mirrors logAppend for the FCU's own records.
+    void ecuLogAppend(const EcuSystemState& record)
+    {
+        uint8_t a = ecu_log_.active;
+        if (ecu_log_.used[a] + sizeof(EcuSystemState) > detail::LOG_HALF_BYTES) {
+            ecu_log_.ready[a] = true;        // finalize this half
+            a ^= 1;
+            if (ecu_log_.ready[a]) {         // consumer hasn't drained it yet
+                ecu_log_.overrun = true;
+                return;
+            }
+            ecu_log_.active  = a;
+            ecu_log_.used[a] = 0;
+        }
+        std::memcpy(&ecu_log_.data[a][ecu_log_.used[a]], &record, sizeof(EcuSystemState));
+        ecu_log_.used[a] = static_cast<uint16_t>(ecu_log_.used[a] + sizeof(EcuSystemState));
+    }
+
+    // Zero a telemetry double buffer and reset its indices — used at init() for both the
+    // FCU's own log and the relayed-ECU log.
+    static void clearLog(detail::LogBuffer& b)
+    {
+        std::memset(b.data, 0, sizeof(b.data));
+        b.used[0]  = 0;
+        b.used[1]  = 0;
+        b.ready[0] = false;
+        b.ready[1] = false;
+        b.active   = 0;
+        b.overrun  = false;
+    }
+
     logic::telemetry::SdRecorder<S, FcuSystemState> recorder_;  // the 3-file SD recording policy
     V&    fill_valve_;   // injected Fill / Dump valves, read for telemetry
     V&    dump_valve_;
@@ -327,15 +353,13 @@ private:
     uint32_t           last_extended_ms_ = 0;  // throttles produceExtended() to ~10 Hz
     logic::communication::can::SystemStateReassembler ecu_reassembler_;  // rebuilds ECU telemetry from CAN
 
-    // Batches reassembled ECU records so they relay to the GS as datagrams (like our own
-    // telemetry) instead of one UDP packet per record — at the ECU's full 2 kHz that would be
-    // thousands of tiny packets a second. Holds up to one datagram's worth of whole records;
-    // filled + flushed entirely from the main-loop tick (no double buffer needed).
-    static constexpr std::size_t ECU_RELAY_BATCH_RECORDS =
-        Comm::GS_PAYLOAD_CAPACITY / sizeof(EcuSystemState);
-    std::array<uint8_t, ECU_RELAY_BATCH_RECORDS * sizeof(EcuSystemState)> ecu_relay_buf_;
-    std::size_t ecu_relay_len_ = 0;   // bytes currently batched (a whole number of records)
-    uint8_t     ecu_relay_state_ = 0; // ECU state from the last reassembled record; tags the relay datagram
+    // Relay double buffer: reassembled ECU records are appended to the active half, and a half
+    // is streamed to the GS only once it FILLS (drainRelayedEcu) — the same batching as our own
+    // telemetry (log_), so the ECU's 2 kHz stream rides a few full datagrams instead of one
+    // tiny UDP packet per record. Filled + drained from the main-loop tick. Rides the
+    // controller's .axisram placement like log_ (it does not need DMA-reachable memory).
+    detail::LogBuffer ecu_log_;
+    uint8_t           ecu_relay_state_ = 0;  // ECU state from the last reassembled record; tags the relay datagram
 
     static_assert(std::extent_v<decltype(SystemStateBase::valve_info)> == 2,
                   "FcuSystemState expects exactly two valves (Fill, Dump)");
