@@ -109,6 +109,8 @@ void Error_Handler(void);
 #define SOL_VALVE_STATE_GPIO_Port GPIOD
 #define SOL_VALVE_DET_Pin GPIO_PIN_15
 #define SOL_VALVE_DET_GPIO_Port GPIOD
+#define SD_DETECT_Pin GPIO_PIN_4
+#define SD_DETECT_GPIO_Port GPIOD
 #define TC1_CS_Pin GPIO_PIN_11
 #define TC1_CS_GPIO_Port GPIOG
 #define TC_MISO_Pin GPIO_PIN_12

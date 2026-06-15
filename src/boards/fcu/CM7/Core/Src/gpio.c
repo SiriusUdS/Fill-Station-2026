@@ -98,8 +98,8 @@ void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : EMATCH_DET_Pin SOL_VALVE_DET_Pin PD4 */
-  GPIO_InitStruct.Pin = EMATCH_DET_Pin|SOL_VALVE_DET_Pin|GPIO_PIN_4;
+  /*Configure GPIO pins : EMATCH_DET_Pin SOL_VALVE_DET_Pin SD_DETECT_Pin */
+  GPIO_InitStruct.Pin = EMATCH_DET_Pin|SOL_VALVE_DET_Pin|SD_DETECT_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
