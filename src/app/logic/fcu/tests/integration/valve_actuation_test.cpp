@@ -75,6 +75,10 @@ protected:
         logic::control::persistent_state = logic::control::PersistentState{};
         controller_.init();
 
+        // Operator per-valve actuation is gated to the Unsafe state; arm into Unsafe so these
+        // valve-command tests exercise actuation rather than the gate (covered in control_test).
+        logic::control::persistent_state.saveState(logic::control::State::Unsafe);
+
         // init() safe-boots the valves closed through the control layer; discard those
         // call counts so each test asserts only its own command-driven actuation.
         fill_valve_.open_calls = fill_valve_.close_calls = fill_valve_.percent_calls = 0;

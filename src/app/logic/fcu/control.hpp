@@ -20,7 +20,8 @@
 #include "system/board_id.hpp"
 #include "system/state.hpp"                                    // logic::control::State
 #include "control/persistent_state.hpp"                        // logic::control::persistent_state
-#include "control/state_machine.hpp"                           // toState, isTransitionAllowed (shared)
+#include "control/state_machine.hpp"                           // toState, isTransitionAllowed, isTransitionLockedOut (shared)
+#include "control/state_timing.hpp"                            // logic::control::state_entered_ms
 #include "control/refused_transition.hpp"                      // logic::control::last_refused_transition
 #include "control/refused_control_flag.hpp"                     // logic::control::last_refused_control_flag
 #include "control/control_flags.hpp"                           // logic::control::base_control_flags / fcu_control_flags
@@ -175,13 +176,16 @@ public:
     bool transitionTo(logic::control::State to, uint32_t now_ms)
     {
         const State from = logic::control::persistent_state.fill_state;
-        if (!logic::control::isTransitionAllowed(from, to)) {
+        if (!logic::control::isTransitionAllowed(from, to) ||
+            logic::control::isTransitionLockedOut(
+                from, to, now_ms - logic::control::state_entered_ms)) {
             logic::control::last_refused_transition = {from, to};  // surfaced in ExtendedSystemState
             ++logic::control::refused_transition_count;
             return false;
         }
         onTransition(from, to, now_ms);
         logic::control::persistent_state.saveState(to);
+        logic::control::state_entered_ms = now_ms;  // start the dwell clock for the new state
         return true;
     }
 
@@ -204,16 +208,18 @@ private:
             || target == BoardId::Engine;
     }
 
-    // May a command of `type` run in `current`? Skeleton: permissive for every known
-    // command in every state for now — the single place to add per-command, per-state
-    // gating (e.g. SetValvePosition only in TEST/UNSAFE) as the policy firms up.
+    // May a command of `type` run in `current`? Per-command, per-state gate. All commands
+    // are permitted in every state EXCEPT operator per-valve actuation (SetValvePosition),
+    // which is allowed only in Unsafe — the only state in which an operator may hand-drive an
+    // individual valve. (Transition-driven valve moves bypass this gate entirely: they run in
+    // onTransition via the valve methods directly, not through a command.)
     [[nodiscard]] static bool canExecute(CommandType type, State current)
     {
-        (void)current;
         switch (type) {
+            case CommandType::SetValvePosition:
+                return current == State::Unsafe;
             case CommandType::Ping:
             case CommandType::SetState:
-            case CommandType::SetValvePosition:
             case CommandType::SetControlFlag:
             case CommandType::Synchronise:
                 return true;
@@ -327,6 +333,8 @@ private:
     // logic::control::isTransitionAllowed); the SIDE EFFECTS are board-specific:
     //   - Any transition INTO Safe drives the local Fill/Dump valves closed (people may
     //     approach the system, so it must hold no flow).
+    //   - Any transition INTO Abort closes Fill and OPENS Dump (vent the line), independent
+    //     of the operator valve-command gate, which is the abort side effect for the FCU.
     //   - On Unsafe -> Ignite the FCU energises the e-match firing line; on leaving Ignite
     //     by ANY path (Launch, Abort, Safe) it de-energises it, so the igniter is never left
     //     hot once Ignite is exited. (Only Unsafe reaches Ignite per the transition table.)
@@ -335,6 +343,10 @@ private:
         if (to == State::Safe) {
             (void)fill_valve_.close();
             (void)dump_valve_.close();
+        }
+        if (to == State::Abort) {
+            (void)fill_valve_.close();  // stop the fill
+            (void)dump_valve_.open();   // vent the line
         }
         if (from == State::Unsafe) {
             // The solenoid valve is only armable in Unsafe; clear its flag on the way out so it

@@ -12,6 +12,8 @@
 #include "support/fakes.hpp"   // the standard set of host test doubles
 
 #include "control/persistent_state.hpp"
+#include "control/state_timing.hpp"     // logic::control::state_entered_ms
+#include "control/state_machine.hpp"    // logic::control::LAUNCH_TO_SAFE_LOCKOUT_MS
 #include "system/state.hpp"
 #include "framing/can_header.hpp"
 #include "framing/payload_type.hpp"
@@ -131,6 +133,7 @@ protected:
         logic::control::last_refused_control_flag =
             {logic::control::REFUSED_CONTROL_FLAG_NONE, 0, State::Init};
         logic::control::refused_control_flag_count = 0;
+        logic::control::state_entered_ms = 0;   // reset the dwell clock between tests
         controller_.init();
         // init() advanced Init -> Safe, which closes both valves; discard those calls so each
         // test counts only its own actuation.
@@ -146,6 +149,18 @@ protected:
         bus().push_can(frame);
         step();
     }
+
+    /* Arm the ECU into Unsafe (a bridged SetState Safe -> Unsafe), where operator per-valve
+       actuation is permitted, then clear the resulting Ack so each test counts only its own
+       bus traffic + valve calls. */
+    void armUnsafe()
+    {
+        deliver(makeSetState(State::Unsafe));
+        ASSERT_EQ(current(), State::Unsafe);
+        bus().can_tx.clear();
+        ipa_valve_.open_calls = ipa_valve_.close_calls = ipa_valve_.percent_calls = 0;
+        nos_valve_.open_calls = nos_valve_.close_calls = nos_valve_.percent_calls = 0;
+    }
 };
 
 /* ---- Startup ------------------------------------------------------------- */
@@ -160,6 +175,7 @@ TEST_F(EcuControllerTest, InitEntersSafe)
 
 TEST_F(EcuControllerTest, IpaValveOpens)
 {
+    armUnsafe();   // per-valve actuation is permitted only in Unsafe
     deliver(makeValveCmd(EcuValves::IPA, ValveCommand::Open));
     EXPECT_EQ(ipa_valve_.open_calls, 1);
     EXPECT_EQ(nos_valve_.open_calls, 0);
@@ -167,6 +183,7 @@ TEST_F(EcuControllerTest, IpaValveOpens)
 
 TEST_F(EcuControllerTest, NosValveCloses)
 {
+    armUnsafe();
     deliver(makeValveCmd(EcuValves::NOS, ValveCommand::Close));
     EXPECT_EQ(nos_valve_.close_calls, 1);
     EXPECT_EQ(ipa_valve_.close_calls, 0);
@@ -174,12 +191,24 @@ TEST_F(EcuControllerTest, NosValveCloses)
 
 TEST_F(EcuControllerTest, CommandForAnotherBoardIsIgnored)
 {
+    armUnsafe();
     deliver(makeValveCmd(EcuValves::IPA, ValveCommand::Open, BoardId::FillingStation));
     EXPECT_EQ(ipa_valve_.open_calls, 0);
 }
 
+/* Defense in depth: a bridged valve command is ignored unless the ECU is in Unsafe — it
+   neither actuates nor Acks. (Its state mirrors the FCU's, which already gates the command.) */
+TEST_F(EcuControllerTest, ValveCommandIsIgnoredOutsideUnsafe)
+{
+    ASSERT_EQ(current(), State::Safe);   // init() left us in Safe, not Unsafe
+    deliver(makeValveCmd(EcuValves::IPA, ValveCommand::Open, BoardId::Engine, /*seq=*/5));
+    EXPECT_EQ(ipa_valve_.open_calls, 0);   // not actuated outside Unsafe
+    EXPECT_TRUE(bus().can_tx.empty());     // and not Acked
+}
+
 TEST_F(EcuControllerTest, ValveCommandIsAckedToTheFcu)
 {
+    armUnsafe();
     deliver(makeValveCmd(EcuValves::IPA, ValveCommand::Open, BoardId::Engine, /*seq=*/5));
 
     EXPECT_EQ(ipa_valve_.open_calls, 1);
@@ -196,6 +225,7 @@ TEST_F(EcuControllerTest, ValveCommandIsAckedToTheFcu)
 
 TEST_F(EcuControllerTest, UnknownValveIsNotActuatedOrAcked)
 {
+    armUnsafe();   // past the state gate, so this exercises the unknown-valve rejection
     deliver(makeValveCmd(static_cast<EcuValves>(0x7F), ValveCommand::Open));
     EXPECT_EQ(ipa_valve_.open_calls, 0);
     EXPECT_EQ(nos_valve_.open_calls, 0);
@@ -323,6 +353,36 @@ TEST_F(EcuControllerTest, TransitionToSafeClosesBothValves)
     EXPECT_EQ(current(), State::Safe);
     EXPECT_GT(ipa_valve_.close_calls, ipa_before);
     EXPECT_GT(nos_valve_.close_calls, nos_before);
+}
+
+TEST_F(EcuControllerTest, TransitionToAbortClosesBothValves)
+{
+    deliver(makeSetState(State::Unsafe));   // Safe -> Unsafe
+    const auto ipa_before = ipa_valve_.close_calls;
+    const auto nos_before = nos_valve_.close_calls;
+
+    deliver(makeSetState(State::Abort));    // Unsafe -> Abort: the ECU shuts both propellant valves
+    EXPECT_EQ(current(), State::Abort);
+    EXPECT_GT(ipa_valve_.close_calls, ipa_before);
+    EXPECT_GT(nos_valve_.close_calls, nos_before);
+}
+
+/* Both boards enforce the Launch -> Safe dwell lockout identically (broadcast convention
+   means the ECU receives the same bridged SetState). Launch -> Safe is refused within the
+   window and accepted after; Launch -> Abort is always available. */
+TEST_F(EcuControllerTest, LaunchToSafeIsLockedOutOnTheEcuToo)
+{
+    deliver(makeSetState(State::Unsafe));   // Safe -> Unsafe
+    deliver(makeSetState(State::Ignite));   // Unsafe -> Ignite
+    deliver(makeSetState(State::Launch));   // Ignite -> Launch
+    ASSERT_EQ(current(), State::Launch);
+
+    deliver(makeSetState(State::Safe));     // within the lockout window -> refused
+    EXPECT_EQ(current(), State::Launch);
+
+    now_ms_ += logic::control::LAUNCH_TO_SAFE_LOCKOUT_MS;   // wait out the dwell
+    deliver(makeSetState(State::Safe));     // now permitted
+    EXPECT_EQ(current(), State::Safe);
 }
 
 /* ---- The shared 3-file recording policy (PersistingData + FastRecording) ---- */

@@ -18,7 +18,8 @@
 #include "communication/protocol/command/set_state.hpp"           // SetStateFrame
 #include "control/control_flags.hpp"                          // logic::control::base_control_flags
 #include "control/persistent_state.hpp"                       // logic::control::persistent_state
-#include "control/state_machine.hpp"                          // toState, isTransitionAllowed (shared)
+#include "control/state_machine.hpp"                          // toState, isTransitionAllowed, isTransitionLockedOut (shared)
+#include "control/state_timing.hpp"                           // logic::control::state_entered_ms
 #include "control/refused_transition.hpp"                     // logic::control::last_refused_transition (+ count)
 #include "control/refused_control_flag.hpp"                   // logic::control::last_refused_control_flag (+ count)
 #include "system/state.hpp"                                   // logic::control::State
@@ -60,17 +61,22 @@ public:
      *         shared transition table does not permit it from the current state (recording the
      *         refused transition for telemetry); otherwise run the board's per-transition action
      *         (onTransition), commit, and report acceptance. Returns true if applied, false if
-     *         refused. Used by the bridged SetState handler and the boot Init -> Safe. */
-    bool transitionTo(logic::control::State to)
+     *         refused. Used by the bridged SetState handler and the boot Init -> Safe.
+     *         now_ms feeds the time-gated transition policy (e.g. the Launch -> Safe
+     *         dwell lockout) and stamps the new state's entry time; the boot edge passes 0. */
+    bool transitionTo(logic::control::State to, uint32_t now_ms)
     {
         const auto from = logic::control::persistent_state.fill_state;
-        if (!logic::control::isTransitionAllowed(from, to)) {
+        if (!logic::control::isTransitionAllowed(from, to) ||
+            logic::control::isTransitionLockedOut(
+                from, to, now_ms - logic::control::state_entered_ms)) {
             logic::control::last_refused_transition = {from, to};  // surfaced in ExtendedSystemState
             ++logic::control::refused_transition_count;
             return false;
         }
         onTransition(from, to);
         logic::control::persistent_state.saveState(to);
+        logic::control::state_entered_ms = now_ms;  // start the dwell clock for the new state
         return true;
     }
 
@@ -81,7 +87,6 @@ public:
      */
     void onCommand(const logic::communication::CanFrame& frame, uint32_t now_ms)
     {
-        (void)now_ms;
         CanHeader header;
         header.code = frame.id;
 
@@ -101,7 +106,7 @@ public:
                 handleSetControlFlag(frame, header);
                 break;
             case logic::communication::command::CommandType::SetState:
-                handleSetState(frame, header);
+                handleSetState(frame, header, now_ms);
                 break;
             case logic::communication::command::CommandType::Ping:
                 handlePing(frame, header);
@@ -120,6 +125,13 @@ private:
     // retrying (Gs->Fcu->Ecu, Ack: Ecu->Fcu->Gs).
     void handleValveCmd(const logic::communication::CanFrame& frame, const CanHeader& header)
     {
+        // Operator per-valve actuation is permitted only in Unsafe — defense in depth behind the
+        // FCU's own canExecute gate, since the ECU's state mirrors the FCU's. Outside Unsafe, do
+        // not actuate or Ack. Transition-driven valve moves (Safe/Abort/Launch) bypass this: they
+        // run in onTransition, not here.
+        if (logic::control::persistent_state.fill_state != logic::control::State::Unsafe) {
+            return;
+        }
         if (frame.length < sizeof(SetValvePositionFrame)) {
             return;  // frame too short to carry the valve frame
         }
@@ -190,7 +202,8 @@ private:
     // same on both boards; the ECU's own per-transition action is onTransition(). On success,
     // Ack to the FCU echoing the seq so the reliable relay matches the reply (Gs->Fcu->Ecu,
     // Ack: Ecu->Fcu->Gs).
-    void handleSetState(const logic::communication::CanFrame& frame, const CanHeader& header)
+    void handleSetState(const logic::communication::CanFrame& frame, const CanHeader& header,
+                        uint32_t now_ms)
     {
         if (frame.length < sizeof(SetStateFrame)) {
             return;  // frame too short to carry the requested state
@@ -203,7 +216,7 @@ private:
         if (!requested) {
             return;  // unknown requested state id — do not Ack
         }
-        if (!transitionTo(*requested)) {
+        if (!transitionTo(*requested, now_ms)) {
             return;  // not a permitted transition (recorded) — do not Ack a command we did not apply
         }
 
@@ -214,11 +227,13 @@ private:
 
     // The ECU's per-transition action hook. The legal edges are shared with the FCU (see
     // logic::control::isTransitionAllowed); the SIDE EFFECTS are board-specific:
-    //   - Any transition INTO Safe drives both propellant valves closed (people may approach).
+    //   - Any transition INTO Safe OR Abort drives both propellant valves closed (people may
+    //     approach on Safe; an abort must shut the propellant flow). Independent of the operator
+    //     valve-command gate.
     //   - Ignite -> Launch drives both propellant valves fully open (the FCU does nothing here).
     void onTransition(logic::control::State from, logic::control::State to)
     {
-        if (to == logic::control::State::Safe) {
+        if (to == logic::control::State::Safe || to == logic::control::State::Abort) {
             (void)ipa_valve_.close();
             (void)nos_valve_.close();
         }

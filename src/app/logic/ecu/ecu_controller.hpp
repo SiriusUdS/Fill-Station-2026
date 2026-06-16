@@ -84,7 +84,7 @@ public:
         // transition point so onTransition runs (both propellant valves driven closed). A
         // resumed engine/armed state from Backup SRAM is left as-is — only a fresh Init advances.
         if (logic::control::persistent_state.fill_state == logic::control::State::Init) {
-            (void)control_.transitionTo(logic::control::State::Safe);
+            (void)control_.transitionTo(logic::control::State::Safe, 0);  // boot transition; t=0
         }
     }
 

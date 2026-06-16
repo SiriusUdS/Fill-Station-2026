@@ -69,6 +69,9 @@ namespace logic::control {
             return requested == State::Safe || requested == State::Launch ||
                    requested == State::Abort;
         case State::Launch:
+            // Launch -> Abort is available at all times; Launch -> Safe is structurally
+            // legal but additionally locked out for the early burn (see
+            // isTransitionLockedOut / LAUNCH_TO_SAFE_LOCKOUT_MS).
             return requested == State::Safe || requested == State::Abort;
         case State::Abort:
             return requested == State::Safe;
@@ -84,6 +87,36 @@ namespace logic::control {
             // init() completes (the board is never in Init when a command arrives), but it is a
             // real table edge so it routes through Control::transitionTo() like every other.
             return requested == State::Safe;
+    }
+    return false;
+}
+
+/**
+ * @brief How long Launch must be held before it may be safed. An abort
+ *        (Launch -> Abort) is NOT subject to this — it is available at all times.
+ */
+inline constexpr uint32_t LAUNCH_TO_SAFE_LOCKOUT_MS = 20000;
+
+/**
+ * @brief Time-gated leg of the transition policy: is a structurally-legal edge
+ *        currently locked out by a minimum-dwell requirement?
+ *
+ * Layered on top of isTransitionAllowed: an edge must be BOTH allowed (legal in the
+ * table) AND not locked out here to commit. Today the only gated edge is
+ * Launch -> Safe, blocked for the first LAUNCH_TO_SAFE_LOCKOUT_MS after entering
+ * Launch so the vehicle cannot be safed mid-burn. Launch -> Abort is deliberately
+ * not gated, so an abort stays available at every instant of launch.
+ *
+ * @param current      The state being left.
+ * @param requested    The state being requested.
+ * @param ms_in_state  Elapsed time in `current` (now_ms - state_entered_ms).
+ * @return true if the edge is legal-but-locked-out right now (caller must refuse it).
+ */
+[[nodiscard]] inline bool isTransitionLockedOut(State current, State requested,
+                                                uint32_t ms_in_state)
+{
+    if (current == State::Launch && requested == State::Safe) {
+        return ms_in_state < LAUNCH_TO_SAFE_LOCKOUT_MS;
     }
     return false;
 }

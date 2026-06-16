@@ -25,6 +25,7 @@
 #include "communication/protocol/command/set_control_flag.hpp"    // ControlFlag, SetControlFlagFrame
 #include "system/valves/fcu.hpp"                              // FcuValves
 #include "control/persistent_state.hpp"
+#include "control/state_timing.hpp"                           // logic::control::state_entered_ms
 #include "control/control_flags.hpp"                          // logic::control::base_control_flags / fcu_control_flags
 #include "system/state.hpp"
 #include "framing/can_header.hpp"
@@ -124,6 +125,7 @@ protected:
         logic::control::last_refused_control_flag =
             {logic::control::REFUSED_CONTROL_FLAG_NONE, 0, State::Init};
         logic::control::refused_control_flag_count = 0;
+        logic::control::state_entered_ms = 0;   // reset the dwell clock between tests
         comm_.init();
         control_.init();
         clearValveCalls();   // discard the boot-safing close() so command tests start clean
@@ -341,6 +343,18 @@ TEST_F(ControlTest, FcuIgniteToLaunchDoesNotActuateValves)
     EXPECT_EQ(dump_valve_.close_calls, 0);
 }
 
+/* Any transition into Abort closes Fill and opens Dump (vent the line) — a per-transition
+   side effect that runs even though an operator SetValvePosition would be refused outside Unsafe. */
+TEST_F(ControlTest, TransitionToAbortClosesFillAndOpensDump)
+{
+    setCurrent(State::Unsafe);
+    clearValveCalls();
+    deliver(makeSetState(State::Abort));   // Unsafe -> Abort
+    EXPECT_EQ(current(), State::Abort);
+    EXPECT_EQ(fill_valve_.close_calls, 1);   // fill closed
+    EXPECT_EQ(dump_valve_.open_calls, 1);    // dump opened (vent)
+}
+
 /* ---- Boot safing --------------------------------------------------------- */
 
 TEST_F(ControlTest, InitDrivesLocalValvesClosed)
@@ -353,10 +367,11 @@ TEST_F(ControlTest, InitDrivesLocalValvesClosed)
     EXPECT_EQ(dump_valve_.open_calls, 0);
 }
 
-/* ---- SetValvePosition (local actuation, bridge to ECU, or both) ---------- */
+/* ---- SetValvePosition (gated to Unsafe; local actuation, bridge to ECU, or both) ---------- */
 
 TEST_F(ControlTest, ValidValveActionActuatesLocalValve)
 {
+    setCurrent(State::Unsafe);   // operator per-valve actuation is permitted only in Unsafe
     deliver(makeSetValve(FcuValves::Fill, ValveCommand::Open, /*value=*/0,
                          BoardId::FillingStation, /*seq=*/200));   // seq > 15: full 8-bit echo
     EXPECT_EQ(fill_valve_.open_calls, 1);
@@ -367,6 +382,7 @@ TEST_F(ControlTest, ValidValveActionActuatesLocalValve)
 
 TEST_F(ControlTest, UnknownValveActionIsRejected)
 {
+    setCurrent(State::Unsafe);   // past the state gate, so this exercises the action-validation path
     deliver(makeSetValve(FcuValves::Fill, static_cast<ValveCommand>(0xFF)));
     EXPECT_EQ(fill_valve_.open_calls, 0);
     EXPECT_EQ(fill_valve_.close_calls, 0);
@@ -374,9 +390,32 @@ TEST_F(ControlTest, UnknownValveActionIsRejected)
     EXPECT_TRUE(bus().udp_tx.empty());   // refused -> not Acked
 }
 
+/* The operator valve command is gated to Unsafe: outside Unsafe the FCU does not actuate its
+   local valve, does not bridge the command to the ECU, and does not Ack — the gate is in
+   handleCommand, before any target routing. (Transition-driven valve moves are unaffected —
+   they run in onTransition, tested separately.) */
+TEST_F(ControlTest, ValveCommandIsRejectedOutsideUnsafe)
+{
+    for (const State s : {State::Safe, State::Ignite, State::Launch, State::Abort, State::Error}) {
+        setCurrent(s);
+        clearValveCalls();
+        bus().reset();
+        // Engine target: would bridge to the ECU in Unsafe — here it must not.
+        deliver(makeSetValve(FcuValves::Fill, ValveCommand::Open, /*value=*/0,
+                             BoardId::Engine, /*seq=*/4));
+        EXPECT_TRUE(bus().can_tx.empty())    << "bridged in state " << static_cast<int>(s);
+        EXPECT_TRUE(bus().udp_tx.empty())    << "Acked in state "   << static_cast<int>(s);
+        // FillingStation target: would actuate our own valve in Unsafe — here it must not.
+        deliver(makeSetValve(FcuValves::Fill, ValveCommand::Open, /*value=*/0,
+                             BoardId::FillingStation, /*seq=*/4));
+        EXPECT_EQ(fill_valve_.open_calls, 0) << "actuated in state " << static_cast<int>(s);
+        EXPECT_TRUE(bus().udp_tx.empty())    << "Acked in state "    << static_cast<int>(s);
+    }
+}
+
 TEST_F(ControlTest, EngineValveCommandBridgesOverCanWithoutLocalActuation)
 {
-    setCurrent(State::Safe);
+    setCurrent(State::Unsafe);
     deliver(makeSetValve(FcuValves::Fill, ValveCommand::Open, /*value=*/0,
                          BoardId::Engine, /*seq=*/6));
 
@@ -399,7 +438,7 @@ TEST_F(ControlTest, EngineValveCommandBridgesOverCanWithoutLocalActuation)
 
 TEST_F(ControlTest, BroadcastValveCommandActuatesLocallyAndBridges)
 {
-    setCurrent(State::Safe);
+    setCurrent(State::Unsafe);
     deliver(makeSetValve(FcuValves::Fill, ValveCommand::Open, /*value=*/0,
                          BoardId::Broadcast, /*seq=*/2));
 
@@ -410,7 +449,7 @@ TEST_F(ControlTest, BroadcastValveCommandActuatesLocallyAndBridges)
 
 TEST_F(ControlTest, AckFromEcuClearsThePendingBridgedValveCommand)
 {
-    setCurrent(State::Safe);
+    setCurrent(State::Unsafe);
     deliver(makeSetValve(FcuValves::Fill, ValveCommand::Open, /*value=*/0,
                          BoardId::Engine, /*seq=*/8));
     ASSERT_EQ(bus().can_tx.size(), 1u);   // bridged once

@@ -211,6 +211,23 @@ No protocol/submodule or wire-format changes — this is pure control-logic beha
 - (Option A) **Sync test:** an FCU transition to Safe/Abort drives the ECU to the same state and
   closes its valves.
 
+## Follow-ups (deferred, after this plan)
+
+- **Remove Broadcast `SetValvePosition` entirely.** Operator per-valve actuation should never be
+  addressable to `Broadcast` (open Fill on the FCU and IPA/NOS on the ECU with one command). Drop
+  the Broadcast/Engine routing for `SetValvePosition` so a valve command is single-board only, and
+  retire `BroadcastValveCommandActuatesLocallyAndBridges`. Not done here — tracked for the next plan.
+
+## Resolved decisions (this plan)
+
+1. **Cross-board sync:** option **B** (broadcast-addressing convention; no firmware bridge of
+   Safe/Abort). No watchdog exists, so the watchdog-abort path is moot.
+2. **Launch → Safe:** kept as a legal edge but **time-gated** — locked out for
+   `LAUNCH_TO_SAFE_LOCKOUT_MS` (20 s) after entering Launch; `Launch → Abort` stays available at
+   all times. Both boards enforce it identically via `state_entered_ms` + `isTransitionLockedOut`.
+3. **Refused-`SetValvePosition` telemetry:** left out of scope.
+4. **Fill/Dump abort positions:** `fill_valve_.close()` / `dump_valve_.open()`.
+
 ## Open questions (need a decision before implementing)
 
 1. **Cross-board sync:** option **A** (firmware bridges Safe/Abort to the ECU) or **B** (broadcast

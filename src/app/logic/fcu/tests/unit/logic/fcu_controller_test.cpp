@@ -16,6 +16,8 @@
 #include "communication/interfaces/ethernet.hpp"
 #include "communication/protocol/framing/ethernet_header.hpp"   // EthernetHeader (downlink header)
 #include "control/persistent_state.hpp"
+#include "control/state_timing.hpp"     // logic::control::state_entered_ms
+#include "control/state_machine.hpp"    // logic::control::LAUNCH_TO_SAFE_LOCKOUT_MS
 #include "system/state.hpp"
 #include "framing/can_header.hpp"
 #include "framing/payload_type.hpp"
@@ -142,6 +144,7 @@ protected:
         logic::control::last_refused_control_flag =
             {logic::control::REFUSED_CONTROL_FLAG_NONE, 0, logic::control::State::Init};
         logic::control::refused_control_flag_count = 0;
+        logic::control::state_entered_ms = 0;   // reset the dwell clock between tests
         controller_.init();
     }
 
@@ -437,13 +440,33 @@ TEST_F(FcuControllerTest, IgniteToLaunch)
     EXPECT_EQ(currentState(), logic::control::State::Launch);
 }
 
-TEST_F(FcuControllerTest, LaunchBackToSafe)
+/* Launch -> Abort is available at every instant of launch — no dwell requirement, so an
+   abort is always possible. */
+TEST_F(FcuControllerTest, LaunchToAbortIsAlwaysAllowed)
 {
     reachSafe();
     requestState(logic::control::State::Unsafe);
     requestState(logic::control::State::Ignite);
     requestState(logic::control::State::Launch);
-    requestState(logic::control::State::Safe);
+    requestState(logic::control::State::Abort);   // immediately, no dwell needed
+    EXPECT_EQ(currentState(), logic::control::State::Abort);
+}
+
+/* Launch -> Safe is locked out for the first LAUNCH_TO_SAFE_LOCKOUT_MS after entering Launch,
+   then permitted. (Early on, the way down is Launch -> Abort -> Safe.) */
+TEST_F(FcuControllerTest, LaunchToSafeIsLockedOutUntilDwellElapses)
+{
+    reachSafe();
+    requestState(logic::control::State::Unsafe);
+    requestState(logic::control::State::Ignite);
+    requestState(logic::control::State::Launch);
+    ASSERT_EQ(currentState(), logic::control::State::Launch);
+
+    requestState(logic::control::State::Safe);   // within the lockout window -> refused
+    EXPECT_EQ(currentState(), logic::control::State::Launch);
+
+    now_ms_ += logic::control::LAUNCH_TO_SAFE_LOCKOUT_MS;   // wait out the dwell
+    requestState(logic::control::State::Safe);   // now permitted
     EXPECT_EQ(currentState(), logic::control::State::Safe);
 }
 
