@@ -71,7 +71,7 @@ inline constexpr uint16_t               TELEMETRY_PORT = 7520;
 
 inline constexpr std::array<uint8_t, 6> COMMANDER_MAC  = {0xb8, 0x27, 0xeb, 0x1d, 0x20, 0xb9};
 inline constexpr uint32_t               COMMANDER_IPV4 = make_ipv4(192, 168, 0, 101);
-inline constexpr uint16_t               COMMANDER_PORT = 7522;
+inline constexpr uint16_t               COMMANDER_PORT = 7520;
 
 } // namespace detail
 
