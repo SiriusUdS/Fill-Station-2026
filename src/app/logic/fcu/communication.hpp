@@ -57,17 +57,21 @@ inline constexpr uint32_t make_ipv4(uint8_t b1, uint8_t b2, uint8_t b3, uint8_t 
  *
  * The commander's real address is not known yet; for bring-up it MIRRORS the telemetry sink
  * so a single test machine can do both ends. TODO: set the real commander MAC / IP / port. */
+// inline constexpr std::array<uint8_t, 6> TELEMETRY_MAC  = {0xb8, 0x27, 0xeb, 0x1d, 0x20, 0xb9};
+// inline constexpr uint32_t               TELEMETRY_IPV4 = make_ipv4(192, 168, 0, 101);
+// inline constexpr uint16_t               TELEMETRY_PORT = 7522;
+
 inline constexpr std::array<uint8_t, 6> TELEMETRY_MAC  = {0x00, 0xE0, 0x4C, 0x33, 0x0F, 0x98};
 inline constexpr uint32_t               TELEMETRY_IPV4 = make_ipv4(192, 168, 0, 111);
 inline constexpr uint16_t               TELEMETRY_PORT = 7520;
 
-inline constexpr std::array<uint8_t, 6> COMMANDER_MAC  = TELEMETRY_MAC;
-inline constexpr uint32_t               COMMANDER_IPV4 = TELEMETRY_IPV4;
-inline constexpr uint16_t               COMMANDER_PORT = TELEMETRY_PORT;
+// inline constexpr std::array<uint8_t, 6> COMMANDER_MAC  = TELEMETRY_MAC;
+// inline constexpr uint32_t               COMMANDER_IPV4 = TELEMETRY_IPV4;
+// inline constexpr uint16_t               COMMANDER_PORT = TELEMETRY_PORT;
 
-// inline constexpr std::array<uint8_t, 6> COMMANDER_MAC  = {0xb8, 0x27, 0xeb, 0x1d, 0x20, 0xb9};
-// inline constexpr uint32_t               COMMANDER_IPV4 = make_ipv4(192, 168, 0, 101);
-// inline constexpr uint16_t               COMMANDER_PORT = 7521;
+inline constexpr std::array<uint8_t, 6> COMMANDER_MAC  = {0xb8, 0x27, 0xeb, 0x1d, 0x20, 0xb9};
+inline constexpr uint32_t               COMMANDER_IPV4 = make_ipv4(192, 168, 0, 101);
+inline constexpr uint16_t               COMMANDER_PORT = 7522;
 
 } // namespace detail
 
