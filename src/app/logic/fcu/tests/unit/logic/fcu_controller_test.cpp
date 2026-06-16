@@ -306,6 +306,84 @@ TEST_F(FcuControllerTest, DownlinkCarriesTheFullFcuSystemStateNotJustTheBase)
         << "eth_info absent — the FCU downlinked only the SystemStateBase";
 }
 
+/* ---- Telemetry buffer ring ---------------------------------------------- */
+
+/* The buffer ring lets the producer run several slots ahead of the consumer. Fill
+   (LOG_BUFFER_COUNT - 1) slots' worth of records WITHOUT draining (the old 2-slot double
+   buffer would have overrun after the second) and confirm no overrun was flagged. */
+TEST_F(FcuControllerTest, RingAbsorbsOutstandingSlotsWithoutOverrun)
+{
+    reachSafe();  // clears udp_tx
+
+    const std::size_t records_per_slot =
+        logic::telemetry::SD_LOG_BLOCK_BYTES / sizeof(FcuSystemState);
+    const std::size_t outstanding_slots = logic::fcu::detail::LOG_BUFFER_COUNT - 1;
+    const AdcInfo sample{};
+    // Fill the slots with NO step() in between, so nothing drains while we pump.
+    for (std::size_t i = 0; i < outstanding_slots * records_per_slot; ++i) {
+        adc_.push(sample);
+        controller_.produceRecord(++now_ms_);
+    }
+
+    bus().udp_tx.clear();
+    step();  // drain the ring
+
+    const SentDatagram* sys = nullptr;
+    for (const auto& d : bus().udp_tx) {
+        EthernetHeader h;
+        std::memcpy(&h, d.payload.data(), sizeof(h));
+        if (static_cast<TelemetryType>(h.payload_id) == TelemetryType::SystemState) { sys = &d; }
+    }
+    ASSERT_NE(sys, nullptr) << "the outstanding slots never downlinked a SystemState";
+    FcuSystemState record;
+    std::memcpy(&record, sys->payload.data() + sizeof(EthernetHeader), sizeof(record));
+    EXPECT_EQ(record.base.storage_info.overrun_count, 0u)
+        << "the ring overran with fewer than its depth of slots outstanding";
+}
+
+/* Flooding the ring far past its depth without draining must flag overruns; the running
+   count then rides the SD card's storage_info in the records built afterwards. */
+TEST_F(FcuControllerTest, OverflowingTheRingFlagsOverrun)
+{
+    reachSafe();
+
+    const std::size_t records_per_slot =
+        logic::telemetry::SD_LOG_BLOCK_BYTES / sizeof(FcuSystemState);
+    const AdcInfo sample{};
+    // Pump well past the ring's capacity with no drain -> the producer must drop records.
+    const std::size_t flood = (logic::fcu::detail::LOG_BUFFER_COUNT + 4) * records_per_slot;
+    for (std::size_t i = 0; i < flood; ++i) {
+        adc_.push(sample);
+        controller_.produceRecord(++now_ms_);
+    }
+    step();  // drain whatever the flood left ready
+
+    // Pump several more full slots AFTER the drops; every record built now carries the
+    // (nonzero) running overrun tally in its storage_info. Drain and scan for it.
+    bus().udp_tx.clear();
+    for (std::size_t i = 0; i < 3 * records_per_slot; ++i) {
+        adc_.push(sample);
+        controller_.produceRecord(++now_ms_);
+    }
+    step();
+
+    bool saw_overrun = false;
+    for (const auto& d : bus().udp_tx) {
+        EthernetHeader h;
+        std::memcpy(&h, d.payload.data(), sizeof(h));
+        if (static_cast<TelemetryType>(h.payload_id) != TelemetryType::SystemState) {
+            continue;
+        }
+        for (std::size_t off = sizeof(EthernetHeader);
+             off + sizeof(FcuSystemState) <= d.payload.size(); off += sizeof(FcuSystemState)) {
+            FcuSystemState record;
+            std::memcpy(&record, d.payload.data() + off, sizeof(record));
+            if (record.base.storage_info.overrun_count > 0u) { saw_overrun = true; }
+        }
+    }
+    EXPECT_TRUE(saw_overrun) << "overflowing the ring did not flag an overrun in any record";
+}
+
 /* The 4 thermocouples ride the low-rate ExtendedSystemState (data_ext / 10 Hz), NOT
    the 2 kHz SystemState. Set a distinctive reading, cross the extended interval, and
    read it back out of the ExtendedSystemState datagram. */

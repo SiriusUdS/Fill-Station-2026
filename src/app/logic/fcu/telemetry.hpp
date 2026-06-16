@@ -34,8 +34,8 @@
  * FCU telemetry pipeline (HAL-free) — the record-production + downlink half of
  * the FCU: the ADC and the SD card, plus the live downlink to the ground station.
  *
- * It owns the telemetry double buffer (log_), turns each ADC conversion into an
- * FcuSystemState record (produce), flushes full halves to SD and streams them to
+ * It owns the telemetry buffer ring (log_), turns each ADC conversion into an
+ * FcuSystemState record (produce), flushes full slots to SD and streams them to
  * the GS (drain), and relays the ECU's telemetry off the CAN bus to the GS
  * (relayEcuFrame). It does NOT own a transport: it speaks through the injected
  * Communication layer, which frames and sends. The only wire detail it keeps is
@@ -50,11 +50,17 @@ namespace logic::fcu {
 
 namespace detail {
 
-/* Telemetry double buffer: each FcuSystemState (one per ADC sample) is appended to
-   the active half; when a half fills it is flushed to SD and streamed to the GS while
-   the producer fills the other half. The half size is shared with the SD recorder
-   (it writes a whole half verbatim to data_fast.bin). */
+/* Telemetry buffer ring: each FcuSystemState (one per ADC sample) is appended to the head
+   slot; when a slot fills it is flushed to SD and streamed to the GS while the producer
+   moves on to the next slot. The slot size is shared with the SD recorder (it writes a whole
+   slot verbatim to data_fast.bin). */
 inline constexpr std::size_t LOG_HALF_BYTES = logic::telemetry::SD_LOG_BLOCK_BYTES;
+
+/* Depth of the telemetry buffer ring: how many LOG_HALF_BYTES slots the producer can run
+   ahead of the consumer. This was a 2-slot double buffer, which overran when an f_sync stall
+   held off the drain; a deeper ring absorbs those bursts. Costs LOG_BUFFER_COUNT * LOG_HALF_BYTES
+   of (AXI-SRAM) RAM per ring — the FCU holds two (its own log_ + the relayed-ECU ecu_log_). */
+inline constexpr std::size_t LOG_BUFFER_COUNT = 4;
 
 /* If the ADC ring stays empty this long, the ADC is presumed silent and the
    record timer emits filler records (flagged invalid) so the packet rate holds. */
@@ -64,15 +70,18 @@ inline constexpr uint32_t ADC_TIMEOUT_MS = 10;   // > worst-case stall before de
    timestamps). Built + downlinked + logged to data_ext.bin from the foreground. */
 inline constexpr uint32_t EXTENDED_INTERVAL_MS = 100;   // ~10 Hz
 
-/* The telemetry double buffer. A plain aggregate (no member initializers) so the
-   owner's constructor does not touch its 8 KB at static-init; init() zeroes it.
-   Pinned in D1 AXI-SRAM via the controller instance's placement in firmware. */
+/* The telemetry buffer ring. Single-producer (the record-timer ISR fills `head`) /
+   single-consumer (the foreground drain empties `tail`), draining in fill order. A plain
+   aggregate (no member initializers) so the owner's constructor does not touch its memory at
+   static-init; init() zeroes it. Pinned in D1 AXI-SRAM via the controller instance's
+   placement in firmware. */
 struct LogBuffer {
-    uint8_t           data[2][LOG_HALF_BYTES];
-    volatile uint16_t used[2];   // bytes filled in each half
-    volatile bool     ready[2];  // half full, awaiting drain
-    uint8_t           active;    // half the producer is filling (0/1)
-    volatile uint16_t overrun_count;  // halves dropped because the other was still unflushed (saturating)
+    uint8_t           data[LOG_BUFFER_COUNT][LOG_HALF_BYTES];
+    volatile uint16_t used [LOG_BUFFER_COUNT];   // bytes filled in each slot
+    volatile bool     ready[LOG_BUFFER_COUNT];   // slot full, awaiting drain
+    uint8_t           head;   // slot the producer is filling
+    uint8_t           tail;   // next slot the consumer will drain
+    volatile uint16_t overrun_count;  // slots dropped because the ring was full (saturating)
 };
 
 } // namespace detail
@@ -155,28 +164,27 @@ public:
      *         by produceExtended. */
     void servicePowerMonitor(uint32_t now_ms) { power_monitor_.service(now_ms); }
 
-    /** @brief Flush any full half: stream its records to the GS (always, full-rate),
-     *         and — while PersistingData is set — log the SystemState to SD per the
-     *         FastRecording flag: the raw 2 kHz block to data_fast.bin, or the 125 Hz
-     *         block-averaged stream to data_slow.bin. The half is always released. */
+    /** @brief Flush every ready slot in fill order (from the tail): stream its records to the
+     *         GS (always, full-rate), and — while PersistingData is set — log the SystemState to
+     *         SD per the FastRecording flag: the raw 2 kHz block to data_fast.bin, or the 125 Hz
+     *         block-averaged stream to data_slow.bin. Each drained slot is released. */
     void drain(uint32_t now_ms)
     {
-        for (uint8_t h = 0; h < 2; ++h) {
-            if (!log_.ready[h]) {
-                continue;
-            }
-            const uint16_t bytes = log_.used[h];
+        while (log_.ready[log_.tail]) {
+            const uint8_t  t     = log_.tail;
+            const uint16_t bytes = log_.used[t];
 
             // SD logging is the shared recorder's policy (raw data_fast.bin vs averaged
             // data_slow.bin, per the flags); the downlink below is unconditional and
             // full-rate, so the GS always sees live data regardless of recording mode.
             recorder_.recordSystemState(
-                std::span<const uint8_t>(log_.data[h], detail::LOG_HALF_BYTES), bytes);
+                std::span<const uint8_t>(log_.data[t], detail::LOG_HALF_BYTES), bytes);
 
             downlink(BoardId::FillingStation,
                      static_cast<uint8_t>(logic::control::persistent_state.fill_state),
-                     std::span<const uint8_t>(log_.data[h], bytes), sizeof(FcuSystemState), now_ms);
-            log_.ready[h] = false;
+                     std::span<const uint8_t>(log_.data[t], bytes), sizeof(FcuSystemState), now_ms);
+            log_.ready[t] = false;
+            log_.tail = static_cast<uint8_t>((t + 1) % detail::LOG_BUFFER_COUNT);
         }
     }
 
@@ -254,14 +262,13 @@ public:
      *         instead of one tiny packet per record. */
     void drainRelayedEcu(uint32_t now_ms)
     {
-        for (uint8_t h = 0; h < 2; ++h) {
-            if (!ecu_log_.ready[h]) {
-                continue;
-            }
+        while (ecu_log_.ready[ecu_log_.tail]) {
+            const uint8_t t = ecu_log_.tail;
             downlink(BoardId::Engine, ecu_relay_state_,
-                     std::span<const uint8_t>(ecu_log_.data[h], ecu_log_.used[h]),
+                     std::span<const uint8_t>(ecu_log_.data[t], ecu_log_.used[t]),
                      sizeof(EcuSystemState), now_ms);
-            ecu_log_.ready[h] = false;
+            ecu_log_.ready[t] = false;
+            ecu_log_.tail = static_cast<uint8_t>((t + 1) % detail::LOG_BUFFER_COUNT);
         }
     }
 
@@ -320,50 +327,55 @@ private:
         return state;
     }
 
-    // Append one record to the active half. Single-producer: every record comes from
-    // produce() in the record-timer ISR. When a half fills it is marked ready for
-    // drain(); if the other half is still unflushed the record is dropped and overrun
-    // is flagged.
+    // Append one record to the head slot. Single-producer: every record comes from produce()
+    // in the record-timer ISR. When the head slot fills, hand it to the consumer (mark ready)
+    // and advance to the next slot — but ONLY if that next slot is free; if it is still
+    // unflushed (the ring is full) the record is dropped and overrun is flagged, and the head
+    // slot is NOT handed off yet (so the head never sits on a ready slot, keeping the tail
+    // drain in lockstep). The full head slot is handed off later, once the consumer frees the
+    // next slot.
     void logAppend(const FcuSystemState& record)
     {
-        uint8_t a = log_.active;
-        if (log_.used[a] + sizeof(FcuSystemState) > detail::LOG_HALF_BYTES) {
-            log_.ready[a] = true;        // finalize this half
-            a ^= 1;
-            if (log_.ready[a]) {         // consumer hasn't drained it yet
+        uint8_t h = log_.head;
+        if (log_.used[h] + sizeof(FcuSystemState) > detail::LOG_HALF_BYTES) {
+            const uint8_t next = static_cast<uint8_t>((h + 1) % detail::LOG_BUFFER_COUNT);
+            if (log_.ready[next]) {      // ring full: the next slot is the oldest, not drained yet
                 if (log_.overrun_count != UINT16_MAX) {
-                    log_.overrun_count = static_cast<uint16_t>(log_.overrun_count + 1);  // dropped half (saturating)
+                    log_.overrun_count = static_cast<uint16_t>(log_.overrun_count + 1);  // dropped record (saturating)
                 }
                 return;
             }
-            log_.active  = a;
-            log_.used[a] = 0;
+            log_.ready[h]   = true;      // hand the now-full slot to the consumer
+            log_.head       = next;
+            log_.used[next] = 0;
+            h = next;
         }
-        std::memcpy(&log_.data[a][log_.used[a]], &record, sizeof(FcuSystemState));
-        log_.used[a] = static_cast<uint16_t>(log_.used[a] + sizeof(FcuSystemState));
+        std::memcpy(&log_.data[h][log_.used[h]], &record, sizeof(FcuSystemState));
+        log_.used[h] = static_cast<uint16_t>(log_.used[h] + sizeof(FcuSystemState));
     }
 
-    // Append one reassembled ECU record to the relay double buffer's active half (single
-    // producer: relayEcuFrame on the main-loop CAN ingress). When a half fills it is marked
-    // ready for drainRelayedEcu(); if the other half is still unsent the record is dropped and
-    // overrun is flagged. Mirrors logAppend for the FCU's own records.
+    // Append one reassembled ECU record to the relay ring's head slot (single producer:
+    // relayEcuFrame on the main-loop CAN ingress). When a slot fills it is marked ready for
+    // drainRelayedEcu() and the head advances; if the next slot is still unsent (ring full) the
+    // record is dropped and overrun is flagged. Mirrors logAppend for the FCU's own records.
     void ecuLogAppend(const EcuSystemState& record)
     {
-        uint8_t a = ecu_log_.active;
-        if (ecu_log_.used[a] + sizeof(EcuSystemState) > detail::LOG_HALF_BYTES) {
-            ecu_log_.ready[a] = true;        // finalize this half
-            a ^= 1;
-            if (ecu_log_.ready[a]) {         // consumer hasn't drained it yet
+        uint8_t h = ecu_log_.head;
+        if (ecu_log_.used[h] + sizeof(EcuSystemState) > detail::LOG_HALF_BYTES) {
+            const uint8_t next = static_cast<uint8_t>((h + 1) % detail::LOG_BUFFER_COUNT);
+            if (ecu_log_.ready[next]) {      // ring full: the next slot is the oldest, not drained yet
                 if (ecu_log_.overrun_count != UINT16_MAX) {
-                    ecu_log_.overrun_count = static_cast<uint16_t>(ecu_log_.overrun_count + 1);  // dropped half (saturating)
+                    ecu_log_.overrun_count = static_cast<uint16_t>(ecu_log_.overrun_count + 1);  // dropped record (saturating)
                 }
                 return;
             }
-            ecu_log_.active  = a;
-            ecu_log_.used[a] = 0;
+            ecu_log_.ready[h]   = true;      // hand the now-full slot to the consumer
+            ecu_log_.head       = next;
+            ecu_log_.used[next] = 0;
+            h = next;
         }
-        std::memcpy(&ecu_log_.data[a][ecu_log_.used[a]], &record, sizeof(EcuSystemState));
-        ecu_log_.used[a] = static_cast<uint16_t>(ecu_log_.used[a] + sizeof(EcuSystemState));
+        std::memcpy(&ecu_log_.data[h][ecu_log_.used[h]], &record, sizeof(EcuSystemState));
+        ecu_log_.used[h] = static_cast<uint16_t>(ecu_log_.used[h] + sizeof(EcuSystemState));
     }
 
     // Zero a telemetry double buffer and reset its indices — used at init() for both the
@@ -371,11 +383,12 @@ private:
     static void clearLog(detail::LogBuffer& b)
     {
         std::memset(b.data, 0, sizeof(b.data));
-        b.used[0]  = 0;
-        b.used[1]  = 0;
-        b.ready[0] = false;
-        b.ready[1] = false;
-        b.active   = 0;
+        for (std::size_t i = 0; i < detail::LOG_BUFFER_COUNT; ++i) {
+            b.used[i]  = 0;
+            b.ready[i] = false;
+        }
+        b.head = 0;
+        b.tail = 0;
         b.overrun_count = 0;
     }
 
@@ -395,7 +408,7 @@ private:
     logic::communication::can::SystemStateReassembler   ecu_reassembler_;           // rebuilds ECU SystemState from CAN (batched relay)
     logic::communication::can::ExtendedStateReassembler ecu_extended_reassembler_;  // rebuilds ECU ExtendedSystemState from CAN (relayed straight to the GS)
 
-    // Relay double buffer: reassembled ECU records are appended to the active half, and a half
+    // Relay buffer ring: reassembled ECU records are appended to the head slot, and a slot
     // is streamed to the GS only once it FILLS (drainRelayedEcu) — the same batching as our own
     // telemetry (log_), so the ECU's 2 kHz stream rides a few full datagrams instead of one
     // tiny UDP packet per record. Filled + drained from the main-loop tick. Rides the
