@@ -24,6 +24,7 @@
 #include "control/state_timing.hpp"                            // logic::control::state_entered_ms
 #include "control/refused_transition.hpp"                      // logic::control::last_refused_transition
 #include "control/refused_control_flag.hpp"                     // logic::control::last_refused_control_flag
+#include "control/refused_valve.hpp"                            // logic::control::last_refused_valve
 #include "control/control_flags.hpp"                           // logic::control::base_control_flags / fcu_control_flags
 #include "actuation/interfaces/ematch.hpp"                     // logic::actuation::Ematch (the igniter seam)
 #include "actuation/interfaces/solenoid.hpp"                   // logic::actuation::Solenoid (the solenoid-valve seam)
@@ -208,18 +209,18 @@ private:
             || target == BoardId::Engine;
     }
 
-    // May a command of `type` run in `current`? Per-command, per-state gate. All commands
-    // are permitted in every state EXCEPT operator per-valve actuation (SetValvePosition),
-    // which is allowed only in Unsafe — the only state in which an operator may hand-drive an
-    // individual valve. (Transition-driven valve moves bypass this gate entirely: they run in
-    // onTransition via the valve methods directly, not through a command.)
+    // May a command of `type` run at all (is it a known command)? This is the dispatch gate;
+    // per-state validity is enforced inside each handler, which also RECORDS the refusal for
+    // telemetry (SetState in transitionTo, SetControlFlag in applyControlFlagLocally,
+    // SetValvePosition in handleSetValvePosition — the operator per-valve gate to Unsafe). Keeping
+    // those gates in the handlers, not here, is what lets each record a typed refusal.
     [[nodiscard]] static bool canExecute(CommandType type, State current)
     {
+        (void)current;
         switch (type) {
-            case CommandType::SetValvePosition:
-                return current == State::Unsafe;
             case CommandType::Ping:
             case CommandType::SetState:
+            case CommandType::SetValvePosition:
             case CommandType::SetControlFlag:
             case CommandType::Synchronise:
                 return true;
@@ -361,44 +362,58 @@ private:
         }
     }
 
-    /* ---- SetValvePosition (local actuation and/or bridge to the ECU) --------- */
+    /* ---- SetValvePosition (gated to Unsafe; single-board actuation OR bridge to the ECU) ------ */
 
-    // Drive a valve, routed by the command's target board (mirrors handleSetControlFlag):
-    //   FillingStation -> actuate our own Fill/Dump valve locally and Ack the GS directly.
-    //   Engine         -> bridge the command to the ECU over CAN as a reliable command; the
-    //                     ECU drives its IPA/NOS valve and Acks, and onResponse relays the Ack.
-    //   Broadcast      -> both: actuate locally (Ack as the FCU) AND bridge (the ECU Acks too).
+    // Drive ONE valve from an operator command. Two invariants, each REFUSED-and-RECORDED (not
+    // silently dropped) when violated, since the command IS addressed to us:
+    //   1. State gate: per-valve actuation is permitted only in Unsafe (the one state an operator
+    //      may hand-drive a valve). Outside Unsafe -> refuse + record, neither actuate nor bridge.
+    //   2. Single-board: unlike SetState / SetControlFlag, a valve command is NEVER fanned out to
+    //      both boards. Routed by target:
+    //        FillingStation -> actuate our own Fill/Dump valve locally and Ack the GS directly.
+    //        Engine         -> bridge to the ECU over CAN as a reliable command; the ECU drives
+    //                          its IPA/NOS valve and Acks, and onResponse relays the Ack.
+    //        Broadcast      -> refuse + record: it would drive Fill on the FCU and IPA/NOS on the
+    //                          ECU at once, never wanted for a hand-driven valve.
     // The 3-byte SetValvePositionFrame rides verbatim in the payload, so the bridged CAN frame
     // carries the same bytes the GS sent (the valve byte is read as EcuValves on the ECU).
     bool handleSetValvePosition(const Command& cmd, uint32_t now_ms)
     {
-        const auto target = static_cast<BoardId>(cmd.target);
-        bool ok = true;
+        const auto* frame = reinterpret_cast<const SetValvePositionFrame*>(cmd.payload.data());
 
-        if (target == BoardId::FillingStation || target == BoardId::Broadcast) {
-            ok = actuateLocalValve(cmd, now_ms) && ok;
+        if (logic::control::persistent_state.fill_state != State::Unsafe) {
+            recordRefusedValve(*frame);   // operator per-valve actuation is Unsafe-only
+            return false;
         }
-        if (target == BoardId::Engine || target == BoardId::Broadcast) {
-            sendReliable(CommandType::SetValvePosition, /*sender_state=*/0,
-                         std::span<const uint8_t>(cmd.payload.data(), sizeof(SetValvePositionFrame)),
-                         cmd.seq, now_ms);
+        switch (static_cast<BoardId>(cmd.target)) {
+            case BoardId::FillingStation:
+                return actuateLocalValve(cmd, now_ms);
+            case BoardId::Engine:
+                sendReliable(CommandType::SetValvePosition, /*sender_state=*/0,
+                             std::span<const uint8_t>(cmd.payload.data(), sizeof(SetValvePositionFrame)),
+                             cmd.seq, now_ms);
+                return true;
+            default:
+                recordRefusedValve(*frame);   // Broadcast / other: valve commands are single-board only
+                return false;
         }
-        return ok;
     }
 
     // Actuate the FCU's own Fill/Dump valve from a SetValvePosition frame, then Ack the GS on
-    // success. An invalid action or unknown valve is refused and NOT Acked.
+    // success. An invalid action or unknown valve is refused, RECORDED, and NOT Acked.
     bool actuateLocalValve(const Command& cmd, uint32_t now_ms)
     {
         const auto* frame = reinterpret_cast<const SetValvePositionFrame*>(cmd.payload.data());
         if (!isValidAction(frame->action)) {
+            recordRefusedValve(*frame);
             return false;
         }
         V* valve = (frame->valve == FcuValves::Fill) ? &fill_valve_
                  : (frame->valve == FcuValves::Dump) ? &dump_valve_
                  : nullptr;
         if (valve == nullptr) {
-            return false;  // unknown valve id
+            recordRefusedValve(*frame);   // unknown valve id
+            return false;
         }
         switch (frame->action) {
             case ValveCommand::Open:         (void)valve->open();  break;
@@ -414,6 +429,16 @@ private:
         return action == ValveCommand::Open ||
                action == ValveCommand::Close ||
                action == ValveCommand::SetOpenedPct;
+    }
+
+    // Record a refused SetValvePosition (the valve id + action + value + the state we were in) for
+    // the ground station, surfaced in the ExtendedSystemState. Mirrors recordRefusedFlag.
+    static void recordRefusedValve(const SetValvePositionFrame& frame)
+    {
+        logic::control::last_refused_valve = {
+            static_cast<uint8_t>(frame.valve), static_cast<uint8_t>(frame.action), frame.value,
+            logic::control::persistent_state.fill_state};
+        ++logic::control::refused_valve_count;
     }
 
     /* ---- SetControlFlag (local apply and/or bridge to the ECU) --------------- */

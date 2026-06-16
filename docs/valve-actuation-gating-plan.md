@@ -211,12 +211,17 @@ No protocol/submodule or wire-format changes — this is pure control-logic beha
 - (Option A) **Sync test:** an FCU transition to Safe/Abort drives the ECU to the same state and
   closes its valves.
 
-## Follow-ups (deferred, after this plan)
+## Follow-ups
 
-- **Remove Broadcast `SetValvePosition` entirely.** Operator per-valve actuation should never be
-  addressable to `Broadcast` (open Fill on the FCU and IPA/NOS on the ECU with one command). Drop
-  the Broadcast/Engine routing for `SetValvePosition` so a valve command is single-board only, and
-  retire `BroadcastValveCommandActuatesLocallyAndBridges`. Not done here — tracked for the next plan.
+- **Remove Broadcast `SetValvePosition` — DONE.** Operator per-valve actuation is now single-board
+  only: a `Broadcast`-targeted valve command is **rejected and recorded** on both boards (the FCU's
+  `handleSetValvePosition` routes only `FillingStation` → local and `Engine` → bridge; the ECU's
+  `handleValveCmd` rejects any non-`Engine` target). `BroadcastValveCommandActuatesLocallyAndBridges`
+  was retired and replaced with `BroadcastValveCommandIsRejected`. While doing this, all invalid
+  `SetValvePosition` cases (outside-Unsafe, Broadcast, unknown valve, invalid action) were made into
+  recorded refusals: a new `set_valve_*` slot in `RefusedCommandInfo` (fed by
+  `logic::control::last_refused_valve` / `refused_valve_count`) surfaces them in the
+  ExtendedSystemState — so open question #3 below is now resolved (refusals ARE surfaced).
 
 ## Resolved decisions (this plan)
 

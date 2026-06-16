@@ -6,6 +6,7 @@
 #include "control/control_flags.hpp"           // base_control_flags
 #include "control/refused_transition.hpp"      // last_refused_transition + count
 #include "control/refused_control_flag.hpp"    // last_refused_control_flag + count
+#include "control/refused_valve.hpp"           // last_refused_valve + count
 
 /* ------------------------------------------------------------------------- *
  * Fill the shared ExtendedSystemStateBase from the process-wide control state, so
@@ -31,6 +32,11 @@ inline void fillExtendedBase(ExtendedSystemStateBase& base, uint32_t now_ms,
     rc.set_flag_state = static_cast<uint8_t>(logic::control::last_refused_control_flag.state);
     rc.set_state_refused_count = logic::control::refused_transition_count;
     rc.set_flag_refused_count  = logic::control::refused_control_flag_count;
+    rc.set_valve_id            = logic::control::last_refused_valve.valve;
+    rc.set_valve_action        = logic::control::last_refused_valve.action;
+    rc.set_valve_value         = logic::control::last_refused_valve.value;
+    rc.set_valve_state         = static_cast<uint8_t>(logic::control::last_refused_valve.state);
+    rc.set_valve_refused_count = logic::control::refused_valve_count;
 }
 
 } // namespace logic::telemetry

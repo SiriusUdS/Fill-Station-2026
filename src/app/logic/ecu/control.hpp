@@ -22,6 +22,7 @@
 #include "control/state_timing.hpp"                           // logic::control::state_entered_ms
 #include "control/refused_transition.hpp"                     // logic::control::last_refused_transition (+ count)
 #include "control/refused_control_flag.hpp"                   // logic::control::last_refused_control_flag (+ count)
+#include "control/refused_valve.hpp"                          // logic::control::last_refused_valve (+ count)
 #include "system/state.hpp"                                   // logic::control::State
 #include "system/valves/ecu.hpp"                              // EcuValves
 #include "system/board_id.hpp"
@@ -125,31 +126,46 @@ private:
     // retrying (Gs->Fcu->Ecu, Ack: Ecu->Fcu->Gs).
     void handleValveCmd(const logic::communication::CanFrame& frame, const CanHeader& header)
     {
-        // Operator per-valve actuation is permitted only in Unsafe — defense in depth behind the
-        // FCU's own canExecute gate, since the ECU's state mirrors the FCU's. Outside Unsafe, do
-        // not actuate or Ack. Transition-driven valve moves (Safe/Abort/Launch) bypass this: they
-        // run in onTransition, not here.
-        if (logic::control::persistent_state.fill_state != logic::control::State::Unsafe) {
-            return;
-        }
         if (frame.length < sizeof(SetValvePositionFrame)) {
-            return;  // frame too short to carry the valve frame
+            return;  // malformed: too short to carry the valve frame — silently dropped, not a refusal
         }
         SetValvePositionFrame payload;
         std::memcpy(&payload, frame.data.data(), sizeof(payload));
 
+        // Each invariant below REFUSES-and-RECORDS (the command is addressed to us; it is invalid,
+        // not malformed), so the ground station sees the denial in the ExtendedSystemState.
+
+        // Single-board only: a Broadcast-targeted valve command is refused (the FCU never bridges
+        // one, but reject it here too so the ECU never hand-drives a valve off a broadcast).
+        if (static_cast<BoardId>(header.frame.target_id) != BoardId::Engine) {
+            recordRefusedValve(payload);
+            return;
+        }
+        // Operator per-valve actuation is permitted only in Unsafe — defense in depth behind the
+        // FCU's own gate, since the ECU's state mirrors the FCU's. Transition-driven valve moves
+        // (Safe/Abort/Launch) bypass this: they run in onTransition, not here.
+        if (logic::control::persistent_state.fill_state != logic::control::State::Unsafe) {
+            recordRefusedValve(payload);
+            return;
+        }
+
+        if (!isValidAction(payload.action)) {
+            recordRefusedValve(payload);   // unknown action — refused, not Acked
+            return;
+        }
         const auto valve_id = static_cast<EcuValves>(static_cast<uint8_t>(payload.valve));
         V* valve = (valve_id == EcuValves::IPA) ? &ipa_valve_
                  : (valve_id == EcuValves::NOS) ? &nos_valve_
                  : nullptr;
         if (valve == nullptr) {
-            return;  // unknown valve id — do not Ack a command we did not apply
+            recordRefusedValve(payload);   // unknown valve id — refused, not Acked
+            return;
         }
 
         switch (payload.action) {
             case ValveCommand::Open:         (void)valve->open();  break;
             case ValveCommand::Close:        (void)valve->close(); break;
-            case ValveCommand::SetOpenedPct: break;  // not used for the ECU's on/off propellant valves
+            case ValveCommand::SetOpenedPct: (void)valve->setOpenPercent(static_cast<float>(payload.value)); break;
         }
 
         // Generic acknowledgement: the command was received AND applied. Echoes the seq.
@@ -194,6 +210,23 @@ private:
         logic::control::last_refused_control_flag = {
             frame.flag, frame.value, logic::control::persistent_state.fill_state};
         ++logic::control::refused_control_flag_count;
+    }
+
+    [[nodiscard]] static bool isValidAction(ValveCommand action)
+    {
+        return action == ValveCommand::Open ||
+               action == ValveCommand::Close ||
+               action == ValveCommand::SetOpenedPct;
+    }
+
+    // Record a refused SetValvePosition (the valve id + action + value + the state we were in) for
+    // the ground station, surfaced in the ExtendedSystemState. Mirrors the FCU's recordRefusedValve.
+    static void recordRefusedValve(const SetValvePositionFrame& frame)
+    {
+        logic::control::last_refused_valve = {
+            static_cast<uint8_t>(frame.valve), static_cast<uint8_t>(frame.action), frame.value,
+            logic::control::persistent_state.fill_state};
+        ++logic::control::refused_valve_count;
     }
 
     // Apply a SetState command bridged from the GS (relayed by the FCU over CAN): the 2-byte

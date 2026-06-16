@@ -25,6 +25,7 @@
 #include "control/control_flags.hpp"        // logic::control::base_control_flags
 #include "control/refused_transition.hpp"   // last_refused_transition (+ count)
 #include "control/refused_control_flag.hpp" // last_refused_control_flag (+ count)
+#include "control/refused_valve.hpp"        // last_refused_valve (+ count)
 #include "system/valves/ecu.hpp"            // EcuValves
 #include "system/board_id.hpp"
 #include "telemetry/telemetry_type.hpp"
@@ -64,13 +65,13 @@ CanFrame makeCommand(command::CommandType type, uint8_t senderState,
 /* A SetValvePosition command FCU -> Engine: the 3-byte SetValvePositionFrame rides
    verbatim in the payload (data[0] = valve index, data[1] = action, data[2] = value). */
 CanFrame makeValveCmd(EcuValves valve, ValveCommand action, BoardId target = BoardId::Engine,
-                      uint8_t seq = 0)
+                      uint8_t seq = 0, uint8_t value = 0)
 {
     CanFrame frame = makeCommand(command::CommandType::SetValvePosition, /*senderState=*/0,
                                  target, seq);
     frame.data[0] = static_cast<uint8_t>(valve);
     frame.data[1] = static_cast<uint8_t>(action);
-    frame.data[2] = 0;   // value, unused for Open/Close
+    frame.data[2] = value;   // opened-%, used by SetOpenedPct (ignored for Open/Close)
     frame.length  = sizeof(SetValvePositionFrame);
     return frame;
 }
@@ -133,6 +134,9 @@ protected:
         logic::control::last_refused_control_flag =
             {logic::control::REFUSED_CONTROL_FLAG_NONE, 0, State::Init};
         logic::control::refused_control_flag_count = 0;
+        logic::control::last_refused_valve =
+            {logic::control::REFUSED_VALVE_NONE, 0, 0, State::Init};
+        logic::control::refused_valve_count = 0;
         logic::control::state_entered_ms = 0;   // reset the dwell clock between tests
         controller_.init();
         // init() advanced Init -> Safe, which closes both valves; discard those calls so each
@@ -189,6 +193,18 @@ TEST_F(EcuControllerTest, NosValveCloses)
     EXPECT_EQ(ipa_valve_.close_calls, 0);
 }
 
+/* The ECU now honours SetOpenedPct on its propellant valves (it previously ignored it): the
+   command drives the valve to the requested percentage. */
+TEST_F(EcuControllerTest, ValveSetOpenedPctDrivesThePercentage)
+{
+    armUnsafe();
+    deliver(makeValveCmd(EcuValves::IPA, ValveCommand::SetOpenedPct, BoardId::Engine,
+                         /*seq=*/0, /*value=*/42));
+    EXPECT_EQ(ipa_valve_.percent_calls, 1);
+    EXPECT_FLOAT_EQ(ipa_valve_.last_percent, 42.0F);
+    EXPECT_EQ(nos_valve_.percent_calls, 0);   // the other valve is untouched
+}
+
 TEST_F(EcuControllerTest, CommandForAnotherBoardIsIgnored)
 {
     armUnsafe();
@@ -196,14 +212,29 @@ TEST_F(EcuControllerTest, CommandForAnotherBoardIsIgnored)
     EXPECT_EQ(ipa_valve_.open_calls, 0);
 }
 
-/* Defense in depth: a bridged valve command is ignored unless the ECU is in Unsafe — it
-   neither actuates nor Acks. (Its state mirrors the FCU's, which already gates the command.) */
-TEST_F(EcuControllerTest, ValveCommandIsIgnoredOutsideUnsafe)
+/* Per-valve actuation is single-board only: a Broadcast-targeted valve command is REFUSED (and
+   recorded) even in Unsafe — the ECU only hand-drives a valve for an Engine-addressed command.
+   (The FCU never bridges a Broadcast valve command; this is the ECU-side defense in depth.) */
+TEST_F(EcuControllerTest, BroadcastValveCommandIsRejected)
+{
+    armUnsafe();
+    deliver(makeValveCmd(EcuValves::IPA, ValveCommand::Open, BoardId::Broadcast));
+    EXPECT_EQ(ipa_valve_.open_calls, 0);   // not actuated off a broadcast
+    EXPECT_TRUE(bus().can_tx.empty());     // and not Acked
+    EXPECT_EQ(logic::control::refused_valve_count, 1u);   // refused-and-recorded, not silently dropped
+    EXPECT_EQ(logic::control::last_refused_valve.valve, static_cast<uint8_t>(EcuValves::IPA));
+}
+
+/* Defense in depth: a bridged valve command is REFUSED (and recorded) unless the ECU is in
+   Unsafe — it neither actuates nor Acks. (Its state mirrors the FCU's, which already gates it.) */
+TEST_F(EcuControllerTest, ValveCommandIsRejectedOutsideUnsafe)
 {
     ASSERT_EQ(current(), State::Safe);   // init() left us in Safe, not Unsafe
     deliver(makeValveCmd(EcuValves::IPA, ValveCommand::Open, BoardId::Engine, /*seq=*/5));
     EXPECT_EQ(ipa_valve_.open_calls, 0);   // not actuated outside Unsafe
     EXPECT_TRUE(bus().can_tx.empty());     // and not Acked
+    EXPECT_EQ(logic::control::refused_valve_count, 1u);   // refused-and-recorded
+    EXPECT_EQ(logic::control::last_refused_valve.state, State::Safe);
 }
 
 TEST_F(EcuControllerTest, ValveCommandIsAckedToTheFcu)
@@ -511,6 +542,7 @@ TEST_F(EcuControllerTest, RefusedCommandsRideTheExtendedRecord)
     step();  // Init -> Safe
     deliver(makeSetState(State::Ignite));                       // Safe -> Ignite: refused
     deliver(makeSetControlFlag(/*per-board id=*/CONTROL_FLAG_BOARD_OFFSET, /*value=*/1));  // ECU has none: refused
+    deliver(makeValveCmd(EcuValves::NOS, ValveCommand::Close)); // valve command in Safe (not Unsafe): refused
     bus().can_tx.clear();
 
     EcuExtendedSystemState ext{};
@@ -538,6 +570,10 @@ TEST_F(EcuControllerTest, RefusedCommandsRideTheExtendedRecord)
     EXPECT_EQ(rc.set_flag_value, 1u);
     EXPECT_EQ(rc.set_flag_state, static_cast<uint8_t>(State::Safe));
     EXPECT_EQ(rc.set_flag_refused_count, 1u);
+    EXPECT_EQ(rc.set_valve_id,    static_cast<uint8_t>(EcuValves::NOS));
+    EXPECT_EQ(rc.set_valve_action, static_cast<uint8_t>(ValveCommand::Close));
+    EXPECT_EQ(rc.set_valve_state, static_cast<uint8_t>(State::Safe));
+    EXPECT_EQ(rc.set_valve_refused_count, 1u);
 }
 
 } // namespace

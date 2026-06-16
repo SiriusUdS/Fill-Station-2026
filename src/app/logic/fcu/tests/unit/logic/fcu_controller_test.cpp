@@ -18,6 +18,8 @@
 #include "control/persistent_state.hpp"
 #include "control/state_timing.hpp"     // logic::control::state_entered_ms
 #include "control/state_machine.hpp"    // logic::control::LAUNCH_TO_SAFE_LOCKOUT_MS
+#include "control/refused_valve.hpp"    // logic::control::last_refused_valve (+ count)
+#include "command/set_valve_position.hpp"   // SetValvePositionFrame, ValveCommand
 #include "system/state.hpp"
 #include "framing/can_header.hpp"
 #include "framing/payload_type.hpp"
@@ -93,6 +95,26 @@ std::vector<uint8_t> makeControlFlagRequest(BoardId device, uint16_t flag, uint8
     return payload;
 }
 
+/* Build a CommandType::SetValvePosition datagram addressed to `device`: a 12-byte
+   EthernetHeader followed by the 3-byte SetValvePositionFrame. */
+std::vector<uint8_t> makeValveRequest(BoardId device, FcuValves valve, ValveCommand action,
+                                      uint8_t value)
+{
+    EthernetHeader header = {};
+    header.target_id    = static_cast<uint8_t>(device);
+    header.payload_type = static_cast<uint8_t>(PayloadType::Command);
+    header.payload_id   = static_cast<uint8_t>(CommandType::SetValvePosition);
+    header.payload_size_bytes = static_cast<uint16_t>(sizeof(SetValvePositionFrame));
+
+    const SetValvePositionFrame body{valve, action, value};
+
+    std::vector<uint8_t> payload(sizeof(EthernetHeader) + sizeof(SetValvePositionFrame));
+    std::memcpy(payload.data(), &header, sizeof(EthernetHeader));
+    std::memcpy(payload.data() + sizeof(EthernetHeader), &body, sizeof(SetValvePositionFrame));
+    appendGsCrc(payload);
+    return payload;
+}
+
 /* Build a CAN frame with the given header fields and payload. */
 CanFrame makeCanFrame(BoardId sender, BoardId target, uint8_t messageId,
                       std::array<uint8_t, 8> data = {})
@@ -144,6 +166,9 @@ protected:
         logic::control::last_refused_control_flag =
             {logic::control::REFUSED_CONTROL_FLAG_NONE, 0, logic::control::State::Init};
         logic::control::refused_control_flag_count = 0;
+        logic::control::last_refused_valve =
+            {logic::control::REFUSED_VALVE_NONE, 0, 0, logic::control::State::Init};
+        logic::control::refused_valve_count = 0;
         logic::control::state_entered_ms = 0;   // reset the dwell clock between tests
         controller_.init();
     }
@@ -182,6 +207,14 @@ protected:
     void requestControlFlag(uint16_t flag, uint8_t value, BoardId device = BoardId::FillingStation)
     {
         bus().push_udp(Endpoint{}, makeControlFlagRequest(device, flag, value));
+        step();
+    }
+
+    /* Send a CommandType::SetValvePosition command (addressed to us) and tick once. */
+    void requestValve(FcuValves valve, ValveCommand action, uint8_t value = 0,
+                      BoardId device = BoardId::FillingStation)
+    {
+        bus().push_udp(Endpoint{}, makeValveRequest(device, valve, action, value));
         step();
     }
 };
@@ -937,6 +970,36 @@ TEST_F(FcuControllerTest, RefusedControlFlagAppearsInExtendedSystemState)
         EXPECT_EQ(ext.base.refused_command_info.set_flag_state,
                   static_cast<uint8_t>(logic::control::State::Safe));
         EXPECT_EQ(ext.base.refused_command_info.set_flag_refused_count, 1u);   // one refusal so far
+        found = true;
+    }
+    EXPECT_TRUE(found) << "no ExtendedSystemState was downlinked";
+}
+
+/* A refused SetValvePosition (a per-valve command outside Unsafe) rides the extended record too,
+   alongside the refused SetState / SetControlFlag — so the GS sees which valve command was denied. */
+TEST_F(FcuControllerTest, RefusedValveCommandAppearsInExtendedSystemState)
+{
+    reachSafe();   // Safe, not Unsafe -> a valve command is refused
+    requestValve(FcuValves::Dump, ValveCommand::Open, /*value=*/0);
+    ASSERT_EQ(logic::control::refused_valve_count, 1u);   // refused-and-recorded
+    bus().udp_tx.clear();
+    controller_.tick(now_ms_ += 150);
+
+    bool found = false;
+    for (const auto& d : bus().udp_tx) {
+        EthernetHeader h;
+        std::memcpy(&h, d.payload.data(), sizeof(h));
+        if (static_cast<TelemetryType>(h.payload_id) != TelemetryType::ExtendedSystemState) {
+            continue;
+        }
+        FcuExtendedSystemState ext;
+        std::memcpy(&ext, d.payload.data() + sizeof(EthernetHeader), sizeof(ext));
+        EXPECT_EQ(ext.base.refused_command_info.set_valve_id, static_cast<uint8_t>(FcuValves::Dump));
+        EXPECT_EQ(ext.base.refused_command_info.set_valve_action,
+                  static_cast<uint8_t>(ValveCommand::Open));
+        EXPECT_EQ(ext.base.refused_command_info.set_valve_state,
+                  static_cast<uint8_t>(logic::control::State::Safe));
+        EXPECT_EQ(ext.base.refused_command_info.set_valve_refused_count, 1u);
         found = true;
     }
     EXPECT_TRUE(found) << "no ExtendedSystemState was downlinked";

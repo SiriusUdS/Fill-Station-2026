@@ -26,6 +26,7 @@
 #include "system/valves/fcu.hpp"                              // FcuValves
 #include "control/persistent_state.hpp"
 #include "control/state_timing.hpp"                           // logic::control::state_entered_ms
+#include "control/refused_valve.hpp"                          // logic::control::last_refused_valve (+ count)
 #include "control/control_flags.hpp"                          // logic::control::base_control_flags / fcu_control_flags
 #include "system/state.hpp"
 #include "framing/can_header.hpp"
@@ -125,6 +126,9 @@ protected:
         logic::control::last_refused_control_flag =
             {logic::control::REFUSED_CONTROL_FLAG_NONE, 0, State::Init};
         logic::control::refused_control_flag_count = 0;
+        logic::control::last_refused_valve =
+            {logic::control::REFUSED_VALVE_NONE, 0, 0, State::Init};
+        logic::control::refused_valve_count = 0;
         logic::control::state_entered_ms = 0;   // reset the dwell clock between tests
         comm_.init();
         control_.init();
@@ -396,6 +400,7 @@ TEST_F(ControlTest, UnknownValveActionIsRejected)
    they run in onTransition, tested separately.) */
 TEST_F(ControlTest, ValveCommandIsRejectedOutsideUnsafe)
 {
+    uint16_t expected_refusals = 0;
     for (const State s : {State::Safe, State::Ignite, State::Launch, State::Abort, State::Error}) {
         setCurrent(s);
         clearValveCalls();
@@ -410,6 +415,12 @@ TEST_F(ControlTest, ValveCommandIsRejectedOutsideUnsafe)
                              BoardId::FillingStation, /*seq=*/4));
         EXPECT_EQ(fill_valve_.open_calls, 0) << "actuated in state " << static_cast<int>(s);
         EXPECT_TRUE(bus().udp_tx.empty())    << "Acked in state "    << static_cast<int>(s);
+
+        expected_refusals += 2;   // both targets refused-and-recorded in this state
+        EXPECT_EQ(logic::control::refused_valve_count, expected_refusals);
+        EXPECT_EQ(logic::control::last_refused_valve.valve, static_cast<uint8_t>(FcuValves::Fill));
+        EXPECT_EQ(logic::control::last_refused_valve.action, static_cast<uint8_t>(ValveCommand::Open));
+        EXPECT_EQ(logic::control::last_refused_valve.state, s);   // the state it was refused in
     }
 }
 
@@ -436,15 +447,24 @@ TEST_F(ControlTest, EngineValveCommandBridgesOverCanWithoutLocalActuation)
     EXPECT_EQ(sent.data[1], static_cast<uint8_t>(ValveCommand::Open));
 }
 
-TEST_F(ControlTest, BroadcastValveCommandActuatesLocallyAndBridges)
+/* Per-valve actuation is single-board only: a Broadcast-targeted valve command is REFUSED even
+   in Unsafe — it neither actuates the local valve nor bridges to the ECU, and is not Acked.
+   (SetState / SetControlFlag still fan out to Broadcast; only SetValvePosition is single-board.) */
+TEST_F(ControlTest, BroadcastValveCommandIsRejected)
 {
     setCurrent(State::Unsafe);
-    deliver(makeSetValve(FcuValves::Fill, ValveCommand::Open, /*value=*/0,
+    deliver(makeSetValve(FcuValves::Dump, ValveCommand::Close, /*value=*/0,
                          BoardId::Broadcast, /*seq=*/2));
 
-    EXPECT_EQ(fill_valve_.open_calls, 1);   // actuated locally
-    EXPECT_EQ(bus().can_tx.size(), 1u);     // and bridged to the ECU
-    expectAckToGs(/*seq=*/2);               // local Ack on the commander line (the ECU Acks too)
+    EXPECT_EQ(fill_valve_.open_calls, 0);   // not actuated locally
+    EXPECT_EQ(dump_valve_.close_calls, 0);
+    EXPECT_TRUE(bus().can_tx.empty());      // not bridged to the ECU
+    EXPECT_TRUE(bus().udp_tx.empty());      // refused -> not Acked
+
+    EXPECT_EQ(logic::control::refused_valve_count, 1u);   // refused-and-recorded, not silently dropped
+    EXPECT_EQ(logic::control::last_refused_valve.valve, static_cast<uint8_t>(FcuValves::Dump));
+    EXPECT_EQ(logic::control::last_refused_valve.action, static_cast<uint8_t>(ValveCommand::Close));
+    EXPECT_EQ(logic::control::last_refused_valve.state, State::Unsafe);
 }
 
 TEST_F(ControlTest, AckFromEcuClearsThePendingBridgedValveCommand)
