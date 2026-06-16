@@ -71,7 +71,7 @@ struct LogBuffer {
     volatile uint16_t used[2];   // bytes filled in each half
     volatile bool     ready[2];  // half full, awaiting drain
     uint8_t           active;    // half the producer is filling (0/1)
-    volatile bool     overrun;   // a half filled before the other was drained
+    volatile uint16_t overrun_count;  // halves dropped because the other was still unflushed (saturating)
 };
 
 } // namespace detail
@@ -303,10 +303,11 @@ private:
         state.base.can_info = comm_.canInfo();
         state.eth_info      = comm_.ethInfo();
 
-        // The double-buffer overrun (a half filled before it could be flushed, so
-        // records were dropped) is a logging-pipeline fault, not the card's own —
-        // surface it on the SD card's status record (it owns its interface flags now).
-        state.base.storage_info.status.write_overrun = log_.overrun ? 1 : 0;
+        // The double-buffer overrun count (halves that filled before they could be flushed,
+        // so records were dropped) is a logging-pipeline fault, not the card's own — surface
+        // it on the SD card's record (it owns its interface health now). A running count, not
+        // a sticky flag, so a one-off boot stall reads differently from a sustained shortfall.
+        state.base.storage_info.overrun_count = log_.overrun_count;
 
         // The FCU's own valves report their own info, indexed by the FcuValves SSOT.
         state.base.valve_info[static_cast<std::size_t>(FcuValves::Fill)] = fill_valve_.info();
@@ -328,7 +329,9 @@ private:
             log_.ready[a] = true;        // finalize this half
             a ^= 1;
             if (log_.ready[a]) {         // consumer hasn't drained it yet
-                log_.overrun = true;
+                if (log_.overrun_count != UINT16_MAX) {
+                    log_.overrun_count = static_cast<uint16_t>(log_.overrun_count + 1);  // dropped half (saturating)
+                }
                 return;
             }
             log_.active  = a;
@@ -349,7 +352,9 @@ private:
             ecu_log_.ready[a] = true;        // finalize this half
             a ^= 1;
             if (ecu_log_.ready[a]) {         // consumer hasn't drained it yet
-                ecu_log_.overrun = true;
+                if (ecu_log_.overrun_count != UINT16_MAX) {
+                    ecu_log_.overrun_count = static_cast<uint16_t>(ecu_log_.overrun_count + 1);  // dropped half (saturating)
+                }
                 return;
             }
             ecu_log_.active  = a;
@@ -369,7 +374,7 @@ private:
         b.ready[0] = false;
         b.ready[1] = false;
         b.active   = 0;
-        b.overrun  = false;
+        b.overrun_count = 0;
     }
 
     logic::telemetry::SdRecorder<S, FcuSystemState> recorder_;  // the 3-file SD recording policy

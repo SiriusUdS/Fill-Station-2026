@@ -13,8 +13,12 @@
  * FatFs-backed SD card log file. One instance per LOG FILE (not per card): bind a
  * HAL SD handle, a logical drive and a file name, then init() ensures the volume is
  * mounted and opens that file, kept open for the driver's lifetime. write() appends
- * a record and syncs (flushes) it, so each save is power-loss safe without the cost
- * of reopening the file. The FatFs/HAL detail stays in the .cpp; the store owns its
+ * a record and flushes (f_sync) it in BATCHES — every SYNC_PERIOD_WRITES writes rather
+ * than every block — because the FAT/directory flush is the costly part of a save and
+ * syncing every block stalls the producer enough to overrun the telemetry double buffer.
+ * The first write is always synced so the file's directory entry is committed immediately.
+ * The trade is that up to one sync period's records can be lost on a power cut. The
+ * FatFs/HAL detail stays in the .cpp; the store owns its
  * StorageInfo (state + status), exposed through info(), and reports the failure
  * cause through Error.
  *
@@ -64,11 +68,12 @@ public:
     void init();
 
     /**
-     * @brief  Append @p data to the open file and sync it to the card. No-op
-     *         unless the store is ready (init() succeeded) — a store that never
-     *         mounted stays inert. Whether records *should* be persisted at all
-     *         (the PersistingData control flag) is decided upstream in the
-     *         telemetry pipeline; this just saves whatever it is handed.
+     * @brief  Append @p data to the open file, syncing to the card in batches (every
+     *         SYNC_PERIOD_WRITES writes, plus the first write). No-op unless the store
+     *         is ready (init() succeeded) — a store that never mounted stays inert.
+     *         Whether records *should* be persisted at all (the PersistingData control
+     *         flag) is decided upstream in the telemetry pipeline; this just saves
+     *         whatever it is handed.
      */
     void write(std::span<const uint8_t> data);
 
@@ -85,6 +90,8 @@ private:
     const char*       filename_{};  // log file name on the volume, e.g. "data_fast.bin"
     FIL               file_{};      // log file, opened by init() and kept open
     StorageInfo       info_{};      // state + status (incl. last error cause); see info()
+    unsigned          writes_since_sync_ = 0;     // writes accrued since the last f_sync (batched flush)
+    bool              first_sync_done_   = false; // the first write force-syncs to commit the dir entry
 };
 
 // The driver is the logic seam: enforce conformance here so a contract drift is

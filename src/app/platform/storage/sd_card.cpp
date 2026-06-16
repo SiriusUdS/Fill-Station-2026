@@ -4,8 +4,9 @@
  * @brief   FatFs-backed SD log file. At the first init() it mounts the volume and
  *          creates a fresh per-boot session folder (the highest existing numeric
  *          folder + 1); both shared across every file on the card. Each instance
- *          then opens one log file inside that folder and appends + syncs each
- *          record so writes stay cheap and power-loss safe. The store owns its
+ *          then opens one log file inside that folder and appends each record,
+ *          flushing (f_sync) in batches so the costly FAT/directory write does not
+ *          stall the producer into a telemetry overrun. The store owns its
  *          StorageInfo (state + status, carrying the last error cause), exposed
  *          through info(). C++ port of the original sd_card.c.
  ******************************************************************************
@@ -27,6 +28,13 @@ namespace {
 FATFS s_volume_fs;
 bool  s_session_ready      = false;
 char  s_session_dir[24]    = {};   // this boot's folder, e.g. "0:/7/"
+
+/* f_sync (the FAT + directory-entry flush) is the costly, latency-spiky part of a save;
+   doing it every block stalls the producer enough to overrun the telemetry double buffer.
+   Batch it: sync once every this many writes. The trade is that up to this many writes'
+   worth of records can be lost on a power cut — small relative to a full run, and the
+   telemetry stream is also downlinked live regardless. */
+constexpr unsigned SYNC_PERIOD_WRITES = 16;
 
 /* Highest existing numeric folder name in the volume root, + 1 (0 if none). Folder
    names are short numerics, so the 8.3 fname carries them regardless of LFN. */
@@ -119,8 +127,19 @@ void SdCard::write(std::span<const uint8_t> data)
         return;
     }
 
-    // Flush data + directory entry so the appended record survives a power loss.
-    f_sync(&file_);
+    // Flush the FAT + directory entry in batches, not every block: f_sync is the costly,
+    // latency-spiky part of a save, and syncing every write stalls the producer enough to
+    // overrun the telemetry double buffer. The first write always syncs so the file's
+    // directory entry is committed immediately (the file appears on the card right away,
+    // not only once a full period of records has accrued).
+    if (++writes_since_sync_ >= SYNC_PERIOD_WRITES || !first_sync_done_) {
+        if (f_sync(&file_) != FR_OK) {
+            fail(StorageError::FileWriteFail);
+            return;
+        }
+        writes_since_sync_ = 0;
+        first_sync_done_   = true;
+    }
 }
 
 void SdCard::fail(StorageError code)

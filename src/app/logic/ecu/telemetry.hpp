@@ -66,7 +66,7 @@ struct LogBuffer {
     volatile uint16_t used[2];   // bytes filled in each half
     volatile bool     ready[2];  // half full, awaiting drain
     uint8_t           active;    // half the producer is filling (0/1)
-    volatile bool     overrun;   // a half filled before the other was drained
+    volatile uint16_t overrun_count;  // halves dropped because the other was still unflushed (saturating)
 };
 
 } // namespace detail
@@ -103,7 +103,7 @@ public:
         log_.ready[0] = false;
         log_.ready[1] = false;
         log_.active   = 0;
-        log_.overrun  = false;
+        log_.overrun_count = 0;
         last_adc_ms_  = 0;
 
         recorder_.init();   // mounts the volume + opens data_fast/slow/ext.bin
@@ -204,10 +204,11 @@ private:
         state.base.can_info     = comm_.canInfo();
         // The ECU has no Ethernet peripheral, so EcuSystemState carries no eth_info.
 
-        // The double-buffer overrun (records dropped because a half could not be
-        // flushed in time) is a logging-pipeline fault — surface it on the SD card's
-        // own status record (it owns its interface flags).
-        state.base.storage_info.status.write_overrun = log_.overrun ? 1 : 0;
+        // The double-buffer overrun count (halves dropped because the previous one could
+        // not be flushed in time) is a logging-pipeline fault — surface it on the SD card's
+        // own record. A running count, not a sticky flag, so a one-off boot stall reads
+        // differently from a sustained shortfall.
+        state.base.storage_info.overrun_count = log_.overrun_count;
 
         // The ECU's two valves report their own info, indexed by the EcuValves SSOT.
         state.base.valve_info[static_cast<std::size_t>(EcuValves::IPA)] = ipa_valve_.info();
@@ -226,7 +227,9 @@ private:
             log_.ready[a] = true;        // finalize this half
             a ^= 1;
             if (log_.ready[a]) {         // consumer hasn't drained it yet
-                log_.overrun = true;
+                if (log_.overrun_count != UINT16_MAX) {
+                    log_.overrun_count = static_cast<uint16_t>(log_.overrun_count + 1);  // dropped half (saturating)
+                }
                 return;
             }
             log_.active  = a;
