@@ -339,6 +339,158 @@ void process_eth_frame(const uint8_t* frame)
     }
 }
 
+/* -------------------------------------------------------------------------- */
+/* PHY (LAN8742) bring-up over MDIO                                           */
+/*                                                                            */
+/* CubeMX's MX_ETH_Init configures the MAC/DMA but NEVER touches the PHY, so   */
+/* link establishment was left entirely to the PHY's reset straps and the MAC */
+/* ran at HAL_ETH_Init's fixed default speed. That linked to a PC on a direct  */
+/* cable (parallel detection) but not through an auto-negotiating switch. Here */
+/* we force auto-negotiation on, wait (bounded) for the link, and match the    */
+/* MAC speed/duplex to whatever was negotiated.                                */
+/* -------------------------------------------------------------------------- */
+
+constexpr uint16_t PHY_BCR        = 0x0000;  // Basic Control Register
+constexpr uint16_t PHY_BSR        = 0x0001;  // Basic Status Register
+constexpr uint16_t PHY_PHYSID1    = 0x0002;  // PHY identifier 1 (used to find the PHY)
+constexpr uint16_t PHY_PHYSCSR    = 0x001F;  // LAN8742 PHY Special Control/Status (negotiated speed)
+
+constexpr uint16_t BCR_AUTONEG_EN      = 0x1000;  // bit 12: enable auto-negotiation
+constexpr uint16_t BCR_RESTART_AUTONEG = 0x0200;  // bit 9:  restart auto-negotiation
+
+constexpr uint16_t BSR_LINK_UP      = 0x0004;  // bit 2: link is up
+constexpr uint16_t BSR_AUTONEG_DONE = 0x0020;  // bit 5: auto-negotiation complete
+
+constexpr uint16_t PHYSCSR_SPEED_MASK = 0x001C;  // bits [4:2]: negotiated speed/duplex
+constexpr uint16_t PHYSCSR_10BT_HD    = 0x0004;
+constexpr uint16_t PHYSCSR_10BT_FD    = 0x0014;
+constexpr uint16_t PHYSCSR_100BTX_HD  = 0x0008;
+constexpr uint16_t PHYSCSR_100BTX_FD  = 0x0018;
+
+constexpr uint32_t PHY_LINK_TIMEOUT_MS   = 3000;  // bounded so a missing link never hangs bring-up
+constexpr uint32_t LINK_POLL_INTERVAL_MS = 1000;  // how often the loop re-checks the PHY link
+
+// PHY link state carried between init() and the loop's link monitor. s_phy_addr is the address
+// discovered on MDIO (-1 until found); s_link_up is the last observed link state, so the monitor
+// only reconfigures the MAC on a down->up edge (e.g. a switch plugged in after boot).
+int      s_phy_addr       = -1;
+bool     s_link_up        = false;
+uint32_t s_last_link_poll = 0;
+
+// Scan the MDIO bus for the PHY: its strap address is board-dependent and was never used by this
+// firmware, so probe 0..31 and take the first that answers with a sane ID. Returns -1 if none do.
+int find_phy_address()
+{
+    for (uint32_t addr = 0; addr < 32; ++addr) {
+        uint32_t id1 = 0;
+        if (HAL_ETH_ReadPHYRegister(&heth, addr, PHY_PHYSID1, &id1) != HAL_OK) {
+            continue;
+        }
+        if (id1 != 0x0000 && id1 != 0xFFFF) {
+            return static_cast<int>(addr);
+        }
+    }
+    return -1;
+}
+
+// Read the PHY's negotiated speed/duplex and push it into the MAC (without this the MAC keeps
+// HAL_ETH_Init's fixed default). Shared by the init bring-up and the loop's link monitor.
+bool apply_negotiated_speed(uint32_t addr)
+{
+    uint32_t scsr = 0;
+    if (HAL_ETH_ReadPHYRegister(&heth, addr, PHY_PHYSCSR, &scsr) != HAL_OK) {
+        return false;
+    }
+    ETH_MACConfigTypeDef mac = {};
+    HAL_ETH_GetMACConfig(&heth, &mac);
+    switch (scsr & PHYSCSR_SPEED_MASK) {
+        case PHYSCSR_100BTX_FD: mac.Speed = ETH_SPEED_100M; mac.DuplexMode = ETH_FULLDUPLEX_MODE; break;
+        case PHYSCSR_100BTX_HD: mac.Speed = ETH_SPEED_100M; mac.DuplexMode = ETH_HALFDUPLEX_MODE; break;
+        case PHYSCSR_10BT_FD:   mac.Speed = ETH_SPEED_10M;  mac.DuplexMode = ETH_FULLDUPLEX_MODE; break;
+        case PHYSCSR_10BT_HD:   mac.Speed = ETH_SPEED_10M;  mac.DuplexMode = ETH_HALFDUPLEX_MODE; break;
+        default: return false;  // unexpected code — leave the MAC at its current config
+    }
+    HAL_ETH_SetMACConfig(&heth, &mac);
+    return true;
+}
+
+// Force auto-negotiation on (overriding any strap that left the PHY forced/disabled), wait
+// — bounded, so bring-up can never hang — for link + auto-neg complete, then push the negotiated
+// speed/duplex into the MAC. Records the PHY address + link state for the loop monitor. Returns
+// true if a link was negotiated and the MAC configured; false on no PHY / MDIO error / timeout
+// (the main loop still runs and the link monitor picks the link up if it appears later).
+bool configure_phy_link()
+{
+    s_phy_addr = find_phy_address();
+    if (s_phy_addr < 0) {
+        return false;  // no PHY responded on MDIO — wrong address strap or an electrical fault
+    }
+    const uint32_t addr = static_cast<uint32_t>(s_phy_addr);
+
+    uint32_t bcr = 0;
+    if (HAL_ETH_ReadPHYRegister(&heth, addr, PHY_BCR, &bcr) != HAL_OK) {
+        return false;
+    }
+    bcr |= (BCR_AUTONEG_EN | BCR_RESTART_AUTONEG);
+    if (HAL_ETH_WritePHYRegister(&heth, addr, PHY_BCR, bcr) != HAL_OK) {
+        return false;
+    }
+
+    // Bounded wait for link-up AND auto-negotiation complete.
+    constexpr uint16_t LINK_READY = BSR_LINK_UP | BSR_AUTONEG_DONE;
+    const uint32_t start = HAL_GetTick();
+    uint32_t bsr = 0;
+    do {
+        if (HAL_ETH_ReadPHYRegister(&heth, addr, PHY_BSR, &bsr) != HAL_OK) {
+            return false;
+        }
+        if ((bsr & LINK_READY) == LINK_READY) {
+            break;
+        }
+    } while ((HAL_GetTick() - start) < PHY_LINK_TIMEOUT_MS);
+
+    if ((bsr & LINK_READY) != LINK_READY) {
+        return false;  // no link within the window — the loop monitor adopts it once it appears
+    }
+
+    s_link_up = apply_negotiated_speed(addr);
+    return s_link_up;
+}
+
+// Hot-plug link monitor for the main loop: non-blocking and rate-limited (one short MDIO read per
+// LINK_POLL_INTERVAL_MS, a cheap tick comparison otherwise). On a down->up edge — a switch/cable
+// plugged in after boot, or a switch that finished negotiating past the init window — it adopts
+// the freshly negotiated speed/duplex. The PHY re-negotiates in hardware on link-up (auto-neg was
+// enabled at init), so we only need to detect the edge and re-sync the MAC.
+void poll_phy_link()
+{
+    const uint32_t now = HAL_GetTick();
+    if ((now - s_last_link_poll) < LINK_POLL_INTERVAL_MS) {
+        return;
+    }
+    s_last_link_poll = now;
+
+    if (s_phy_addr < 0) {
+        s_phy_addr = find_phy_address();   // PHY may not have answered at init; keep trying
+        if (s_phy_addr < 0) {
+            return;
+        }
+    }
+    const uint32_t addr = static_cast<uint32_t>(s_phy_addr);
+
+    uint32_t bsr = 0;
+    if (HAL_ETH_ReadPHYRegister(&heth, addr, PHY_BSR, &bsr) != HAL_OK) {
+        return;
+    }
+    constexpr uint16_t LINK_READY = BSR_LINK_UP | BSR_AUTONEG_DONE;
+    const bool up_now = (bsr & LINK_READY) == LINK_READY;
+
+    if (up_now && !s_link_up) {
+        apply_negotiated_speed(addr);   // rising edge: the link just came up — adopt its speed
+    }
+    s_link_up = up_now;
+}
+
 } // namespace
 
 /* -------------------------------------------------------------------------- */
@@ -356,6 +508,13 @@ void Ethernet::init()
     for (std::size_t i = 0; i < RX_BUF_COUNT; ++i) {
         rx_buf_status[i] = BufStatus::Free;
     }
+
+    // Bring the PHY up and match the MAC to the negotiated link BEFORE starting the MAC/DMA.
+    // MX_ETH_Init never touches the PHY, so the link otherwise relied on the reset straps (which
+    // came up on a direct PC but not through a switch) and the MAC ran at a fixed default speed.
+    // Bounded internally, so a missing link delays bring-up by at most PHY_LINK_TIMEOUT_MS rather
+    // than hanging; the link can still come up later (the GS just sees no telemetry until it does).
+    (void)configure_phy_link();
 
     HAL_ETH_Start_IT(&heth);
 
@@ -412,6 +571,8 @@ void Ethernet::init()
 void Ethernet::tick()
 {
     static std::size_t rx_read_idx = 0;
+
+    poll_phy_link();   // hot-plug: adopt a link (and its negotiated speed) that comes up post-boot
 
     while (rx_queue_size) {
         if (rx_buf_status[rx_read_idx] != BufStatus::OwnedCpu) {
