@@ -76,6 +76,10 @@ std::vector<uint8_t> makeStateRequest(BoardId device, logic::control::State requ
 constexpr uint16_t SOLENOID_FLAG_ID =
     CONTROL_FLAG_BOARD_OFFSET + static_cast<uint16_t>(FcuControlFlag::SolenoidValve);
 
+/* The 16-bit global flag id of the FCU heater (a per-board flag: offset + its bit). */
+constexpr uint16_t HEATER_FLAG_ID =
+    CONTROL_FLAG_BOARD_OFFSET + static_cast<uint16_t>(FcuControlFlag::Heater);
+
 /* Build a CommandType::SetControlFlag datagram addressed to `device`: a 12-byte
    EthernetHeader followed by the SetControlFlagFrame {16-bit flag id, value}. */
 std::vector<uint8_t> makeControlFlagRequest(BoardId device, uint16_t flag, uint8_t value)
@@ -146,10 +150,11 @@ protected:
     FakePowerMonitor     pm_;
     FakeEmatch           ematch_;
     FakeSolenoid         solenoid_;
+    FakeHeater           heater_;
     logic::fcu::Controller<FakeStorage, FakeValve, FakeStreamingAdc, FakeEthernet, FakeCan,
-                           FakeThermocoupleBank, FakePowerMonitor, FakeEmatch, FakeSolenoid>
+                           FakeThermocoupleBank, FakePowerMonitor, FakeEmatch, FakeSolenoid, FakeHeater>
                      controller_{storage_fast_, storage_slow_, storage_ext_,
-                                 fill_valve_, dump_valve_, adc_, eth_, can_, tc_, pm_, ematch_, solenoid_};
+                                 fill_valve_, dump_valve_, adc_, eth_, can_, tc_, pm_, ematch_, solenoid_, heater_};
     uint32_t         now_ms_ = 0;
 
     void SetUp() override
@@ -944,6 +949,85 @@ TEST_F(FcuControllerTest, LeavingUnsafeClearsSolenoidFlag)
     requestState(logic::control::State::Abort);   // leaving Unsafe
     EXPECT_FALSE(logic::control::fcu_control_flags.get(FcuControlFlag::SolenoidValve));  // flag cleared
     EXPECT_FALSE(solenoid_.is_open);
+}
+
+/* ---- Heater -------------------------------------------------------------- */
+
+/* The heater is NOT state-gated: with the flag set it is driven on in any state, including
+   Safe (unlike the solenoid, which only opens in Unsafe). */
+TEST_F(FcuControllerTest, HeaterFollowsFlagInAnyState)
+{
+    reachSafe();
+    logic::control::fcu_control_flags.set(FcuControlFlag::Heater, true);
+
+    step();   // still Safe: the heater follows its flag regardless of state
+    EXPECT_TRUE(heater_.is_on);
+    EXPECT_NE(heater_.last_on_ms, 0u);
+}
+
+/* Clearing the flag drives the heater off on the next tick. */
+TEST_F(FcuControllerTest, HeaterTurnsOffWhenFlagCleared)
+{
+    reachSafe();
+    logic::control::fcu_control_flags.set(FcuControlFlag::Heater, true);
+    step();
+    ASSERT_TRUE(heater_.is_on);
+
+    logic::control::fcu_control_flags.set(FcuControlFlag::Heater, false);
+    step();
+    EXPECT_FALSE(heater_.is_on);
+    EXPECT_NE(heater_.last_off_ms, 0u);
+}
+
+/* A SetControlFlag(Heater) command is honoured in any state (here Safe): no state gate,
+   so the flag is applied and the heater turns on. */
+TEST_F(FcuControllerTest, HeaterFlagCommandAcceptedOutsideUnsafe)
+{
+    reachSafe();   // Safe, not Unsafe
+    requestControlFlag(HEATER_FLAG_ID, 1);
+
+    EXPECT_TRUE(logic::control::fcu_control_flags.get(FcuControlFlag::Heater));
+    EXPECT_TRUE(heater_.is_on);
+}
+
+/* Unlike the solenoid, leaving Unsafe does NOT clear the Heater flag: the heater keeps
+   following its flag across the transition. */
+TEST_F(FcuControllerTest, LeavingUnsafeKeepsHeaterFlag)
+{
+    reachSafe();
+    requestState(logic::control::State::Unsafe);
+    requestControlFlag(HEATER_FLAG_ID, 1);
+    ASSERT_TRUE(heater_.is_on);
+
+    requestState(logic::control::State::Ignite);   // leaving Unsafe
+    EXPECT_TRUE(logic::control::fcu_control_flags.get(FcuControlFlag::Heater));  // flag retained
+    EXPECT_TRUE(heater_.is_on);                                                  // still on
+}
+
+/* The heater on/off state rides the extended record. */
+TEST_F(FcuControllerTest, HeaterStateRidesTheExtendedRecord)
+{
+    reachSafe();
+    logic::control::fcu_control_flags.set(FcuControlFlag::Heater, true);
+    step();
+    ASSERT_TRUE(heater_.is_on);
+
+    bus().udp_tx.clear();
+    controller_.tick(now_ms_ += 150);   // cross the extended interval
+
+    bool found = false;
+    for (const auto& d : bus().udp_tx) {
+        EthernetHeader h;
+        std::memcpy(&h, d.payload.data(), sizeof(h));
+        if (static_cast<TelemetryType>(h.payload_id) != TelemetryType::ExtendedSystemState) {
+            continue;
+        }
+        FcuExtendedSystemState ext;
+        std::memcpy(&ext, d.payload.data() + sizeof(EthernetHeader), sizeof(ext));
+        EXPECT_EQ(ext.heater_info.status.on, 1u);
+        found = true;
+    }
+    EXPECT_TRUE(found) << "no ExtendedSystemState was downlinked";
 }
 
 /* The refused SetControlFlag (flag id + value + the state it was refused in) rides the

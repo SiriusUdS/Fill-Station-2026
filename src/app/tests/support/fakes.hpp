@@ -20,3 +20,4 @@
 #include "support/fake_digital_in.hpp"   // FakeDigitalIn
 #include "support/fake_ematch.hpp"       // FakeEmatch
 #include "support/fake_solenoid.hpp"     // FakeSolenoid
+#include "support/fake_heater.hpp"       // FakeHeater

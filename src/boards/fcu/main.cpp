@@ -55,13 +55,18 @@ gpio::DigitalInput   g_solenoid_detect;
 gpio::DigitalOutput  g_solenoid_cont;
 Solenoid             g_solenoid{g_solenoid_drive, g_solenoid_detect, g_solenoid_cont};
 
+/* The heater: a single GPIO output line + the GpioHeater over it. Constructed before
+ * g_controller (which holds a reference to it via Control/Telemetry). Plain RAM (no DMA). */
+gpio::DigitalOutput  g_heater_drive;
+Heater               g_heater{g_heater_drive};
+
 __attribute__((section(".axisram"))) platform::storage::SdCard g_card_fast;
 __attribute__((section(".axisram"))) platform::storage::SdCard g_card_slow;
 __attribute__((section(".axisram"))) platform::storage::SdCard g_card_ext;
 __attribute__((section(".axisram")))
 FcuController g_controller{g_card_fast, g_card_slow, g_card_ext, g_fill_valve, g_dump_valve,
                            g_ads131, g_eth, g_can, g_thermocouples, g_power_monitor,
-                           g_ematch, g_solenoid};
+                           g_ematch, g_solenoid, g_heater};
 
 }  // namespace fcu_app
 

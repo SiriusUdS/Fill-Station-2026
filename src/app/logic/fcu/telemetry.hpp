@@ -11,6 +11,7 @@
 #include "actuation/interfaces/valve.hpp"        // logic::actuation::Valve
 #include "actuation/interfaces/ematch.hpp"       // logic::actuation::Ematch (read into the extended record)
 #include "actuation/interfaces/solenoid.hpp"     // logic::actuation::Solenoid (read into the extended record)
+#include "actuation/interfaces/heater.hpp"       // logic::actuation::Heater (read into the extended record)
 #include "communication/interfaces/adc.hpp"      // logic::communication::StreamingAdc + AdcInfo
 #include "communication/interfaces/thermocouple.hpp"  // logic::communication::ThermocoupleBank + ThermocoupleInfo
 #include "communication/interfaces/power_monitor.hpp"  // logic::communication::PowerMonitor + PowerMonitorInfo
@@ -89,20 +90,20 @@ struct LogBuffer {
 template <logic::storage::Storage S, logic::actuation::Valve V,
           logic::communication::StreamingAdc A, typename Comm,
           logic::communication::ThermocoupleBank TC, logic::communication::PowerMonitor PM,
-          logic::actuation::Ematch EM, logic::actuation::Solenoid SOL>
+          logic::actuation::Ematch EM, logic::actuation::Solenoid SOL, logic::actuation::Heater HTR>
 class Telemetry {
 public:
     /** @brief Construct over the held drivers + the communication layer. The three
      *         SD streams are the high-rate SystemState (fast/slow, picked by the
-     *         FastRecording flag) and the low-rate ExtendedSystemState. The e-match and
-     *         solenoid are read-only here: their info() rides the extended record. */
+     *         FastRecording flag) and the low-rate ExtendedSystemState. The e-match,
+     *         solenoid and heater are read-only here: their info() rides the extended record. */
     Telemetry(S& storage_fast, S& storage_slow, S& storage_ext,
               V& fill_valve, V& dump_valve, A& adc, Comm& comm, TC& thermocouples, PM& power_monitor,
-              EM& ematch, SOL& solenoid)
+              EM& ematch, SOL& solenoid, HTR& heater)
         : recorder_(storage_fast, storage_slow, storage_ext),
           fill_valve_(fill_valve), dump_valve_(dump_valve),
           adc_(adc), comm_(comm), thermocouples_(thermocouples), power_monitor_(power_monitor),
-          ematch_(ematch), solenoid_(solenoid) {}
+          ematch_(ematch), solenoid_(solenoid), heater_(heater) {}
 
     /** @brief Zero the double buffer and bring the three SD log files online. */
     void init()
@@ -202,6 +203,7 @@ public:
         ext.power_monitor = power_monitor_.info();   // INA3221 (I2C4), polled at ~10 Hz
         ext.ematch_info   = ematch_.info();          // presence + firing-line state + last energise/deenergise ticks
         ext.solenoid_info = solenoid_.info();        // presence + open/closed state + last open/close ticks
+        ext.heater_info   = heater_.info();          // on/off state + last on/off ticks
 
         const std::span<const uint8_t> bytes(reinterpret_cast<const uint8_t*>(&ext), sizeof(ext));
         recorder_.recordExtended(bytes);   // -> data_ext.bin (gated by PersistingData)
@@ -386,6 +388,7 @@ private:
     PM&   power_monitor_;  // injected INA3221; serviced off-ISR, read into the extended record
     EM&   ematch_;         // injected e-match (read-only here); its info() rides the extended record
     SOL&  solenoid_;       // injected solenoid valve (read-only here); its info() rides the extended record
+    HTR&  heater_;         // injected heater (read-only here); its info() rides the extended record
     detail::LogBuffer log_;            // .axisram in firmware; left uninitialised until init()
     volatile uint32_t  last_adc_ms_ = 0;  // last tick a conversion was drained; gates the silent-ADC filler
     uint32_t           last_extended_ms_ = 0;  // throttles produceExtended() to ~10 Hz

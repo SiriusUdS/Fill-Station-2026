@@ -44,6 +44,14 @@ target_include_directories(gpio_solenoid_test PRIVATE ${FCU_INCLUDE_DIRS})
 target_link_libraries(gpio_solenoid_test PRIVATE GTest::gtest_main)
 gtest_discover_tests(gpio_solenoid_test PROPERTIES LABELS "unit")
 
+# --- Heater (GpioHeater over the digital seam) (unit) ---------------------
+add_executable(gpio_heater_test
+    unit/logic/gpio_heater_test.cpp
+)
+target_include_directories(gpio_heater_test PRIVATE ${FCU_INCLUDE_DIRS})
+target_link_libraries(gpio_heater_test PRIVATE GTest::gtest_main)
+gtest_discover_tests(gpio_heater_test PROPERTIES LABELS "unit")
+
 # --- Control layer (unit) -------------------------------------------------
 add_executable(control_test
     unit/logic/control/control_test.cpp

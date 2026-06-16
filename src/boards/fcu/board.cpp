@@ -108,6 +108,12 @@ void wireDrivers(void)
   g_solenoid_detect.init({.port = SOL_VALVE_DET_GPIO_Port,  .pin = SOL_VALVE_DET_Pin,
                           .active_high = true, .pull = GPIO_NOPULL});
 
+  /* Bring up the heater output on GPIOE (clock enabled by MX_GPIO_Init):
+       - HEATER_STATE (PE5) output — driven on/off straight from the Heater control flag
+         (Control::serviceHeater) in any state; init() drives it low (off). No detect input
+         or continuity LED: the heater is a bare on/off line. */
+  g_heater_drive.init({.port = HEATER_STATE_GPIO_Port, .pin = HEATER_STATE_Pin, .active_high = true});
+
   /* Bring up the backup domain first, so the battery-backed Backup SRAM that
      holds the persistent state is clocked, writable and retained on VBAT before
      the FCU logic reads it. A regulator-timeout only means VBAT retention is

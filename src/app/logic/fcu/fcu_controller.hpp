@@ -11,6 +11,7 @@
 #include "communication/interfaces/can.hpp"      // logic::communication::Can
 #include "actuation/interfaces/ematch.hpp"       // logic::actuation::Ematch (the FCU igniter seam)
 #include "actuation/interfaces/solenoid.hpp"     // logic::actuation::Solenoid (the FCU solenoid-valve seam)
+#include "actuation/interfaces/heater.hpp"       // logic::actuation::Heater (the FCU heater seam)
 #include "control/persistent_state.hpp"          // Backup-SRAM state snapshot
 
 #include "communication/protocol/framing/can_header.hpp"      // CanHeader (inbound demux)
@@ -59,12 +60,13 @@ namespace logic::fcu {
  * @tparam PM logic::communication::PowerMonitor (the INA3221 on I2C4).
  * @tparam EM logic::actuation::Ematch (the e-match igniter line; 3 GPIOs on GPIOD).
  * @tparam SOL logic::actuation::Solenoid (the solenoid valve; 3 GPIOs on GPIOD).
+ * @tparam HTR logic::actuation::Heater (the heater; 1 GPIO on GPIOE).
  */
 template <logic::storage::Storage S, logic::actuation::Valve V,
           logic::communication::StreamingAdc A, logic::communication::Ethernet E,
           logic::communication::Can C, logic::communication::ThermocoupleBank TC,
           logic::communication::PowerMonitor PM, logic::actuation::Ematch EM,
-          logic::actuation::Solenoid SOL>
+          logic::actuation::Solenoid SOL, logic::actuation::Heater HTR>
 class Controller {
 public:
     /** @brief Construct over the held drivers; does not touch hardware. Call init() next.
@@ -73,11 +75,11 @@ public:
      *         (data_ext.bin); which SystemState file is written is the FastRecording flag's. */
     Controller(S& storage_fast, S& storage_slow, S& storage_ext,
                V& fill_valve, V& dump_valve, A& adc, E& eth, C& can, TC& thermocouples,
-               PM& power_monitor, EM& ematch, SOL& solenoid)
+               PM& power_monitor, EM& ematch, SOL& solenoid, HTR& heater)
         : comm_(eth, can),
           telemetry_(storage_fast, storage_slow, storage_ext, fill_valve, dump_valve, adc, comm_,
-                     thermocouples, power_monitor, ematch, solenoid),
-          control_(fill_valve, dump_valve, comm_, ematch, solenoid) {}
+                     thermocouples, power_monitor, ematch, solenoid, heater),
+          control_(fill_valve, dump_valve, comm_, ematch, solenoid, heater) {}
 
     /**
      * @brief  Initialise the FCU logic: communication endpoint, telemetry buffer +
@@ -143,6 +145,7 @@ public:
         telemetry_.servicePowerMonitor(now_ms);   // advance the non-blocking INA3221 round-robin
         control_.serviceEmatch();        // sample EMATCH_DET -> continuity LED (and the extended record)
         control_.serviceSolenoid(now_ms);  // SOL_VALVE_DET -> cont LED + enforce open-only-in-Unsafe
+        control_.serviceHeater(now_ms);     // drive HEATER_STATE on/off straight from the Heater flag
         telemetry_.produceExtended(now_ms);  // ~10 Hz ExtendedSystemState -> GS + data_ext.bin
         telemetry_.drain(now_ms);        // flush full halves to SD + the GS
         control_.servicePending(now_ms); // resend / time out the in-flight reliable command
@@ -165,9 +168,9 @@ private:
         return static_cast<PayloadType>(header.frame.payload_type) == PayloadType::Response;
     }
 
-    Communication<E, C>                                      comm_;   // declared first: the others hold a ref to it
-    Telemetry<S, V, A, Communication<E, C>, TC, PM, EM, SOL> telemetry_;
-    Control<V, Communication<E, C>, EM, SOL>                 control_;
+    Communication<E, C>                                           comm_;   // declared first: the others hold a ref to it
+    Telemetry<S, V, A, Communication<E, C>, TC, PM, EM, SOL, HTR> telemetry_;
+    Control<V, Communication<E, C>, EM, SOL, HTR>                 control_;
 };
 
 } // namespace logic::fcu

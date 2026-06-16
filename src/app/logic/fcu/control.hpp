@@ -28,6 +28,7 @@
 #include "control/control_flags.hpp"                           // logic::control::base_control_flags / fcu_control_flags
 #include "actuation/interfaces/ematch.hpp"                     // logic::actuation::Ematch (the igniter seam)
 #include "actuation/interfaces/solenoid.hpp"                   // logic::actuation::Solenoid (the solenoid-valve seam)
+#include "actuation/interfaces/heater.hpp"                     // logic::actuation::Heater (the heater seam)
 
 /* ------------------------------------------------------------------------- *
  * FCU control layer (HAL-free) — command handling + execution, the receive side
@@ -62,15 +63,17 @@ inline constexpr uint8_t  MAX_COMMAND_RETRIES = 3;
  * @tparam Comm The FCU Communication layer (forwards commands to the ECU, the pong to the GS).
  * @tparam EM   logic::actuation::Ematch (the igniter line, energised in the Ignite state).
  * @tparam SOL  logic::actuation::Solenoid (the solenoid valve, open only in the Unsafe state).
+ * @tparam HTR  logic::actuation::Heater (the heater, driven straight from its control flag).
  */
 template <logic::actuation::Valve V, typename Comm, logic::actuation::Ematch EM,
-          logic::actuation::Solenoid SOL>
+          logic::actuation::Solenoid SOL, logic::actuation::Heater HTR>
 class Control {
 public:
-    /** @brief Construct over the local valves, the communication layer, the e-match, and the solenoid. */
-    Control(V& fill_valve, V& dump_valve, Comm& comm, EM& ematch, SOL& solenoid)
+    /** @brief Construct over the local valves, the communication layer, the e-match, the solenoid,
+     *         and the heater. */
+    Control(V& fill_valve, V& dump_valve, Comm& comm, EM& ematch, SOL& solenoid, HTR& heater)
         : fill_valve_(fill_valve), dump_valve_(dump_valve), comm_(comm), ematch_(ematch),
-          solenoid_(solenoid) {}
+          solenoid_(solenoid), heater_(heater) {}
 
     /** @brief Boot-init the control layer: reset the GS-link liveness clock and drive
      *         the local valves to a safe (closed) position.
@@ -86,6 +89,7 @@ public:
         (void)dump_valve_.close();
         ematch_.deenergise(0);  // boot-safe the firing line through the logic seam (like the valves); t=0
         solenoid_.close(0);     // boot-safe the solenoid closed through the logic seam; t=0
+        heater_.off(0);         // boot-safe the heater off through the logic seam; t=0
     }
 
     /** @brief Sample the e-match detect line and mirror it onto the continuity LED. Called
@@ -107,6 +111,19 @@ public:
             solenoid_.open(now_ms);
         } else {
             solenoid_.close(now_ms);
+        }
+    }
+
+    /** @brief Service the heater each tick: drive it on/off straight from the Heater control
+     *         flag. Unlike the solenoid the heater is NOT state-gated — it follows its flag in
+     *         any state. Cheap and non-blocking; the on/off edge ticks are stamped by the heater
+     *         only on an actual state change. */
+    void serviceHeater(uint32_t now_ms)
+    {
+        if (logic::control::fcu_control_flags.get(FcuControlFlag::Heater)) {
+            heater_.on(now_ms);
+        } else {
+            heater_.off(now_ms);
         }
     }
 
@@ -545,6 +562,7 @@ private:
     Comm&    comm_;         // injected communication layer; forwards to ECU / GS
     EM&      ematch_;       // injected e-match: energised in Ignite, polled each tick for the cont LED
     SOL&     solenoid_;     // injected solenoid valve: open only while its flag is set AND in Unsafe
+    HTR&     heater_;       // injected heater: driven on/off straight from its flag, any state
     Pending  pending_{};       // the in-flight relayed GS->ECU command (Ping for now)
 };
 

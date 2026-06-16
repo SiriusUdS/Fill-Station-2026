@@ -22,6 +22,7 @@
 #include "indication/status_indicator.hpp"
 #include "gpio_ematch.hpp"
 #include "gpio_solenoid.hpp"
+#include "gpio_heater.hpp"
 #include "fcu_controller.hpp"
 
 namespace fcu_app {
@@ -49,10 +50,14 @@ using Ematch = logic::fcu::GpioEmatch<gpio::DigitalOutput, gpio::DigitalInput, g
  * GPIO shape as the e-match (SOL_VALVE_STATE / SOL_VALVE_DET / SOL_VALVE_CONT on GPIOD). */
 using Solenoid = logic::fcu::GpioSolenoid<gpio::DigitalOutput, gpio::DigitalInput, gpio::DigitalOutput>;
 
+/* The FCU heater: a bare on/off output (HEATER_STATE on GPIOE), no detect input or LED. */
+using Heater = logic::fcu::GpioHeater<gpio::DigitalOutput>;
+
 /* The FCU's concrete controller type, instantiated over its real drivers. */
 using FcuController = logic::fcu::Controller<platform::storage::SdCard, valve::BallValve,
                                              ads131m08::Ads131m08, eth::Ethernet, can::Can,
-                                             max31856::Max31856Bank, ina3221::Ina3221, Ematch, Solenoid>;
+                                             max31856::Max31856Bank, ina3221::Ina3221, Ematch, Solenoid,
+                                             Heater>;
 
 /* Fill/Dump ball valves, the streaming ADC, the Ethernet link and CAN node, the
  * SD card, and the controller built over them all. Defined in main.cpp. */
@@ -87,6 +92,11 @@ extern gpio::DigitalOutput    g_solenoid_drive;   // SOL_VALVE_STATE (coil outpu
 extern gpio::DigitalInput     g_solenoid_detect;  // SOL_VALVE_DET   (present input)
 extern gpio::DigitalOutput    g_solenoid_cont;    // SOL_VALVE_CONT  (continuity LED)
 extern Solenoid               g_solenoid;
+
+/* The heater GPIO line (HEATER_STATE on GPIOE) and the GpioHeater composed over it.
+ * Bound to its pin by board::wireDrivers(). */
+extern gpio::DigitalOutput    g_heater_drive;     // HEATER_STATE (heater output)
+extern Heater                 g_heater;
 
 extern FcuController          g_controller;
 
