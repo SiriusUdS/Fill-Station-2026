@@ -588,6 +588,29 @@ void Ethernet::tick()
         rx_queue_size = static_cast<uint8_t>(rx_queue_size - 1);
         __enable_irq();
     }
+
+    // RX self-recovery + overload protection. A burst that outpaces this loop — broadcast/multicast
+    // chatter on the switch, especially while a slow loop iteration (an SD flush) keeps us out of
+    // here — can drain the buffer pool dry. The RX DMA then un-arms its descriptors and SUSPENDS
+    // (RBU); the RX interrupt stops firing, so the ISR drain never re-arms it and reception jams for
+    // good. We freed buffers above, so re-run the drain here from the loop: HAL_ETH_ReadData re-arms
+    // the descriptors and the DMA resumes (it picks up an owned descriptor again on the next frame —
+    // guaranteed under live switch traffic). Guarded against the RX ISR (HAL_ETH_ReadData is not
+    // reentrant). Net effect: excess traffic is DROPPED, never jammed, and RX is starved for at most
+    // one loop iteration. In steady state this is one cheap HAL_ETH_ReadData call that finds nothing.
+    HAL_NVIC_DisableIRQ(ETH_IRQn);
+    __HAL_ETH_DMA_CLEAR_FLAG(&heth, ETH_DMA_RX_BUFFER_UNAVAILABLE_FLAG);
+    uint8_t* recovered = nullptr;
+    while (HAL_ETH_ReadData(&heth, reinterpret_cast<void**>(&recovered)) == HAL_OK) {
+        const std::size_t idx =
+            (reinterpret_cast<uintptr_t>(recovered) - reinterpret_cast<uintptr_t>(rx_pool)) / RX_BUF_SIZE_BYTES;
+        if (idx < RX_BUF_COUNT) {
+            rx_buf_status[idx] = BufStatus::OwnedCpu;
+            rx_queue_size = static_cast<uint8_t>(rx_queue_size + 1);
+        }
+        recovered = nullptr;
+    }
+    HAL_NVIC_EnableIRQ(ETH_IRQn);
 }
 
 std::optional<NetError> Ethernet::send(const Endpoint& dest, std::span<const uint8_t> payload)
