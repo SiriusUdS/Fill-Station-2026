@@ -55,7 +55,7 @@ void halInit(void)
   MX_FDCAN1_Init();
   MX_DMA_Init();         // must precede MX_SPI1_Init: SPI1 MspInit calls HAL_DMA_Init + arms the stream NVICs
   MX_SPI1_Init();        // ADS131M08 ADC bus
-  MX_I2C4_Init();        // INA3221 power monitor bus (driver runs stubbed: PCB has SDA/SCL swapped)
+  MX_I2C4_Init();        // INA3221 power monitor bus
   MX_SDMMC1_SD_Init();   // SD card
   MX_FATFS_Init();
   MX_TIM15_Init();       // valve servo PWM (CH1=IPA/PE5, CH2=NOS/PE6)
@@ -92,17 +92,15 @@ void wireDrivers(void)
   });
   g_ads131.start();
 
-  /* INA3221 power monitor on I2C4. STUBBED: this PCB has the SDA/SCL lines swapped, so the
-     bus is unusable — the driver is configured with stubbed=true, so init() touches nothing,
-     service() is a no-op, and the extended record's power_monitor reads Unknown / invalid.
-     Once the board is reworked, drop `.stubbed = true` (and confirm the address) to enable; the
-     I2C4 EV/ER vector handlers are already below. Default 7-bit address 0x40 (A0 = GND). */
+  /* Bring up the INA3221 power monitor on I2C4. init() writes the config (also a presence
+     check) and arms the I2C4 event/error interrupts; the controller then services it
+     non-blocking from the loop and folds it into the extended record. The EV/ER vector
+     handlers are below. Default 7-bit address 0x40 (A0 = GND). */
   g_power_monitor.init({
       .hi2c    = &hi2c4,
       .address = ina3221::DEFAULT_ADDRESS,
       .ev_irqn = I2C4_EV_IRQn,
       .er_irqn = I2C4_ER_IRQn,
-      .stubbed = true,
   });
 
   /* Bind the three SD log files on SDMMC1 (the app composition left them unbound). They
@@ -179,8 +177,8 @@ extern "C" void EXTI4_IRQHandler(void)
   HAL_GPIO_EXTI_IRQHandler(ADS_DRDY_Pin);   // GPIO_PIN_4
 }
 
-/* INA3221 I2C4 event + error vectors. Inert while the driver is stubbed (it arms no I2C
-   transfers), but kept ready so enabling the power monitor is just clearing Config::stubbed. */
+/* INA3221 I2C4 event + error vectors: forward to the HAL so the driver's non-blocking
+   (interrupt-driven) reads complete. */
 extern "C" void I2C4_EV_IRQHandler(void)
 {
   HAL_I2C_EV_IRQHandler(&hi2c4);

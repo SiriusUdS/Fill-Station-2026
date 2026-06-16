@@ -30,7 +30,7 @@ using EcuController = logic::ecu::Controller<platform::storage::SdCard, valve::B
 extern valve::BallValve          g_ipa_valve;
 extern valve::BallValve          g_nos_valve;
 extern ads131m08::Ads131m08      g_ads131;
-extern ina3221::Ina3221          g_power_monitor;  // INA3221 on I2C4 (stubbed: PCB has SDA/SCL swapped); rides the extended record
+extern ina3221::Ina3221          g_power_monitor;  // INA3221 on I2C4 (serviced by the controller; rides the extended record)
 extern can::Can                  g_can;
 extern platform::storage::SdCard g_card_fast;  // data_fast.bin (raw 2 kHz SystemState)
 extern platform::storage::SdCard g_card_slow;  // data_slow.bin (125 Hz averaged SystemState)

@@ -94,6 +94,11 @@ std::vector<uint8_t> makeSetControlFlag(ControlFlagBase flag, uint8_t value, Boa
                        reinterpret_cast<const uint8_t*>(&body), sizeof(body), seq);
 }
 
+std::vector<uint8_t> makeSynchronise(BoardId target = BoardId::FillingStation, uint8_t seq = 0)
+{
+    return makeCommand(command::CommandType::Synchronise, target, nullptr, 0, seq);
+}
+
 class ControlTest : public ::testing::Test {
 protected:
     FakeEthernet eth_;
@@ -136,6 +141,23 @@ protected:
     void deliver(const std::vector<uint8_t>& datagram)
     {
         control_.onDatagram(std::span<const uint8_t>(datagram), ++now_ms_);
+    }
+
+    // Assert exactly one datagram went out and it is an Ack: a Response (which the Communication
+    // layer routes to the COMMANDER endpoint, not the telemetry sink) echoing `seq`. Also checks
+    // the datagram's destination is the command endpoint, so the Ack rides the commander line.
+    void expectAckToGs(uint8_t seq)
+    {
+        ASSERT_EQ(bus().udp_tx.size(), 1u);
+        const auto& sent = bus().udp_tx.front();
+        EthernetHeader ack;
+        std::memcpy(&ack, sent.payload.data(), sizeof(EthernetHeader));
+        EXPECT_EQ(static_cast<BoardId>(ack.sender_id), BoardId::FillingStation);
+        EXPECT_EQ(static_cast<PayloadType>(ack.payload_type), PayloadType::Response);
+        EXPECT_EQ(static_cast<ResponseType>(ack.payload_id), ResponseType::Ack);
+        EXPECT_EQ(ack.seq, seq);              // echoes the GS seq so it matches the command
+        EXPECT_EQ(sent.dest.ipv4, logic::fcu::detail::COMMANDER_IPV4);   // commander line, not telemetry
+        EXPECT_EQ(sent.dest.port, logic::fcu::detail::COMMANDER_PORT);
     }
 };
 
@@ -231,11 +253,24 @@ TEST_F(ControlTest, LegalStateTransitionCommits)
     EXPECT_EQ(current(), State::Unsafe);
 }
 
+TEST_F(ControlTest, LocalSetStateAppliesAndAcksGs)
+{
+    setCurrent(State::Safe);
+    // seq > 15 on purpose: the local Ack must echo the FULL 8-bit GS seq, not the 4-bit value
+    // the CAN bridge would truncate it to.
+    deliver(makeSetState(State::Unsafe, BoardId::FillingStation, /*seq=*/200));
+
+    EXPECT_EQ(current(), State::Unsafe);
+    EXPECT_TRUE(bus().can_tx.empty());   // FillingStation-targeted: applied here, no ECU hop
+    expectAckToGs(/*seq=*/200);          // Acked on the commander line, full seq preserved
+}
+
 TEST_F(ControlTest, IllegalStateTransitionIsRejected)
 {
     setCurrent(State::Safe);
     deliver(makeSetState(State::Ignite));   // Safe -> Ignite not allowed
     EXPECT_EQ(current(), State::Safe);
+    EXPECT_TRUE(bus().udp_tx.empty());      // refused -> not Acked
 }
 
 TEST_F(ControlTest, RefusedTransitionIsRecorded)
@@ -281,6 +316,7 @@ TEST_F(ControlTest, BroadcastSetStateAppliesLocallyAndBridges)
 
     EXPECT_EQ(current(), State::Unsafe);   // applied locally
     EXPECT_EQ(bus().can_tx.size(), 1u);    // and bridged to the ECU
+    expectAckToGs(/*seq=*/2);              // local Ack on the commander line (the ECU Acks too)
 }
 
 TEST_F(ControlTest, TransitionToSafeClosesLocalValves)
@@ -321,10 +357,12 @@ TEST_F(ControlTest, InitDrivesLocalValvesClosed)
 
 TEST_F(ControlTest, ValidValveActionActuatesLocalValve)
 {
-    deliver(makeSetValve(FcuValves::Fill, ValveCommand::Open));
+    deliver(makeSetValve(FcuValves::Fill, ValveCommand::Open, /*value=*/0,
+                         BoardId::FillingStation, /*seq=*/200));   // seq > 15: full 8-bit echo
     EXPECT_EQ(fill_valve_.open_calls, 1);
     EXPECT_EQ(dump_valve_.open_calls, 0);
     EXPECT_TRUE(bus().can_tx.empty());   // FillingStation-targeted: actuated here, no ECU hop
+    expectAckToGs(/*seq=*/200);          // Acked on the commander line, full seq preserved
 }
 
 TEST_F(ControlTest, UnknownValveActionIsRejected)
@@ -333,6 +371,7 @@ TEST_F(ControlTest, UnknownValveActionIsRejected)
     EXPECT_EQ(fill_valve_.open_calls, 0);
     EXPECT_EQ(fill_valve_.close_calls, 0);
     EXPECT_EQ(fill_valve_.percent_calls, 0);
+    EXPECT_TRUE(bus().udp_tx.empty());   // refused -> not Acked
 }
 
 TEST_F(ControlTest, EngineValveCommandBridgesOverCanWithoutLocalActuation)
@@ -366,6 +405,7 @@ TEST_F(ControlTest, BroadcastValveCommandActuatesLocallyAndBridges)
 
     EXPECT_EQ(fill_valve_.open_calls, 1);   // actuated locally
     EXPECT_EQ(bus().can_tx.size(), 1u);     // and bridged to the ECU
+    expectAckToGs(/*seq=*/2);               // local Ack on the commander line (the ECU Acks too)
 }
 
 TEST_F(ControlTest, AckFromEcuClearsThePendingBridgedValveCommand)
@@ -407,14 +447,7 @@ TEST_F(ControlTest, LocalSetControlFlagAppliesAndAcksGs)
 
     EXPECT_TRUE(logic::control::base_control_flags.get(ControlFlagBase::PersistingData));
     EXPECT_TRUE(bus().can_tx.empty());   // FillingStation-targeted: applied here, no ECU hop
-
-    ASSERT_EQ(bus().udp_tx.size(), 1u);
-    EthernetHeader ack;
-    std::memcpy(&ack, bus().udp_tx.front().payload.data(), sizeof(EthernetHeader));
-    EXPECT_EQ(static_cast<BoardId>(ack.sender_id), BoardId::FillingStation);
-    EXPECT_EQ(static_cast<PayloadType>(ack.payload_type), PayloadType::Response);
-    EXPECT_EQ(static_cast<ResponseType>(ack.payload_id), ResponseType::Ack);
-    EXPECT_EQ(ack.seq, 3u);              // echoes the GS seq so it matches the command
+    expectAckToGs(/*seq=*/3);            // Acked on the commander line
 }
 
 TEST_F(ControlTest, EngineSetControlFlagBridgesOverCanWithoutLocalApply)
@@ -465,6 +498,15 @@ TEST_F(ControlTest, AckFromEcuClearsThePendingBridgedCommand)
     now_ms_ += logic::fcu::detail::COMMAND_TIMEOUT_MS * 4;
     control_.servicePending(now_ms_);
     EXPECT_EQ(bus().can_tx.size(), 1u);   // cleared by the Ack — never resent
+}
+
+/* ---- Synchronise --------------------------------------------------------- */
+
+TEST_F(ControlTest, SynchroniseAcksGs)
+{
+    deliver(makeSynchronise(BoardId::FillingStation, /*seq=*/171));   // seq > 15: full 8-bit echo
+    EXPECT_TRUE(bus().can_tx.empty());   // handled locally; not bridged to the ECU
+    expectAckToGs(/*seq=*/171);          // receipt Acked on the commander line, full seq preserved
 }
 
 } // namespace

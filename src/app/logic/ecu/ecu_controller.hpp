@@ -48,8 +48,7 @@ namespace logic::ecu {
  *           both the IPA and NOS valves are of this type.
  * @tparam A A type modelling logic::communication::StreamingAdc (the ADS131M08).
  * @tparam C A type modelling logic::communication::Can (the FDCAN bus to the FCU).
- * @tparam PM A type modelling logic::communication::PowerMonitor (the INA3221 on I2C4; stubbed
- *            on the current PCB until the swapped SDA/SCL lines are fixed).
+ * @tparam PM A type modelling logic::communication::PowerMonitor (the INA3221 on I2C4).
  */
 template <logic::storage::Storage S, logic::actuation::Valve V,
           logic::communication::StreamingAdc A, logic::communication::Can C,
@@ -101,7 +100,7 @@ public:
             control_.onCommand(*frame, now_ms);
         }
 
-        telemetry_.servicePowerMonitor(now_ms);  // advance the non-blocking INA3221 (no-op while stubbed)
+        telemetry_.servicePowerMonitor(now_ms);  // advance the non-blocking INA3221 round-robin
         telemetry_.produceExtended(now_ms);  // ~10 Hz ExtendedSystemState -> data_ext.bin
         telemetry_.drain(now_ms);   // flush full halves to SD + downlink over CAN
     }

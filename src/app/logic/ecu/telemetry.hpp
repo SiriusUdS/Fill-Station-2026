@@ -78,7 +78,7 @@ struct LogBuffer {
  * @tparam V logic::actuation::Valve (read for telemetry; both IPA and NOS).
  * @tparam A logic::communication::StreamingAdc (the ADS131M08).
  * @tparam Comm The ECU Communication layer (frames + sends to the FCU).
- * @tparam PM logic::communication::PowerMonitor (the INA3221 on I2C4; stubbed on the current PCB).
+ * @tparam PM logic::communication::PowerMonitor (the INA3221 on I2C4).
  */
 template <logic::storage::Storage S, logic::actuation::Valve V,
           logic::communication::StreamingAdc A, typename Comm,
@@ -178,15 +178,14 @@ public:
         // Shared prefix: timestamp + base control flags + refused-command diagnostics. The ECU
         // has no per-board flags, so its per-board control-flags byte is 0.
         logic::telemetry::fillExtendedBase(ext.base, now_ms, /*control_flags_board=*/0);
-        ext.power_monitor = power_monitor_.info();  // INA3221 (stubbed on the current PCB)
+        ext.power_monitor = power_monitor_.info();  // INA3221 (I2C4), polled at ~10 Hz
         recorder_.recordExtended(
             std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(&ext), sizeof(ext)));
         sendExtendedCan(ext);   // downlink to the FCU (unbatched), which relays it to the GS
     }
 
     /** @brief Advance the power monitor's non-blocking acquisition one step (off the record-timer
-     *         ISR). A no-op while the driver is stubbed; the latest reading is folded into the
-     *         extended record by produceExtended. */
+     *         ISR). The latest reading is folded into the extended record by produceExtended. */
     void servicePowerMonitor(uint32_t now_ms) { power_monitor_.service(now_ms); }
 
 private:
@@ -278,7 +277,7 @@ private:
     V&    nos_valve_;
     A&    adc_;         // injected streaming ADC; produce() drains its ring
     Comm& comm_;        // injected communication layer; frames + downlinks records
-    PM&   power_monitor_;  // injected INA3221 (stubbed on the current PCB); read into the extended record
+    PM&   power_monitor_;  // injected INA3221 (I2C4); read into the extended record
     detail::LogBuffer log_;            // .axisram in firmware; left uninitialised until init()
     volatile uint32_t  last_adc_ms_      = 0;  // last tick a conversion was drained; gates the silent-ADC filler
     uint32_t           last_extended_ms_ = 0;  // throttles produceExtended() to ~10 Hz

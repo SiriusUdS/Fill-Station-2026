@@ -232,9 +232,21 @@ private:
             case CommandType::SetState:         return handleSetState(cmd, now_ms);
             case CommandType::SetValvePosition: return handleSetValvePosition(cmd, now_ms);
             case CommandType::SetControlFlag:   return handleSetControlFlag(cmd, now_ms);
-            case CommandType::Synchronise:      return handleSynchronise(cmd);
+            case CommandType::Synchronise:      return handleSynchronise(cmd, now_ms);
         }
         return false;  // unknown command type
+    }
+
+    // Ack the GS directly for a command the FCU handled itself (no ECU hop), echoing the GS's
+    // seq so the ground station matches the reply to the command it sent. Every locally-applied
+    // command Acks through here on success; a refused command is NOT Acked (the GS times out and
+    // can read the refusal in the ExtendedSystemState). Bridged (Engine) commands are instead
+    // Acked by the ECU, relayed to the GS by onResponse.
+    void ackGs(uint8_t seq, uint32_t now_ms)
+    {
+        comm_.sendToGs(BoardId::FillingStation, PayloadType::Response,
+                       static_cast<uint8_t>(ResponseType::Ack), /*sourceState=*/0,
+                       /*seq=*/seq, std::span<const uint8_t>{}, now_ms);
     }
 
     /* ---- Ping (Gs->Fcu->Ecu) ------------------------------------------------- */
@@ -275,10 +287,10 @@ private:
     /* ---- SetState (commits through persistent_state) ------------------------- */
 
     // Route by target like handleSetControlFlag: apply to the FCU's own state machine when we
-    // are an addressee (FillingStation / Broadcast), and bridge to the ECU over CAN when the
-    // Engine is addressed (Engine / Broadcast) so both boards' state machines follow the GS
-    // command. The 2-byte SetStateFrame rides verbatim in the bridged CAN payload; the ECU
-    // applies it and Acks, and onResponse relays that Ack to the GS.
+    // are an addressee (FillingStation / Broadcast) and Ack the GS directly, and bridge to the
+    // ECU over CAN when the Engine is addressed (Engine / Broadcast) so both boards' state
+    // machines follow the GS command. The 2-byte SetStateFrame rides verbatim in the bridged CAN
+    // payload; the ECU applies it and Acks, and onResponse relays that Ack to the GS.
     bool handleSetState(const Command& cmd, uint32_t now_ms)
     {
         const auto target = static_cast<BoardId>(cmd.target);
@@ -304,7 +316,11 @@ private:
         if (!requested) {
             return false;  // unknown requested state id
         }
-        return transitionTo(*requested, now_ms);   // validates, routes the action + commit, records refusals
+        if (!transitionTo(*requested, now_ms)) {   // validates, routes the action + commit, records refusals
+            return false;  // refused transition (recorded) — do not Ack a command we did not apply
+        }
+        ackGs(cmd.seq, now_ms);
+        return true;
     }
 
     // The FCU's per-transition action hook. The legal edges are shared with the ECU (see
@@ -336,10 +352,10 @@ private:
     /* ---- SetValvePosition (local actuation and/or bridge to the ECU) --------- */
 
     // Drive a valve, routed by the command's target board (mirrors handleSetControlFlag):
-    //   FillingStation -> actuate our own Fill/Dump valve locally.
+    //   FillingStation -> actuate our own Fill/Dump valve locally and Ack the GS directly.
     //   Engine         -> bridge the command to the ECU over CAN as a reliable command; the
     //                     ECU drives its IPA/NOS valve and Acks, and onResponse relays the Ack.
-    //   Broadcast      -> both: actuate locally AND bridge.
+    //   Broadcast      -> both: actuate locally (Ack as the FCU) AND bridge (the ECU Acks too).
     // The 3-byte SetValvePositionFrame rides verbatim in the payload, so the bridged CAN frame
     // carries the same bytes the GS sent (the valve byte is read as EcuValves on the ECU).
     bool handleSetValvePosition(const Command& cmd, uint32_t now_ms)
@@ -348,7 +364,7 @@ private:
         bool ok = true;
 
         if (target == BoardId::FillingStation || target == BoardId::Broadcast) {
-            ok = actuateLocalValve(cmd) && ok;
+            ok = actuateLocalValve(cmd, now_ms) && ok;
         }
         if (target == BoardId::Engine || target == BoardId::Broadcast) {
             sendReliable(CommandType::SetValvePosition, /*sender_state=*/0,
@@ -358,8 +374,9 @@ private:
         return ok;
     }
 
-    // Actuate the FCU's own Fill/Dump valve from a SetValvePosition frame.
-    bool actuateLocalValve(const Command& cmd)
+    // Actuate the FCU's own Fill/Dump valve from a SetValvePosition frame, then Ack the GS on
+    // success. An invalid action or unknown valve is refused and NOT Acked.
+    bool actuateLocalValve(const Command& cmd, uint32_t now_ms)
     {
         const auto* frame = reinterpret_cast<const SetValvePositionFrame*>(cmd.payload.data());
         if (!isValidAction(frame->action)) {
@@ -376,6 +393,7 @@ private:
             case ValveCommand::Close:        (void)valve->close(); break;
             case ValveCommand::SetOpenedPct: (void)valve->setOpenPercent(static_cast<float>(frame->value)); break;
         }
+        ackGs(cmd.seq, now_ms);
         return true;
     }
 
@@ -446,9 +464,7 @@ private:
             logic::control::fcu_control_flags.set(*flag, frame->value != 0);
         }
 
-        comm_.sendToGs(BoardId::FillingStation, PayloadType::Response,
-                       static_cast<uint8_t>(ResponseType::Ack), /*sourceState=*/0,
-                       /*seq=*/cmd.seq, std::span<const uint8_t>{}, now_ms);
+        ackGs(cmd.seq, now_ms);
         return true;
     }
 
@@ -463,10 +479,12 @@ private:
 
     /* ---- Synchronise --------------------------------------------------------- */
 
-    bool handleSynchronise(const Command& cmd)
+    bool handleSynchronise(const Command& cmd, uint32_t now_ms)
     {
         (void)cmd.timestamp_ms;
-        // TODO: set the clock offset from the network time. Inert for now.
+        // TODO: set the clock offset from the network time. Inert for now, but Ack receipt so the
+        // GS sees the command landed (the FCU handles Synchronise itself; it is not bridged).
+        ackGs(cmd.seq, now_ms);
         return true;
     }
 
