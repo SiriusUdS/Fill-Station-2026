@@ -64,6 +64,17 @@ void halInit(void)
 
 void wireDrivers(void)
 {
+  /* Start the main-loop heartbeat first, so a steady blink confirms the loop is alive
+     through the rest of bring-up (a frozen LED means it stalled). Same three-LED
+     indicator as the FCU: it blinks ONE status LED by control state — green = Safe,
+     yellow = any other non-Error/Abort state, red = Error/Abort. Pin<->colour mapping
+     for this board: green = LED3 (PF9), yellow = LED2 (PF8), red = LED1 (PF7) — swap the
+     pins HERE if the board's physical colours differ. GPIOF clock is enabled by MX_GPIO_Init. */
+  g_led_green.init({.port = LED3_STATE_GPIO_Port, .pin = LED3_STATE_Pin});
+  g_led_yellow.init({.port = LED2_STATE_GPIO_Port, .pin = LED2_STATE_Pin});
+  g_led_red.init({.port = LED1_STATE_GPIO_Port, .pin = LED1_STATE_Pin});
+  g_status_indicator.init();
+
   /* Bring up the backup domain first so the battery-backed Backup SRAM that holds
      the persistent state is clocked + writable before the controller reads it. */
   (void)backup_ram::init();
