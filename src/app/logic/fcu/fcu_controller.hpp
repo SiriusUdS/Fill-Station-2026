@@ -88,12 +88,12 @@ public:
      */
     void init()
     {
-        // Resume the persisted state FIRST. The state-machine state lives in Backup
-        // SRAM; resume it across a reset, and on a cold or corrupt boot commit a fresh
-        // INIT so the blob is valid from here on. It must be valid before Control's
-        // init runs, because Control safes the local valves against it.
-        logic::control::persistent_state.saveState(
-            logic::control::persistent_state.loadState().value_or(logic::control::State::Init));
+        // Resume the persisted state FIRST — it lives in Backup SRAM and must be valid before
+        // Control's init runs, because Control safes the local valves against it. Policy
+        // (resumeBootState): resume ONLY the in-progress states a reset must not silently
+        // restart (Abort / Launch / Ignite); any other saved state, and a cold or corrupt
+        // boot, commits a fresh INIT (advanced to Safe below).
+        (void)logic::control::persistent_state.resumeBootState();
 
         // Control next, so the valves are driven to a safe boot position before the
         // slower link / SD bring-up below — they spend the least time in the unmanaged

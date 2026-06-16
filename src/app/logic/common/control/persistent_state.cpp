@@ -88,4 +88,15 @@ void PersistentState::saveState(State state)
     crc         = computeCrc();  // committed LAST: a torn write fails validation.
 }
 
+State PersistentState::resumeBootState()
+{
+    // loadState() already folds a cold/corrupt boot into nullopt -> Init.
+    const State resumed = loadState().value_or(State::Init);
+    const bool  in_progress =
+        resumed == State::Abort || resumed == State::Launch || resumed == State::Ignite;
+    const State boot = in_progress ? resumed : State::Init;
+    saveState(boot);  // re-commit so the blob is valid (and reset) from here on.
+    return boot;
+}
+
 } // namespace logic::control

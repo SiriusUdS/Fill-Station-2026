@@ -72,10 +72,11 @@ public:
      */
     void init()
     {
-        // Resume the persisted state first (shared mechanism with the FCU). On a cold or
-        // corrupt boot, commit a fresh INIT so the blob is valid from here on.
-        logic::control::persistent_state.saveState(
-            logic::control::persistent_state.loadState().value_or(logic::control::State::Init));
+        // Resume the persisted state first (shared mechanism + policy with the FCU):
+        // resumeBootState() resumes ONLY the in-progress states a reset must not silently
+        // restart (Abort / Launch / Ignite); any other saved state, and a cold or corrupt
+        // boot, commits a fresh INIT (advanced to Safe below).
+        (void)logic::control::persistent_state.resumeBootState();
 
         telemetry_.init();   // zeroes the double buffer and mounts the SD card
         control_.init();

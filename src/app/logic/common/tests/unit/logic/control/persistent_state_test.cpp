@@ -92,6 +92,35 @@ TEST(PersistentState, TornWriteIsRejected)
     EXPECT_FALSE(blob.validateLoadedState());
 }
 
+TEST(PersistentState, ResumeBootStateResumesInProgressStates)
+{
+    // Abort / Launch / Ignite are the only states a reset may resume in place.
+    for (const State s : {State::Abort, State::Launch, State::Ignite}) {
+        PersistentState blob = makeBlob(s);
+        EXPECT_EQ(blob.resumeBootState(), s) << "state " << static_cast<int>(s);
+        EXPECT_EQ(blob.loadState(), s);  // re-committed, still valid
+    }
+}
+
+TEST(PersistentState, ResumeBootStateResetsOtherStatesToInit)
+{
+    // Every non-in-progress saved state boots fresh as Init (the caller advances it to Safe).
+    for (const State s : {State::Init, State::Safe, State::Unsafe, State::Error, State::Test}) {
+        PersistentState blob = makeBlob(s);
+        EXPECT_EQ(blob.resumeBootState(), State::Init) << "state " << static_cast<int>(s);
+        EXPECT_EQ(blob.loadState(), State::Init);
+    }
+}
+
+TEST(PersistentState, ResumeBootStateOnColdBootCommitsValidInit)
+{
+    PersistentState blob{};  // zero-initialised => invalid / cold
+    ASSERT_FALSE(blob.validateLoadedState());
+    EXPECT_EQ(blob.resumeBootState(), State::Init);
+    EXPECT_TRUE(blob.validateLoadedState());  // left a valid blob behind
+    EXPECT_EQ(blob.loadState(), State::Init);
+}
+
 TEST(PersistentState, SaveStateZeroesReservedPadding)
 {
     PersistentState blob{};

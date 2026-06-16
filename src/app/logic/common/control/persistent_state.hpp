@@ -74,6 +74,17 @@ struct PersistentState {
      */
     void saveState(State state);
 
+    /**
+     * @brief  Apply the boot resume policy and commit the result; returns the committed state.
+     *
+     * Resumes the persisted state ONLY for the in-progress states where a reset must not
+     * silently restart the sequence — Abort, Launch, Ignite. Every other saved state, and a
+     * cold or corrupt boot (invalid blob), is treated as a fresh boot and committed as Init.
+     * Always leaves a valid blob behind (magic + CRC rewritten) so the next reset can trust
+     * it; the caller advances a committed Init to Safe once bring-up is done.
+     */
+    [[nodiscard]] State resumeBootState();
+
   private:
     /** @brief CRC-32 over the payload (every byte preceding `crc`). */
     [[nodiscard]] uint32_t computeCrc() const;
