@@ -4,11 +4,11 @@
  * Control is the receive side: parse an inbound datagram into a Command, gate it,
  * dispatch, and run the action — committing a state change, actuating a local
  * valve, or forwarding to the ECU through the communication layer. These tests
- * drive it at its public boundary (onDatagram / onResponse / watchdog) over the real
+ * drive it at its public boundary (onDatagram / onResponse) over the real
  * Communication layer wired to the FakeBus, and assert the effects: persisted
  * state, valve calls, and what was framed onto CAN / UDP.
  *
- * The full per-state transition matrix and the watchdog timing are exercised
+ * The full per-state transition matrix is exercised
  * end-to-end in fcu_controller_test; here we cover the command-dispatch semantics
  * the folded-in command_handlers module used to own (validation, ECU forwarding,
  * the pong relay).
@@ -43,10 +43,6 @@ namespace command = logic::communication::command;
 using logic::control::State;
 
 namespace {
-
-/* The control watchdog window (Control::detail::RX_WATCHDOG_MS) — an internal of
-   Control, mirrored here so a test can read at exactly the abort threshold. */
-constexpr uint32_t RX_WATCHDOG_MS = 500;
 
 /* Build a UDP datagram: a 12-byte EthernetHeader (a command addressed to `target`)
    followed by `body`. */
@@ -469,24 +465,6 @@ TEST_F(ControlTest, AckFromEcuClearsThePendingBridgedCommand)
     now_ms_ += logic::fcu::detail::COMMAND_TIMEOUT_MS * 4;
     control_.servicePending(now_ms_);
     EXPECT_EQ(bus().can_tx.size(), 1u);   // cleared by the Ack — never resent
-}
-
-/* ---- Watchdog (GS-link liveness lives in Control) ------------------------ */
-
-TEST_F(ControlTest, WatchdogAbortsArmedStateAfterSilence)
-{
-    setCurrent(State::Unsafe);
-    deliver(makeSetState(State::Unsafe));        // rejected transition, but refreshes last_rx
-    control_.watchdog(now_ms_ + RX_WATCHDOG_MS);
-    EXPECT_EQ(current(), State::Abort);
-}
-
-TEST_F(ControlTest, TrafficKeepsArmedStateAlive)
-{
-    setCurrent(State::Unsafe);
-    deliver(makeSetState(State::Unsafe));
-    control_.watchdog(now_ms_);                  // no silence elapsed
-    EXPECT_EQ(current(), State::Unsafe);
 }
 
 } // namespace

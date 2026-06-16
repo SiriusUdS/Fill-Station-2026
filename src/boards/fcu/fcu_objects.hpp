@@ -19,7 +19,7 @@
 #include "gpio/digital_output.hpp"
 #include "gpio/digital_input.hpp"
 #include "indication/led.hpp"
-#include "indication/running_indicator.hpp"
+#include "indication/status_indicator.hpp"
 #include "gpio_ematch.hpp"
 #include "gpio_solenoid.hpp"
 #include "fcu_controller.hpp"
@@ -35,9 +35,11 @@ namespace valve      = platform::actuation::valve;
 namespace indication = platform::indication;
 namespace gpio       = platform::gpio;
 
-/* The main-loop liveness indicator, blinking a status LED straight from the
- * for(;;) loop (a frozen LED means the loop stalled). */
-using RunningIndicator = logic::indication::RunningIndicator<indication::Led>;
+/* The main-loop liveness + state indicator: a heartbeat blinked straight from the
+ * for(;;) loop on the LED whose colour matches the control state (green = Safe,
+ * yellow = any other non-Error/Abort state, red = Error/Abort). A frozen LED means
+ * the loop stalled. */
+using StatusIndicator = logic::indication::StatusIndicator<indication::Led>;
 
 /* The FCU e-match: firing output + present-detect input + continuity LED, all plain
  * GPIO behind the logic seams (EMATCH_STATE / EMATCH_DET / EMATCH_CONT on GPIOD). */
@@ -64,8 +66,13 @@ extern can::Can               g_can;
 extern platform::storage::SdCard g_card_fast;  // data_fast.bin (raw 2 kHz SystemState)
 extern platform::storage::SdCard g_card_slow;  // data_slow.bin (125 Hz averaged SystemState)
 extern platform::storage::SdCard g_card_ext;   // data_ext.bin  (ExtendedSystemState)
-extern indication::Led        g_run_led;
-extern RunningIndicator       g_running_indicator;
+/* The three status LEDs (LED1/2/3 on GPIOF) + the indicator blinked over them. Colours
+ * are a best guess (green = LED1, yellow = LED2, red = LED3) — swap the pins in
+ * wireDrivers() if the board's physical colours differ. */
+extern indication::Led        g_led_green;
+extern indication::Led        g_led_yellow;
+extern indication::Led        g_led_red;
+extern StatusIndicator        g_status_indicator;
 
 /* The e-match GPIO lines (EMATCH_STATE / EMATCH_DET / EMATCH_CONT on GPIOD) and the
  * GpioEmatch composed over them. Bound to their pins by board::wireDrivers(). */

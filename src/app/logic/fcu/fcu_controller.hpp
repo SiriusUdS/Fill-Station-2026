@@ -110,9 +110,9 @@ public:
     }
 
     /**
-     * @brief  Advance the FCU one step: drain CAN and UDP and route each frame, flush
-     *         full telemetry halves, and service the GS-link watchdog. Record
-     *         production is on its own timer (produceRecord), not here.
+     * @brief  Advance the FCU one step: drain CAN and UDP and route each frame, and
+     *         flush full telemetry halves. Record production is on its own timer
+     *         (produceRecord), not here.
      * @param  now_ms  Current millisecond tick (e.g. HAL_GetTick()).
      */
     void tick(uint32_t now_ms)
@@ -146,7 +146,6 @@ public:
         telemetry_.produceExtended(now_ms);  // ~10 Hz ExtendedSystemState -> GS + data_ext.bin
         telemetry_.drain(now_ms);        // flush full halves to SD + the GS
         control_.servicePending(now_ms); // resend / time out the in-flight reliable command
-        control_.watchdog(now_ms);       // GS-link abort watchdog
     }
 
     /**

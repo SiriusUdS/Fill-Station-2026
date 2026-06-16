@@ -74,12 +74,16 @@ void halInit(void)
 
 void wireDrivers(void)
 {
-  /* Start the main-loop heartbeat first, so a steady blink confirms the loop is
-     alive through the rest of bring-up (a frozen LED means it stalled). Pin is
-     configurable HERE: PF1 (the board's LED1) for now — change the port/pin to
-     relocate it. The GPIOF clock is already enabled by MX_GPIO_Init. */
-  g_run_led.init({.port = GPIOF, .pin = GPIO_PIN_1});
-  g_running_indicator.init();
+  /* Start the main-loop heartbeat first, so a steady blink confirms the loop is alive
+     through the rest of bring-up (a frozen LED means it stalled). The indicator blinks
+     ONE of the three status LEDs by control state: green = Safe, yellow = any other
+     non-Error/Abort state, red = Error/Abort. The colour<->pin mapping is a best guess
+     (LED1/2/3 = PF1/2/3 = green/yellow/red) — swap the pins HERE if the board's physical
+     colours differ. The GPIOF clock is already enabled by MX_GPIO_Init. */
+  g_led_green.init({.port = LED1_STATE_GPIO_Port, .pin = LED1_STATE_Pin});
+  g_led_yellow.init({.port = LED2_STATE_GPIO_Port, .pin = LED2_STATE_Pin});
+  g_led_red.init({.port = LED3_STATE_GPIO_Port, .pin = LED3_STATE_Pin});
+  g_status_indicator.init();
 
   /* Bring up the e-match (igniter) lines on GPIOD (clock enabled by MX_GPIO_Init):
        - EMATCH_STATE (PD12) firing output  — driven high ONLY during the Ignite state

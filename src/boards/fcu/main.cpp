@@ -15,6 +15,7 @@
 
 #include "board.hpp"         // board::halInit / board::wireDrivers
 #include "fcu_objects.hpp"   // the FCU object graph (declared extern, defined here)
+#include "control/persistent_state.hpp"   // fill_state — colours the status indicator
 
 /* The FCU's application object graph. The SD log files (g_card_fast/slow/ext) and the
  * controller are pinned in D1 AXI-SRAM: the controller's telemetry double buffer is
@@ -31,10 +32,13 @@ ina3221::Ina3221      g_power_monitor;
 eth::Ethernet         g_eth;
 can::Can              g_can;
 
-/* Main-loop heartbeat: g_running_indicator blinks g_run_led from the for(;;) loop
- * below. Bound to its pin by board::wireDrivers(). */
-indication::Led      g_run_led;
-RunningIndicator     g_running_indicator{g_run_led};
+/* Main-loop heartbeat + state indicator: g_status_indicator blinks one of the three
+ * status LEDs (by control state) from the for(;;) loop below. Bound to their pins by
+ * board::wireDrivers(). */
+indication::Led      g_led_green;
+indication::Led      g_led_yellow;
+indication::Led      g_led_red;
+StatusIndicator      g_status_indicator{g_led_green, g_led_yellow, g_led_red};
 
 /* The e-match: three GPIO lines + the GpioEmatch composed over them. Constructed before
  * g_controller (which holds a reference to it via Control/Telemetry). Bound to their pins
@@ -73,7 +77,9 @@ int main(void)
   for (;;)
   {
     const uint32_t now = HAL_GetTick();
-    fcu_app::g_running_indicator.tick(now);  // main-loop liveness blink (steady = loop alive)
+    // Main-loop liveness blink on the LED whose colour matches the current state
+    // (steady blink = loop alive; the colour shows Safe / armed / fault).
+    fcu_app::g_status_indicator.tick(now, logic::control::persistent_state.fill_state);
     fcu_app::g_fill_valve.tick(now);  // advance each valve's open/close + limit-switch state machine
     fcu_app::g_dump_valve.tick(now);
     fcu_app::g_controller.tick(now);  // also services the INA3221 + folds it into the extended record

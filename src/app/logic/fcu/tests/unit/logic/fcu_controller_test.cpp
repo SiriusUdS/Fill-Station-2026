@@ -554,36 +554,6 @@ TEST_F(FcuControllerTest, RefusedTransitionAppearsInExtendedSystemState)
     EXPECT_EQ(ext.base.refused_command_info.set_state_refused_count, 1u);   // one refusal so far
 }
 
-/* ---- Receive watchdog ---------------------------------------------------- */
-
-TEST_F(FcuControllerTest, WatchdogAbortsUnsafeAfterSilence)
-{
-    reachSafe();
-    requestState(logic::control::State::Unsafe);  // last_rx updated at this tick
-    ASSERT_EQ(currentState(), logic::control::State::Unsafe);
-
-    stepTo(now_ms_ + 500);  // 500 ms with no inbound datagram
-    EXPECT_EQ(currentState(), logic::control::State::Abort);
-}
-
-TEST_F(FcuControllerTest, WatchdogDoesNotAbortSafe)
-{
-    reachSafe();
-    stepTo(now_ms_ + 5000);  // long silence, but SAFE has no watchdog
-    EXPECT_EQ(currentState(), logic::control::State::Safe);
-}
-
-TEST_F(FcuControllerTest, TrafficKeepsUnsafeAlive)
-{
-    reachSafe();
-    requestState(logic::control::State::Unsafe);
-    /* Keep feeding (irrelevant) datagrams so last_rx stays fresh. */
-    for (int i = 0; i < 600; ++i) {
-        requestState(logic::control::State::Unsafe);  // self-transition keeps rx alive
-    }
-    EXPECT_EQ(currentState(), logic::control::State::Unsafe);
-}
-
 /* ---- CAN ------------------------------------------------------------------ *
  * The FCU receives only status/telemetry from the ECU over CAN — never commands
  * (those arrive over Ethernet) — so it never answers on the bus; it just drains

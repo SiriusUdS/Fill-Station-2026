@@ -42,3 +42,11 @@ add_executable(running_indicator_test
 target_include_directories(running_indicator_test PRIVATE ${TEST_SUPPORT} ${LOGIC_COMMON_INCLUDE_DIRS})
 target_link_libraries(running_indicator_test PRIVATE GTest::gtest_main)
 gtest_discover_tests(running_indicator_test PROPERTIES LABELS "unit")
+
+# Header-only state-coloured main-loop indicator (DigitalOut + State -> StatusIndicator).
+add_executable(status_indicator_test
+    unit/logic/indication/status_indicator_test.cpp
+)
+target_include_directories(status_indicator_test PRIVATE ${TEST_SUPPORT} ${LOGIC_COMMON_INCLUDE_DIRS})
+target_link_libraries(status_indicator_test PRIVATE GTest::gtest_main)
+gtest_discover_tests(status_indicator_test PROPERTIES LABELS "unit")

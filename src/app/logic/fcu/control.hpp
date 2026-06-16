@@ -45,9 +45,6 @@ namespace logic::fcu {
 
 namespace detail {
 
-/* Abort if the ground-station link goes quiet for this long while armed. */
-inline constexpr uint32_t RX_WATCHDOG_MS = 500;
-
 /* A reliable FCU->ECU command (CAN auto-retransmission is off) is resent if no matching
    response arrives within COMMAND_TIMEOUT_MS, up to MAX_COMMAND_RETRIES times; after that
    it is abandoned and the FCU<->ECU link is treated as down. */
@@ -83,7 +80,6 @@ public:
      * it unconditionally safes, matching the previous board-level behaviour. */
     void init()
     {
-        last_rx_ms_ = 0;
         (void)fill_valve_.close();
         (void)dump_valve_.close();
         ematch_.deenergise(0);  // boot-safe the firing line through the logic seam (like the valves); t=0
@@ -114,13 +110,10 @@ public:
 
     /**
      * @brief Handle one inbound ground-station datagram: parse it into a Command,
-     *        check it is addressed to us, then gate + dispatch. Any received datagram
-     *        feeds the GS-link watchdog (the GS is talking to us).
+     *        check it is addressed to us, then gate + dispatch.
      */
     void onDatagram(std::span<const uint8_t> payload, uint32_t now_ms)
     {
-        last_rx_ms_ = now_ms;
-
         const auto cmd = logic::communication::command::fromEthernet(payload);
         if (!cmd) {
             return;  // not a command / malformed / unknown id
@@ -173,22 +166,11 @@ public:
         }
     }
 
-    /** @brief Abort if the ground-station link has gone quiet while armed. */
-    void watchdog(uint32_t now_ms)
-    {
-        const auto state = logic::control::persistent_state.fill_state;
-        if (state == logic::control::State::Unsafe || state == logic::control::State::Ignite) {
-            if ((now_ms - last_rx_ms_) >= detail::RX_WATCHDOG_MS) {
-                transitionTo(logic::control::State::Abort, now_ms);   // routed forced safety abort
-            }
-        }
-    }
-
     /** @brief THE single point every FCU state change passes through: reject the change if the
      *         shared transition table does not permit it from the current state; otherwise run
      *         the board's per-transition action (onTransition), commit the new state, and report
      *         acceptance. Returns true if applied, false if refused. Every path uses this —
-     *         commanded SetState, the boot Init -> Safe, the watchdog Abort. now_ms timestamps
+     *         commanded SetState, the boot Init -> Safe. now_ms timestamps
      *         the per-transition side effects (e.g. the e-match energise/deenergise edges). */
     bool transitionTo(logic::control::State to, uint32_t now_ms)
     {
@@ -508,7 +490,6 @@ private:
     Comm&    comm_;         // injected communication layer; forwards to ECU / GS
     EM&      ematch_;       // injected e-match: energised in Ignite, polled each tick for the cont LED
     SOL&     solenoid_;     // injected solenoid valve: open only while its flag is set AND in Unsafe
-    uint32_t last_rx_ms_ = 0;  // last tick a datagram arrived; feeds the GS-link watchdog
     Pending  pending_{};       // the in-flight relayed GS->ECU command (Ping for now)
 };
 
