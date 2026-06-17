@@ -461,7 +461,13 @@ TEST_F(EcuControllerTest, SlowRecordingPersistsAveragedSystemStateToDataSlow)
 {
     step();  // Init -> Safe; FastRecording stays off -> slow (125 Hz averaged) -> data_slow.bin
     const AdcInfo sample{};
-    for (int i = 0; i < 4000 && storage_slow_.writes.empty(); ++i) {
+    // One data_slow block fills after ~(payload_cap / record) averaged records, and each averaged
+    // record is SLOW_WINDOW fast samples — so scale the pump bound to the block size (a larger
+    // SD_LOG_BLOCK_BYTES needs proportionally more records to flush one block). 3x margin.
+    const int MAX_PUMP_RECORDS = static_cast<int>(
+        (logic::telemetry::SD_BLOCK_PAYLOAD_CAP / sizeof(EcuSystemState) + 1)
+        * logic::telemetry::detail::SLOW_WINDOW * 3);
+    for (int i = 0; i < MAX_PUMP_RECORDS && storage_slow_.writes.empty(); ++i) {
         adc_.push(sample);
         controller_.produceRecord(++now_ms_);
         step();
