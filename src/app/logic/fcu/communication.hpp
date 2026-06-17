@@ -129,8 +129,9 @@ public:
      * GS's command sequence echoed back on a relayed response (0 for telemetry). The
      * caller owns their meaning; this layer only routes and frames.
      */
-    void sendToGs(BoardId sourceId, PayloadType payloadType, uint8_t payloadId,
-                  uint8_t sourceState, uint8_t seq, std::span<const uint8_t> payload, uint32_t now_ms)
+    std::optional<logic::communication::NetError>
+    sendToGs(BoardId sourceId, PayloadType payloadType, uint8_t payloadId,
+             uint8_t sourceState, uint8_t seq, std::span<const uint8_t> payload, uint32_t now_ms)
     {
         static std::array<uint8_t, detail::UDP_MAX_PAYLOAD_BYTES> packet;
 
@@ -161,7 +162,13 @@ public:
         const uint32_t crc = logic::data_integrity::crc32(packet.data(), sizeof(header) + chunk);
         std::memcpy(packet.data() + sizeof(header) + chunk, &crc, sizeof(crc));
 
-        (void)eth_.send(dest, std::span<const uint8_t>(packet.data(), sizeof(header) + chunk + sizeof(crc)));
+        // Return the link result (nullopt = sent) so the telemetry drain can honour backpressure:
+        // when the Ethernet TX path cannot accept the datagram (its DMA descriptor ring is full of
+        // not-yet-transmitted frames) send() reports an error, and the drain then holds its cursor
+        // and retries this datagram next tick rather than dropping it. NOTE: this is only safe once
+        // the platform send() stops reusing a single shared TX buffer for frames that may still be
+        // in flight (see ethernet.cpp) — until then >1 queued datagram can corrupt each other.
+        return eth_.send(dest, std::span<const uint8_t>(packet.data(), sizeof(header) + chunk + sizeof(crc)));
     }
 
     /**

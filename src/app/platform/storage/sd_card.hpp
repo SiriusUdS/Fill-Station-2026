@@ -101,14 +101,15 @@ public:
     StorageInfo info() const { return info_; }
 
     /** @brief The board-wide async write engine's health (dropped-block count + sticky DMA
-     *         error). Read from the single shared SdWriteEngine, so every file on the card
-     *         reports the same value; the recorder surfaces it once on the extended record. */
+     *         error + physical card-present). Read from the single shared SdWriteEngine, so every
+     *         file on the card reports the same value; the recorder surfaces it once on the
+     *         extended record. */
     SdWriteEngineInfo engineInfo() const
     {
         const SdWriteEngine& engine = sd_write_engine();
         return SdWriteEngineInfo{ engine.overrun_count(),
                                   static_cast<uint8_t>(engine.errored() ? 1u : 0u),
-                                  /*reserved=*/0u };
+                                  static_cast<uint8_t>(engine.cardDetected() ? 1u : 0u) };
     }
 
 private:

@@ -23,47 +23,39 @@ Effective rate ≈ 192/292 × 2000 ≈ **~1320–1400 states/s** — matches the
 
 **Not** caused by the physical card being slower; the block-size bump rode in with the swap.
 
-## Chosen fix: pace the per-tick downlink burst (no buffer decoupling, zero extra copies)
+## STATUS: IMPLEMENTED (backpressure + buffer expansion, not count-pacing)
 
-Bound how many records `drain()` hands to the wire per main-loop iteration, carrying a
-byte-offset cursor into the tail slot across ticks. The loop runs thousands of times/sec, so a
-small per-tick bound keeps up with the 2 kHz producer while never exceeding the ring depth in
-one tick. Rejected alternatives: enlarging `TX_RING_LO_FRAMES` (papers over the burst, costs
-~23 KB AXI-SRAM, still fragile to future block bumps); shrinking the telemetry slot below the SD
-block (forces a separate SD accumulator — works, but more moving parts than pacing).
+The originally-planned "fixed records-per-tick cap" was discarded during implementation: the main
+loop free-spins (no delay), so a fixed cap just dumps the same ~292-record slot across a handful of
+back-to-back iterations and overflows the ring all the same. The as-built fix is **honor
+backpressure** + **expand the buffers**, which are complementary (and crucially NOT a throttle —
+they prevent drops, never send slower than the link can carry):
 
-memcpy cost of pacing is **zero** — it reorders *when* the existing per-record copies happen, not
-how many. (Even a true size-decouple would add only ~112 KB/s of copies vs a ~50 MB/s budget;
-irrelevant. The constraint is the 2 Mbit CAN wire, not the CPU.)
+- **Backpressure (no-drop safety net).** `drain()` advances a byte cursor into the tail slot and
+  sends records until the link *rejects* one (CAN TX ring full / Ethernet TX busy), then yields,
+  holding the cursor so the next tick resumes the same record. Nothing is dropped; the cursor only
+  advances on accepted frames. A separate `tail_recorded_` flag SD-logs each slot exactly once,
+  independent of downlink pacing.
+- **Buffer expansion (raise the burst ceiling so backpressure rarely engages).** ECU CAN TX LO
+  ring `TX_RING_LO_FRAMES` 192 → **320** (holds one whole 16 KB slot's ~292 records + margin), so a
+  drain burst flushes in one go at full rate. Expand further / expand the FCU CAN-RX + ETH paths if
+  a deeper backlog must ride without pacing — the buffers are the knob, throttling is off the table.
 
-## Design
+The only hard ceiling is raw wire bandwidth (~3400 fps for 64 B FD frames at the 1/2 Mbit timing;
+2000/s ≈ 60 % load — verify on the bench). memcpy cost is irrelevant (telemetry < 1 MB/s vs a
+~50 MB/s budget); backpressure adds zero copies.
 
-The slot stays one buffer with two readers. SD recording is unchanged (whole-slot, once). Only
-the downlink is paced.
+### As-built `drain(now)` (both boards)
+1. If `!ready[tail]` → return (FCU loops over ready slots).
+2. If `!tail_recorded_` → `recorder_.recordSystemState(...)` once; set `tail_recorded_`. (Footer
+   stamping writes `[used, end)`; downlinked records are `[0, used)`, so order is independent.)
+3. Send whole records from `downlink_off_` until the link rejects one → return (cursor held); else
+   advance the cursor.
+4. Slot fully sent → `ready[tail] = false`, advance `tail`, reset `downlink_off_` + `tail_recorded_`.
 
-Per drain ring, add a `downlink_off_` cursor (bytes already downlinked from the tail slot) and a
-per-tick record bound. `drain(now)` becomes:
-
-1. If `!ready[tail]` → return.
-2. If `downlink_off_ == 0` (first touch of this slot) → `recorder_.recordSystemState(...)` once.
-   (Footer stamping writes `[used, end)`; the downlinked records are `[0, used)`, so order is
-   independent — SD-record first or after, doesn't matter.)
-3. Send up to `MAX_DOWNLINK_RECORDS_PER_TICK` whole records starting at `downlink_off_`; advance
-   the cursor.
-4. When the cursor reaches `used` (no whole record left) → `ready[tail] = false`,
-   advance `tail`, reset `downlink_off_ = 0`.
-
-This replaces the current `MAX_DRAIN_SLOTS_PER_TICK = 1` slot-granularity bound with a
-record-granularity bound (strictly more responsive — also subsumes the "yield to command
-handling" rationale in that comment).
-
-### Picking `MAX_DOWNLINK_RECORDS_PER_TICK`
-- Upper bound: must not overflow the ring in one tick → comfortably `< TX_RING_LO_FRAMES` (192).
-- Lower bound: must keep up with 2 kHz → `N × min_loop_rate ≥ 2000`. The loop runs well above
-  1 kHz, so even N=16 keeps up; bigger N just drains backlog faster after a stall.
-- Proposal: **N = 64** (≈ ⅓ of the ring; ample headroom both ways). Tune on the bench.
-- Sanity: average downlink can't exceed the 2 kHz produce rate anyway — pacing only kills the
-  *burst*, it doesn't throttle steady-state.
+The ECU threads `comm_.sendFrame` → `optional<CanError>` and `sendRecordCan` → bool; the FCU threads
+`comm_.sendToGs` → `optional<NetError>` and `downlink(..., start_off)` → reached offset. Both rings
+on the FCU (`log_` via `drain`, `ecu_log_` via `drainRelayedEcu`) carry their own cursor.
 
 ## ECU changes
 

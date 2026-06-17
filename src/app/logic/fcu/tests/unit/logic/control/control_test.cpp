@@ -26,6 +26,7 @@
 #include "system/valves/fcu.hpp"                              // FcuValves
 #include "control/persistent_state.hpp"
 #include "control/state_timing.hpp"                           // logic::control::state_entered_ms
+#include "control/last_ping.hpp"                               // logic::control::last_ping_ms
 #include "control/refused_valve.hpp"                          // logic::control::last_refused_valve (+ count)
 #include "control/control_flags.hpp"                          // logic::control::base_control_flags / fcu_control_flags
 #include "system/state.hpp"
@@ -83,9 +84,9 @@ std::vector<uint8_t> makeSetValve(FcuValves valve, ValveCommand action, uint8_t 
                        reinterpret_cast<const uint8_t*>(&body), sizeof(body), seq);
 }
 
-std::vector<uint8_t> makePing(uint8_t seq = 0)
+std::vector<uint8_t> makePing(uint8_t seq = 0, BoardId target = BoardId::FillingStation)
 {
-    return makeCommand(command::CommandType::Ping, BoardId::FillingStation, nullptr, 0, seq);
+    return makeCommand(command::CommandType::Ping, target, nullptr, 0, seq);
 }
 
 std::vector<uint8_t> makeSetControlFlag(ControlFlagBase flag, uint8_t value, BoardId target,
@@ -131,6 +132,7 @@ protected:
             {logic::control::REFUSED_VALVE_NONE, 0, 0, State::Init};
         logic::control::refused_valve_count = 0;
         logic::control::state_entered_ms = 0;   // reset the dwell clock between tests
+        logic::control::last_ping_ms = 0;       // reset the heartbeat clock between tests
         comm_.init();
         control_.init(0);    // cold blob (Init) -> safes actuators + enters Safe
         clearValveCalls();   // discard the boot-safing close() so command tests start clean
@@ -166,29 +168,86 @@ protected:
         EXPECT_EQ(sent.dest.ipv4, logic::fcu::detail::COMMANDER_IPV4);   // commander line, not telemetry
         EXPECT_EQ(sent.dest.port, logic::fcu::detail::COMMANDER_PORT);
     }
+
+    // Assert exactly one datagram went out and it is the FCU's OWN Pong: a Response (routed to the
+    // commander endpoint) tagged Pong, from FillingStation, echoing `seq` and stamping `state` — so
+    // the heartbeat round-trip reports both liveness and the FCU's state.
+    void expectPongToGs(uint8_t seq, State state)
+    {
+        ASSERT_EQ(bus().udp_tx.size(), 1u);
+        const auto& sent = bus().udp_tx.front();
+        EthernetHeader pong;
+        std::memcpy(&pong, sent.payload.data(), sizeof(EthernetHeader));
+        EXPECT_EQ(static_cast<BoardId>(pong.sender_id), BoardId::FillingStation);  // the FCU's own reply
+        EXPECT_EQ(static_cast<PayloadType>(pong.payload_type), PayloadType::Response);
+        EXPECT_EQ(static_cast<ResponseType>(pong.payload_id), ResponseType::Pong);
+        EXPECT_EQ(pong.seq, seq);                                  // echoes the GS seq
+        EXPECT_EQ(static_cast<State>(pong.sender_state), state);   // heartbeat carries our state
+        EXPECT_EQ(sent.dest.ipv4, logic::fcu::detail::COMMANDER_IPV4);   // commander line, not telemetry
+        EXPECT_EQ(sent.dest.port, logic::fcu::detail::COMMANDER_PORT);
+    }
 };
 
-/* ---- Ping (Gs->Fcu->Ecu) ------------------------------------------------- */
+/* ---- Ping (the network heartbeat — always broadcast) --------------------- */
 
-TEST_F(ControlTest, PingIsForwardedToEcuOverCan)
+// The heartbeat is a Broadcast Ping: from one packet the FCU answers for ITSELF (a Pong straight to
+// the GS) AND bridges the ping to the ECU, so the GS gets a Pong from each board. Both legs carry
+// the GS's seq; the local Pong is stamped with the FCU's current state.
+TEST_F(ControlTest, BroadcastPingPongsLocallyAndForwardsToEcu)
 {
-    setCurrent(State::Safe);
-    deliver(makePing());
+    setCurrent(State::Unsafe);
+    deliver(makePing(/*seq=*/2, BoardId::Broadcast));
 
-    ASSERT_EQ(bus().can_tx.size(), 1u);
+    expectPongToGs(/*seq=*/2, State::Unsafe);  // (a) the FCU's own Pong, stamped with our state
+    ASSERT_EQ(bus().can_tx.size(), 1u);        // (b) and the bridged ping to the ECU
     CanHeader header;
     header.code = bus().can_tx.front().id;
     EXPECT_EQ(static_cast<BoardId>(header.frame.target_id), BoardId::Engine);
     EXPECT_EQ(static_cast<PayloadType>(header.frame.payload_type), PayloadType::Command);
     EXPECT_EQ(static_cast<command::CommandType>(header.frame.payload_id), command::CommandType::Ping);
-    EXPECT_EQ(bus().can_tx.front().length, 0);
+    EXPECT_EQ(header.frame.seq, 2u);           // GS seq propagated onto the CAN hop
 }
 
-TEST_F(ControlTest, PropagatesGsSeqOntoTheCanPingAndBackOnTheRelayedPong)
+// The ECU bridge is FIRE-AND-FORGET: the ping never takes the reliable pending_ slot, so it is never
+// resent (a missed heartbeat is self-healing — the GS pings again next second).
+TEST_F(ControlTest, BroadcastPingBridgeIsFireAndForget)
 {
     setCurrent(State::Safe);
-    deliver(makePing(/*seq=*/9));   // the GS stamped seq 9
+    deliver(makePing(/*seq=*/0, BoardId::Broadcast));
+    ASSERT_EQ(bus().can_tx.size(), 1u);
 
+    now_ms_ += logic::fcu::detail::COMMAND_TIMEOUT_MS * 4;
+    control_.servicePending(now_ms_);
+    EXPECT_EQ(bus().can_tx.size(), 1u);   // never resent
+}
+
+// A received Ping stamps the heartbeat liveness clock — telemetry publishes seconds_since_last_ping
+// (in the ExtendedSystemStateBase) from it.
+TEST_F(ControlTest, ReceivedPingStampsLastPingClock)
+{
+    setCurrent(State::Safe);
+    deliver(makePing(/*seq=*/1, BoardId::Broadcast));
+    EXPECT_EQ(logic::control::last_ping_ms, now_ms_);   // stamped with the receive time
+}
+
+// The heartbeat must be answered in EVERY state (Ping is never state-gated).
+TEST_F(ControlTest, PingIsAnsweredInEveryState)
+{
+    for (const State s : {State::Init, State::Safe, State::Unsafe, State::Abort, State::Error,
+                          State::Ignite, State::Launch, State::Test}) {
+        bus().reset();
+        setCurrent(s);
+        deliver(makePing(/*seq=*/1, BoardId::Broadcast));
+        expectPongToGs(/*seq=*/1, s);   // the FCU's Pong, stamped with the state we were in
+    }
+}
+
+TEST_F(ControlTest, PropagatesGsSeqThroughTheBridgedPingAndRelayedPong)
+{
+    setCurrent(State::Safe);
+    deliver(makePing(/*seq=*/9, BoardId::Broadcast));   // GS stamped seq 9
+
+    expectPongToGs(/*seq=*/9, State::Safe);   // the FCU's own Pong echoes seq 9
     // Forwarded to the ECU carrying the GS's seq (4-bit on CAN).
     ASSERT_EQ(bus().can_tx.size(), 1u);
     CanHeader fwd;
@@ -196,6 +255,7 @@ TEST_F(ControlTest, PropagatesGsSeqOntoTheCanPingAndBackOnTheRelayedPong)
     EXPECT_EQ(fwd.frame.seq, 9u);
 
     // The ECU's Pong (echoing seq 9) is relayed to the GS still carrying seq 9.
+    bus().udp_tx.clear();   // isolate the relayed pong from the FCU's own pong above
     control_.onResponse(static_cast<uint8_t>(ResponseType::Pong), /*seq=*/9, ++now_ms_);
     ASSERT_EQ(bus().udp_tx.size(), 1u);
     EthernetHeader relayed;
@@ -203,15 +263,17 @@ TEST_F(ControlTest, PropagatesGsSeqOntoTheCanPingAndBackOnTheRelayedPong)
     EXPECT_EQ(relayed.seq, 9u);
 }
 
-/* ---- Reliable command (retry until the response echoes the seq) ----------- */
+/* ---- Reliable bridged command (retry until the response echoes the seq) ---- *
+ * Ping is fire-and-forget now, so the reliable retry machinery is exercised through a bridged
+ * SetState (which still takes the single pending_ slot). */
 
-TEST_F(ControlTest, ReliablePingRetransmitsUntilGivingUp)
+TEST_F(ControlTest, ReliableBridgedCommandRetransmitsUntilGivingUp)
 {
     setCurrent(State::Safe);
-    deliver(makePing());                          // original send
+    deliver(makeSetState(State::Unsafe, BoardId::Engine, /*seq=*/3));   // bridged reliable to the ECU
     ASSERT_EQ(bus().can_tx.size(), 1u);
 
-    // No Pong arrives: each elapsed timeout triggers one resend, up to MAX_COMMAND_RETRIES.
+    // No Ack arrives: each elapsed timeout triggers one resend, up to MAX_COMMAND_RETRIES.
     for (uint8_t i = 1; i <= logic::fcu::detail::MAX_COMMAND_RETRIES; ++i) {
         now_ms_ += logic::fcu::detail::COMMAND_TIMEOUT_MS;
         control_.servicePending(now_ms_);
@@ -223,28 +285,12 @@ TEST_F(ControlTest, ReliablePingRetransmitsUntilGivingUp)
     EXPECT_EQ(bus().can_tx.size(), 1u + logic::fcu::detail::MAX_COMMAND_RETRIES);
 }
 
-TEST_F(ControlTest, PongEchoingTheSeqStopsRetransmission)
+TEST_F(ControlTest, WrongSeqResponseDoesNotStopRetransmission)
 {
     setCurrent(State::Safe);
-    deliver(makePing());
-    ASSERT_EQ(bus().can_tx.size(), 1u);
-
-    CanHeader sent;
-    sent.code = bus().can_tx.front().id;
-    control_.onResponse(static_cast<uint8_t>(ResponseType::Pong),
-                        static_cast<uint8_t>(sent.frame.seq), ++now_ms_);  // ack the exact ping
-
-    now_ms_ += logic::fcu::detail::COMMAND_TIMEOUT_MS * 4;
-    control_.servicePending(now_ms_);
-    EXPECT_EQ(bus().can_tx.size(), 1u);   // cleared by the Pong — never resent
-}
-
-TEST_F(ControlTest, PongWithWrongSeqDoesNotStopRetransmission)
-{
-    setCurrent(State::Safe);
-    deliver(makePing());                                   // seq 0
-    control_.onResponse(static_cast<uint8_t>(ResponseType::Pong),
-                        /*seq=*/7, ++now_ms_);             // a stale/mismatched Pong
+    deliver(makeSetState(State::Unsafe, BoardId::Engine, /*seq=*/0));   // bridged reliable, seq 0
+    control_.onResponse(static_cast<uint8_t>(ResponseType::Ack),
+                        /*seq=*/7, ++now_ms_);             // a stale/mismatched Ack
 
     now_ms_ += logic::fcu::detail::COMMAND_TIMEOUT_MS;
     control_.servicePending(now_ms_);

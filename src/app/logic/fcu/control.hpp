@@ -22,6 +22,7 @@
 #include "control/persistent_state.hpp"                        // logic::control::persistent_state
 #include "control/state_machine.hpp"                           // toState, isTransitionAllowed, isTransitionLockedOut (shared)
 #include "control/state_timing.hpp"                            // logic::control::state_entered_ms
+#include "control/last_ping.hpp"                               // logic::control::last_ping_ms (GS-heartbeat liveness clock)
 #include "control/refused_transition.hpp"                      // logic::control::last_refused_transition
 #include "control/refused_control_flag.hpp"                     // logic::control::last_refused_control_flag
 #include "control/refused_valve.hpp"                            // logic::control::last_refused_valve
@@ -299,16 +300,50 @@ private:
                        /*seq=*/seq, std::span<const uint8_t>{}, now_ms);
     }
 
-    /* ---- Ping (Gs->Fcu->Ecu) ------------------------------------------------- */
+    // Answer a Ping addressed to the FCU with a Pong straight to the GS, echoing the GS's seq (so it
+    // matches the heartbeat it sent) and stamping our CURRENT state — so one heartbeat round-trip
+    // reports both liveness AND the FCU's state. Unlike ackGs (which answers an applied command) this
+    // is the FCU's own liveness reply, sender = FillingStation. Bridged (Engine) pings are instead
+    // answered by the ECU and relayed by onResponse.
+    void pongGs(uint8_t seq, uint32_t now_ms)
+    {
+        comm_.sendToGs(BoardId::FillingStation, PayloadType::Response,
+                       static_cast<uint8_t>(ResponseType::Pong),
+                       static_cast<uint8_t>(logic::control::persistent_state.fill_state),
+                       /*seq=*/seq, std::span<const uint8_t>{}, now_ms);
+    }
 
-    // Reaching here means a Ping from the GS arrived: the GS<->FCU leg works. Forward it
-    // to the ECU over CAN as a RELIABLE command, PROPAGATING the GS's seq — the ECU echoes
-    // it in its Pong, onResponse matches it (stopping retries) and relays the Pong to the GS
-    // carrying that same seq, so the GS can match its own ping. The "FCU<->ECU is down"
-    // seam lives in servicePending's give-up branch, not here.
+    /* ---- Ping (the network heartbeat) ---------------------------------------- */
+
+    // A Ping is the ~1 Hz network heartbeat. The GS always BROADCASTS it, so one packet makes BOTH
+    // boards answer with their OWN Pong, in EVERY state (Ping is never state-gated) — the GS learns
+    // which board is alive and, from each Pong's sender_state, what state it is in. Handled by target
+    // (broadcast hits both branches; the per-target routing also keeps a unicast ping correct):
+    //   FillingStation / Broadcast -> the FCU answers for ITSELF, a Pong straight to the GS (no ECU hop).
+    //   Engine         / Broadcast -> forward to the ECU; its Pong is relayed to the GS by onResponse.
+    // The ECU forward is FIRE-AND-FORGET: it does NOT take the single reliable pending_ slot. A missed
+    // heartbeat is self-healing (the GS pings again next second), and keeping it off the reliable slot
+    // stops the heartbeat from clobbering an in-flight operator command bridged to the ECU.
     bool handlePing(const Command& cmd, uint32_t now_ms)
     {
-        sendReliable(CommandType::Ping, /*sender_state=*/0, std::span<const uint8_t>{}, cmd.seq, now_ms);
+        // --- Heartbeat received --------------------------------------------------------------
+        // Stamp the GS-heartbeat liveness clock; telemetry publishes seconds_since_last_ping from it.
+        logic::control::last_ping_ms = now_ms;
+        // A serviced Ping proves the GS->FCU link is alive, so this is also where the independent
+        // watchdog gets fed (~1 Hz expected; size the IWDG window to tolerate a few missed beats).
+        // Losing the heartbeat then lets the IWDG reset the board.
+        // TODO(IWDG): refresh the watchdog here once the platform seam lands (e.g. watchdog::kick()).
+        // -------------------------------------------------------------------------------------
+
+        const auto target = static_cast<BoardId>(cmd.target);
+        if (target == BoardId::FillingStation || target == BoardId::Broadcast) {
+            pongGs(cmd.seq, now_ms);   // the FCU answers for itself
+        }
+        if (target == BoardId::Engine || target == BoardId::Broadcast) {
+            // Fire-and-forget bridge to the ECU (no reliable retry slot); its Pong returns via onResponse.
+            comm_.sendToEcu(PayloadType::Command, static_cast<uint8_t>(CommandType::Ping),
+                            /*senderState=*/0, cmd.seq, std::span<const uint8_t>{});
+        }
         return true;
     }
 
@@ -361,8 +396,9 @@ private:
     // the transition, run any per-transition action, then commit through persistent_state.
     bool applyStateLocally(const Command& cmd, uint32_t now_ms)
     {
-        const auto* frame = reinterpret_cast<const SetStateFrame*>(cmd.payload.data());
-        const std::optional<State> requested = logic::control::toState(frame->requestedID);
+        SetStateFrame frame;
+        std::memcpy(&frame, cmd.payload.data(), sizeof(frame));  // copy out: payload is a byte array (no aliasing UB)
+        const std::optional<State> requested = logic::control::toState(frame.requestedID);
         if (!requested) {
             return false;  // unknown requested state id
         }
@@ -433,10 +469,11 @@ private:
     // carries the same bytes the GS sent (the valve byte is read as EcuValves on the ECU).
     bool handleSetValvePosition(const Command& cmd, uint32_t now_ms)
     {
-        const auto* frame = reinterpret_cast<const SetValvePositionFrame*>(cmd.payload.data());
+        SetValvePositionFrame frame;
+        std::memcpy(&frame, cmd.payload.data(), sizeof(frame));  // copy out: payload is a byte array (no aliasing UB)
 
         if (logic::control::persistent_state.fill_state != State::Unsafe) {
-            recordRefusedValve(*frame);   // operator per-valve actuation is Unsafe-only
+            recordRefusedValve(frame);   // operator per-valve actuation is Unsafe-only
             return false;
         }
         switch (static_cast<BoardId>(cmd.target)) {
@@ -448,7 +485,7 @@ private:
                              cmd.seq, now_ms);
                 return true;
             default:
-                recordRefusedValve(*frame);   // Broadcast / other: valve commands are single-board only
+                recordRefusedValve(frame);   // Broadcast / other: valve commands are single-board only
                 return false;
         }
     }
@@ -457,27 +494,28 @@ private:
     // success. An invalid action or unknown valve is refused, RECORDED, and NOT Acked.
     bool actuateLocalValve(const Command& cmd, uint32_t now_ms)
     {
-        const auto* frame = reinterpret_cast<const SetValvePositionFrame*>(cmd.payload.data());
-        if (!isValidAction(frame->action)) {
-            recordRefusedValve(*frame);
+        SetValvePositionFrame frame;
+        std::memcpy(&frame, cmd.payload.data(), sizeof(frame));  // copy out: payload is a byte array (no aliasing UB)
+        if (!isValidAction(frame.action)) {
+            recordRefusedValve(frame);
             return false;
         }
-        V* valve = (frame->valve == FcuValves::Fill) ? &fill_valve_
-                 : (frame->valve == FcuValves::Dump) ? &dump_valve_
+        V* valve = (frame.valve == FcuValves::Fill) ? &fill_valve_
+                 : (frame.valve == FcuValves::Dump) ? &dump_valve_
                  : nullptr;
         if (valve == nullptr) {
-            recordRefusedValve(*frame);   // unknown valve id
+            recordRefusedValve(frame);   // unknown valve id
             return false;
         }
         // A non-zero force byte makes the actuation forced: the valve bypasses its limit switches
         // for FORCED_VALVE_ACTUATION_MS then reverts. For Open/Close it drives hard to the stop
         // ignoring the switch; for SetOpenedPct it holds the percent without idling or faulting on
         // a stray switch read (a forced proportional hold off both limits).
-        const uint32_t bypass_ms = frame->force ? logic::control::FORCED_VALVE_ACTUATION_MS : 0;
-        switch (frame->action) {
+        const uint32_t bypass_ms = frame.force ? logic::control::FORCED_VALVE_ACTUATION_MS : 0;
+        switch (frame.action) {
             case ValveCommand::Open:         (void)valve->open(bypass_ms);  break;
             case ValveCommand::Close:        (void)valve->close(bypass_ms); break;
-            case ValveCommand::SetOpenedPct: (void)valve->setOpenPercent(static_cast<float>(frame->value), bypass_ms); break;
+            case ValveCommand::SetOpenedPct: (void)valve->setOpenPercent(static_cast<float>(frame.value), bypass_ms); break;
         }
         ackGs(cmd.seq, now_ms);
         return true;
@@ -531,33 +569,34 @@ private:
     // last_refused_control_flag and NOT Acked.
     bool applyControlFlagLocally(const Command& cmd, uint32_t now_ms)
     {
-        const auto* frame = reinterpret_cast<const SetControlFlagFrame*>(cmd.payload.data());
-        const uint16_t id = frame->flag;
+        SetControlFlagFrame frame;
+        std::memcpy(&frame, cmd.payload.data(), sizeof(frame));  // copy out: payload is a byte array (no aliasing UB)
+        const uint16_t id = frame.flag;
 
         if (id < CONTROL_FLAG_BOARD_OFFSET) {
             // A BASE flag (common to every board): low-byte id, applied to base_control_flags.
             const std::optional<ControlFlagBase> flag = toControlFlagBase(id);
             if (!flag) {
-                recordRefusedFlag(*frame);
+                recordRefusedFlag(frame);
                 return false;  // unknown base flag — do not Ack a command we did not apply
             }
-            logic::control::base_control_flags.set(*flag, frame->value != 0);
+            logic::control::base_control_flags.set(*flag, frame.value != 0);
         } else {
             // A PER-BOARD (FCU) flag: high-byte id, applied to fcu_control_flags.
             const std::optional<FcuControlFlag> flag =
                 toFcuControlFlag(static_cast<uint16_t>(id - CONTROL_FLAG_BOARD_OFFSET));
             if (!flag) {
-                recordRefusedFlag(*frame);
+                recordRefusedFlag(frame);
                 return false;  // unknown per-board flag
             }
             // The solenoid valve is hazardous unless the area is clear: its flag is only honoured
             // in Unsafe. Reject (and record) a SetControlFlag(SolenoidValve) in any other state.
             if (*flag == FcuControlFlag::SolenoidValve &&
                 logic::control::persistent_state.fill_state != logic::control::State::Unsafe) {
-                recordRefusedFlag(*frame);
+                recordRefusedFlag(frame);
                 return false;
             }
-            logic::control::fcu_control_flags.set(*flag, frame->value != 0);
+            logic::control::fcu_control_flags.set(*flag, frame.value != 0);
         }
 
         ackGs(cmd.seq, now_ms);

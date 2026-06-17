@@ -36,6 +36,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <span>
+
+#include "telemetry/sd_block_footer.hpp"   // sdBlockVerify / SD_LOG_BLOCK_BYTES (validate the footer)
 
 using logic::communication::CanFrame;
 namespace command = logic::communication::command;
@@ -139,6 +142,7 @@ protected:
             {logic::control::REFUSED_VALVE_NONE, 0, 0, State::Init};
         logic::control::refused_valve_count = 0;
         logic::control::state_entered_ms = 0;   // reset the dwell clock between tests
+        logic::control::last_ping_ms = 0;       // reset the heartbeat clock between tests
         controller_.init();
         // init() advanced Init -> Safe, which closes both valves; discard those calls so each
         // test counts only its own actuation.
@@ -465,8 +469,20 @@ TEST_F(EcuControllerTest, FastRecordingPersistsRawSystemStateToDataFast)
         controller_.produceRecord(++now_ms_);
         step();
     }
-    EXPECT_FALSE(storage_fast_.writes.empty());  // the raw half reached data_fast.bin
+    ASSERT_FALSE(storage_fast_.writes.empty());  // the raw half reached data_fast.bin
     EXPECT_TRUE(storage_slow_.writes.empty());   // slow file untouched in fast mode
+
+    // The fast-mode block must carry a valid SD footer: it is written as one whole sector-aligned
+    // SD_LOG_BLOCK_BYTES block whose trailing 12 bytes are the footer (saved_ms + payload_bytes +
+    // CRC over everything before it). Decode it back through sdBlockVerify — a stamped+CRC'd block
+    // round-trips; an unstamped one fails. Guards against the footer being dropped on the fast path.
+    const auto& block = storage_fast_.writes.front();
+    ASSERT_EQ(block.size(), logic::telemetry::SD_LOG_BLOCK_BYTES);
+    const auto view = logic::telemetry::sdBlockVerify(
+        std::span<const uint8_t>(block.data(), block.size()));
+    ASSERT_TRUE(view.has_value()) << "fast-mode SD block has no valid footer (CRC failed)";
+    EXPECT_GT(view->trailer.payload_bytes, 0u);
+    EXPECT_EQ(view->trailer.payload_bytes % sizeof(EcuSystemState), 0u);  // a whole number of records
 }
 
 TEST_F(EcuControllerTest, SlowRecordingPersistsAveragedSystemStateToDataSlow)
@@ -552,6 +568,55 @@ TEST_F(EcuControllerTest, TelemetryIsDownlinkedToTheFcuOverCan)
     EXPECT_EQ(static_cast<State>(header.frame.sender_state), State::Safe);  // ECU stamps its state
 }
 
+/* Backpressure: when the CAN TX ring is full, the telemetry drain holds its cursor and retries —
+   it never drops records, and the ready slot is SD-logged exactly once regardless of how many
+   drain passes the full ring forces. Once the ring clears, every record in the slot downlinks.
+   This is the fix for the 16 KB-block regression: a full slot's ~292-frame burst no longer
+   overflows the software TX ring and loses ~1/3 of the stream. */
+TEST_F(EcuControllerTest, BackpressureHoldsRecordsAndResumesWithoutLoss)
+{
+    step();  // Init -> Safe
+    logic::control::base_control_flags.set(ControlFlagBase::FastRecording, true);  // raw -> data_fast + downlink
+
+    // Fill exactly one telemetry slot (and start a second) WITHOUT draining, so a full slot is ready
+    // to downlink. One record per produceRecord (one queued conversion each).
+    const int per_slot = static_cast<int>(
+        logic::telemetry::SD_BLOCK_PAYLOAD_CAP / sizeof(EcuSystemState));
+    const AdcInfo sample{};
+    for (int i = 0; i < per_slot + 2; ++i) {
+        adc_.push(sample);
+        controller_.produceRecord(++now_ms_);
+    }
+    bus().can_tx.clear();   // discard any extended frames produced incidentally
+
+    const auto systemStateFrames = [] {
+        int n = 0;
+        for (const auto& f : bus().can_tx) {
+            CanHeader h;
+            h.code = f.id;
+            if (static_cast<TelemetryType>(h.frame.payload_id) == TelemetryType::SystemState) {
+                ++n;
+            }
+        }
+        return n;
+    };
+
+    // Ring full: draining over several ticks downlinks NOTHING and drops NOTHING, and SD-logs the
+    // ready slot exactly once (the cursor + tail_recorded_ guard hold across the rejected passes).
+    can_.fail_sends = true;
+    for (int i = 0; i < 5; ++i) {
+        step();
+    }
+    EXPECT_EQ(systemStateFrames(), 0);
+    EXPECT_EQ(storage_fast_.writes.size(), 1u);   // recorded once despite 5 blocked drain passes
+
+    // Ring clears: the whole held slot downlinks, none lost, and it is not re-recorded to SD.
+    can_.fail_sends = false;
+    step();
+    EXPECT_EQ(systemStateFrames(), per_slot);
+    EXPECT_EQ(storage_fast_.writes.size(), 1u);
+}
+
 /* The low-rate ExtendedSystemState is downlinked to the FCU over CAN too — unbatched, one
    send per ~10 Hz record (separate payload_id from the batched SystemState stream) — so the
    FCU can relay the ECU's slow state straight to the GS. Cross the extended interval, then
@@ -587,6 +652,35 @@ TEST_F(EcuControllerTest, ExtendedStateIsDownlinkedToTheFcuOverCan)
     EXPECT_EQ(static_cast<PayloadType>(header.frame.payload_type), PayloadType::Telemetry);
     EXPECT_EQ(static_cast<State>(header.frame.sender_state), State::Safe);  // ECU stamps its state
     EXPECT_NE(ext.base.control_flags_base & (1u << static_cast<uint8_t>(ControlFlagBase::FastRecording)), 0u);
+}
+
+/* The SD card-present (SD_DETECT) signal rides the ECU's ExtendedSystemState via the shared
+   board-wide SD engine health, exactly as on the FCU. The recorder reads it off the fast store
+   (all three files share the one engine), so script that one and decode the downlinked record. */
+TEST_F(EcuControllerTest, SdCardDetectRidesTheExtendedRecord)
+{
+    step();  // Init -> Safe
+    storage_fast_.engine_info_value.card_detected = 1u;   // a card is seated in the socket
+    bus().can_tx.clear();
+
+    EcuExtendedSystemState ext{};
+    bool found = false;
+    for (int i = 0; i < 150 && !found; ++i) {
+        step();
+        for (const auto& f : bus().can_tx) {
+            CanHeader h;
+            h.code = f.id;
+            if (static_cast<TelemetryType>(h.frame.payload_id) != TelemetryType::ExtendedSystemState) {
+                continue;
+            }
+            std::memcpy(&ext, &f.data[1], sizeof(ext));
+            found = true;
+            break;
+        }
+    }
+
+    ASSERT_TRUE(found) << "no ExtendedSystemState downlinked over CAN";
+    EXPECT_EQ(ext.base.sd_write_engine_info.card_detected, 1u);   // surfaced from the SD_DETECT line
 }
 
 /* The ECU records refused commands too (parity with the FCU): a refused SetState (Safe's only

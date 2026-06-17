@@ -69,8 +69,12 @@ public:
     }
 
     /** @brief Send a fully-formed frame as-is. Used for telemetry fragments the shared
-     *         SystemState codec has already framed (header + index + bytes). */
-    void sendFrame(const logic::communication::CanFrame& frame) { (void)can_.send(frame); }
+     *         SystemState codec has already framed (header + index + bytes). Returns the
+     *         transport result (nullopt = queued) so the telemetry drain can honour
+     *         backpressure: a full TX ring reports an error, and the drain holds its cursor
+     *         and retries the frame next tick rather than dropping it. */
+    std::optional<logic::communication::CanError>
+    sendFrame(const logic::communication::CanFrame& frame) { return can_.send(frame); }
 
     /* ---- Ingress ------------------------------------------------------------- */
 

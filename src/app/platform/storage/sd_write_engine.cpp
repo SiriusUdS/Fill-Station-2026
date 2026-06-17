@@ -24,9 +24,28 @@ __attribute__((section(".axisram"))) static SdWriteEngine s_engine;
 
 SdWriteEngine& sd_write_engine() { return s_engine; }
 
-void SdWriteEngine::init(SD_HandleTypeDef* handle)
+/* Boot-time card-present fact: set by tryInitSd() (the non-fatal replacement for the generated
+   MX_SDMMCx_SD_Init), read by SdCard::init() to skip the FatFs mount/open path when no card
+   enumerated. A plain static suffices — set once at bring-up, read from the foreground. */
+static bool s_sd_present = false;
+
+bool tryInitSd(SD_HandleTypeDef* hsd)
 {
-    handle_ = handle;
+    // Non-fatal by design: on a missing/dead card HAL_SD_Init returns non-OK (after its bounded
+    // internal command timeout) and we simply record "absent" — unlike the generated
+    // MX_SDMMCx_SD_Init, which calls Error_Handler() on that path and hard-locks the board. The
+    // board has already filled hsd->Init.* with the per-board config (mirrored from sdmmc.c).
+    s_sd_present = (HAL_SD_Init(hsd) == HAL_OK);
+    return s_sd_present;
+}
+
+bool sdPresent() { return s_sd_present; }
+
+void SdWriteEngine::init(SD_HandleTypeDef* handle, GPIO_TypeDef* detect_port, uint16_t detect_pin)
+{
+    handle_      = handle;
+    detect_port_ = detect_port;
+    detect_pin_  = detect_pin;
     for (unsigned i = 0; i < SD_WRITE_QUEUE_DEPTH; ++i) {
         state_[i] = Slot::Free;
         lba_[i]   = 0;
@@ -37,6 +56,15 @@ void SdWriteEngine::init(SD_HandleTypeDef* handle)
     errored_       = false;
     overrun_count_ = 0;
     // buffers_ left untouched: every byte is overwritten by enqueue() before transmission.
+}
+
+bool SdWriteEngine::cardDetected() const
+{
+    if (detect_port_ == nullptr) {
+        return true;   // no SD_DETECT line wired: report present so an unwired board never false-alarms absent
+    }
+    // SD_DETECT is active-low: a seated card closes the socket switch and pulls the pin to GND.
+    return HAL_GPIO_ReadPin(detect_port_, detect_pin_) == GPIO_PIN_RESET;
 }
 
 bool SdWriteEngine::enqueue(uint32_t lba, const uint8_t* block)

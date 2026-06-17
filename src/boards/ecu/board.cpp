@@ -66,7 +66,20 @@ void halInit(void)
   MX_DMA_Init();         // must precede MX_SPI1_Init: SPI1 MspInit calls HAL_DMA_Init + arms the stream NVICs
   MX_SPI1_Init();        // ADS131M08 ADC bus
   MX_I2C4_Init();        // INA3221 power monitor bus
-  MX_SDMMC1_SD_Init();   // SD card
+  /* SD card on SDMMC1 — NON-FATAL bring-up (mirrors the FCU's SDMMC2 path). The generated
+     MX_SDMMC1_SD_Init() calls Error_Handler() (a hard __disable_irq + while(1) lock) when
+     HAL_SD_Init fails, so a board with no card seated would wedge here at boot, before the main
+     loop. Instead fill the same per-board config (mirrored from CM7/Core/Src/sdmmc.c — keep in sync
+     if CubeMX regenerates it) and bring the card up through the non-fatal tryInitSd(): a missing/
+     dead card just leaves sdPresent()==false and logging off (SdCard::init() short-circuits) while
+     everything else runs normally. HAL_SD_Init still invokes HAL_SD_MspInit (GPIO/clock/NVIC). */
+  hsd1.Instance                 = SDMMC1;
+  hsd1.Init.ClockEdge           = SDMMC_CLOCK_EDGE_RISING;
+  hsd1.Init.ClockPowerSave      = SDMMC_CLOCK_POWER_SAVE_DISABLE;
+  hsd1.Init.BusWide             = SDMMC_BUS_WIDE_4B;
+  hsd1.Init.HardwareFlowControl = SDMMC_HARDWARE_FLOW_CONTROL_ENABLE;
+  hsd1.Init.ClockDiv            = 2;
+  platform::storage::tryInitSd(&hsd1);
   MX_FATFS_Init();
   MX_TIM15_Init();       // valve servo PWM (CH1=IPA/PE5, CH2=NOS/PE6)
   MX_TIM6_Init();        // record-production cadence (unused until the controller lands)
@@ -115,12 +128,22 @@ void wireDrivers(void)
   drdy.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(ADS_DRDY_GPIO_Port, &drdy);   // GPIOA
 
+  /* Per-channel ADC calibration — one constant per channel, tune in place. pga_gain is the
+     coarse analog PGA gain (PgaGain::x1..x128); ocal_offset is a 24-bit signed offset in ADC
+     counts (0 = none); gcal_gain is the fine digital gain trim (GCAL_UNITY = no trim). The
+     values below reproduce the historical fixed setting (all x32 / no offset / unity). */
+  using ads131m08::PgaGain;
   g_ads131.init({
       .hspi      = &hspi1,
       .cs_port   = ADS_CS_GPIO_Port,   // GPIOC
       .cs_pin    = ADS_CS_Pin,         // PC5
       .drdy_pin  = ADS_DRDY_Pin,       // PA4
       .drdy_irqn = EXTI4_IRQn,
+      //              ch0          ch1          ch2          ch3          ch4          ch5          ch6          ch7
+      .pga_gain    = { PgaGain::x32, PgaGain::x32, PgaGain::x32, PgaGain::x32, PgaGain::x32, PgaGain::x32, PgaGain::x32, PgaGain::x32 },
+      .ocal_offset = {            0,            0,            0,            0,            0,            0,            0,            0 },
+      .gcal_gain   = { ads131m08::GCAL_UNITY, ads131m08::GCAL_UNITY, ads131m08::GCAL_UNITY, ads131m08::GCAL_UNITY,
+                       ads131m08::GCAL_UNITY, ads131m08::GCAL_UNITY, ads131m08::GCAL_UNITY, ads131m08::GCAL_UNITY },
   });
   g_ads131.start();
 
@@ -137,8 +160,9 @@ void wireDrivers(void)
 
   /* Bring up the single shared async write engine on SDMMC1 BEFORE any file opens (and before
      its completion IRQ can fire): it arbitrates the one SDMMC peripheral across all three files
-     via raw-sector DMA. One engine per physical card (mirrors the FCU, which uses SDMMC2). */
-  platform::storage::sd_write_engine().init(&hsd1);
+     via raw-sector DMA. One engine per physical card (mirrors the FCU, which uses SDMMC2). Also
+     hand it the SD_DETECT socket switch (PD4) so card-present rides the extended telemetry. */
+  platform::storage::sd_write_engine().init(&hsd1, SD_DETECT_GPIO_Port, SD_DETECT_Pin);
 
   /* Bind the three SD log files on SDMMC1 (the app composition left them unbound). They
      share one card: g_controller.init() mounts the volume + creates this boot's session

@@ -86,6 +86,21 @@ void SdCard::init()
 {
     info_.state = StorageState::Init;
 
+    // No card enumerated at boot (tryInitSd failed / socket empty): do NOT touch f_mount or the
+    // diskio driver with a dead peripheral. Report "not connected, not initialized" via the status
+    // bits — absent is by design, not an op failure, so error stays None — and leave the store
+    // inert: write()/finalize() no-op on a non-Active state and the engine never kicks on an empty
+    // ring. Everything else (valves, state machine, telemetry, CAN) runs normally; the GS reads
+    // plugged_in = 0 / initialized = 0 and knows logging is simply off.
+    if (!sdPresent()) {
+        info_.status.plugged_in  = 0u;
+        info_.status.initialized = 0u;
+        info_.status.error       = StorageError::None;
+        info_.state              = StorageState::Error;
+        return;
+    }
+    info_.status.plugged_in = 1u;   // a card enumerated; a later mount/open/expand failure below is an op error
+
     // Mount the volume and create/locate this boot's session folder (shared, once).
     const char* session = beginSession(drive_);
     if (session == nullptr) {

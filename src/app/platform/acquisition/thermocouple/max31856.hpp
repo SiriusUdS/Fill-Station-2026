@@ -86,6 +86,10 @@ private:
 
     void select(std::size_t ch, bool on);
     void writeRegister(std::size_t ch, uint8_t addr, uint8_t value);
+    /** @brief One-time SPI sanity check: read CR0/CR1 back and compare to what init() wrote.
+     *         A live MAX31856 echoes them; a silent bus returns 0x00 (or garbage). Blocking,
+     *         called once at init before the IT transport is armed. @return true if both match. */
+    bool verifyConfig(std::size_t ch);
     void startChannel(uint32_t now_ms);
     void harvestOrTimeout(uint32_t now_ms);
     void finishChannel(std::size_t ch, uint32_t now_ms);
@@ -93,6 +97,9 @@ private:
 
     Config                                           cfg_{};
     std::array<ThermocoupleInfo, THERMOCOUPLE_COUNT> info_{};
+    /* Per-channel result of the init-time CR0/CR1 readback (SPI link alive?). A false entry
+       forces its channel Faulted in parseFrame so a silent device cannot masquerade as 0 C. */
+    std::array<bool, THERMOCOUPLE_COUNT>             config_ok_{};
     Phase    phase_         = Phase::Idle;
     uint8_t  ch_            = 0;   // channel currently being read / next to read
     uint32_t xfer_start_ms_ = 0;   // tick the in-flight transfer was kicked (timeout base)

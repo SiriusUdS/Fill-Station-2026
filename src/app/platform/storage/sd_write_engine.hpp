@@ -59,10 +59,14 @@ public:
      *         in NOLOAD AXI-SRAM with no static-init cost; init() sets it up before first use. */
     SdWriteEngine() = default;
 
-    /** @brief Bind the SDMMC handle and reset the ring (all slots free, nothing in flight).
-     *         Must run once at bring-up before any enqueue()/tick(); the data buffers are left
-     *         untouched (every byte is overwritten by enqueue before it is transmitted). */
-    void init(SD_HandleTypeDef* handle);
+    /** @brief Bind the SDMMC handle (+ the optional card-detect line) and reset the ring (all slots
+     *         free, nothing in flight). Must run once at bring-up before any enqueue()/tick(); the
+     *         data buffers are left untouched (every byte is overwritten by enqueue before it is
+     *         transmitted).
+     * @param  handle       The SDMMC SD handle this engine drives.
+     * @param  detect_port  GPIO port of the SD_DETECT socket switch, or nullptr if unwired.
+     * @param  detect_pin   GPIO pin of SD_DETECT (ignored when detect_port is nullptr). */
+    void init(SD_HandleTypeDef* handle, GPIO_TypeDef* detect_port = nullptr, uint16_t detect_pin = 0);
 
     /**
      * @brief  Stage one whole block for writing at absolute card sector @p lba. Copies
@@ -98,11 +102,19 @@ public:
     /** @brief True if a DMA write ever failed to start or errored mid-transfer (sticky). */
     [[nodiscard]] bool errored() const { return errored_; }
 
+    /** @brief True when a card is seated in the socket (SD_DETECT active-low: present = pin low).
+     *         Reports present when no detect line was wired at init(). A live GPIO read — no state. */
+    [[nodiscard]] bool cardDetected() const;
+
 private:
     enum class Slot : uint8_t { Free = 0, Pending, InFlight };
 
     // The single SDMMC handle this engine drives (set by init()).
     SD_HandleTypeDef* handle_;
+
+    // The SD_DETECT socket switch (set by init(); nullptr if unwired). Read live by cardDetected().
+    GPIO_TypeDef*     detect_port_;
+    uint16_t          detect_pin_;
 
     // The staged blocks, one per ring slot. 32-byte aligned for the SDMMC internal DMA.
     alignas(32) uint8_t buffers_[SD_WRITE_QUEUE_DEPTH][SD_WRITE_BLOCK_BYTES];
@@ -119,5 +131,21 @@ private:
 /** @brief The single shared write engine for this board's one physical card. Placed in AXI-SRAM
  *         (DMA-reachable) in the .cpp; every SdCard routes its blocks through it. */
 SdWriteEngine& sd_write_engine();
+
+/** @brief Non-fatal SDMMC card bring-up — the replacement for the generated MX_SDMMCx_SD_Init().
+ *         That generated init calls Error_Handler() (a hard __disable_irq + while(1) lock) when
+ *         HAL_SD_Init fails, so a board booted with no card seated would wedge there before ever
+ *         reaching the main loop. tryInitSd() instead records the result: a missing/dead card just
+ *         yields false, leaving logging off (SdCard::init() short-circuits, write() no-ops) while
+ *         valves, the state machine, telemetry and CAN run normally. HAL_SD_Init still invokes
+ *         HAL_SD_MspInit (GPIO/clock/NVIC) internally, so the peripheral is configured either way.
+ *         The board fills hsd->Instance + hsd->Init.* (the per-board config mirrored from sdmmc.c)
+ *         before calling this.
+ * @return true if a card enumerated (HAL_OK); the result is also cached for sdPresent(). */
+bool tryInitSd(SD_HandleTypeDef* hsd);
+
+/** @brief Whether the boot-time tryInitSd() identified a card. SdCard::init() gates the FatFs
+ *         mount/open path on this so an absent card never exercises the diskio driver. */
+bool sdPresent();
 
 } // namespace platform::storage

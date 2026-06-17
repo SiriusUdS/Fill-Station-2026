@@ -48,6 +48,25 @@ void Max31856Bank::writeRegister(std::size_t ch, uint8_t addr, uint8_t value)
     select(ch, false);
 }
 
+bool Max31856Bank::verifyConfig(std::size_t ch)
+{
+    // Read CR0 then CR1 back in one burst (address byte has bit7=0 for a read; the device
+    // auto-increments). rx[0] is clocked out during the address byte; rx[1]=CR0, rx[2]=CR1.
+    uint8_t tx[3] = { REG_CR0, 0x00, 0x00 };
+    uint8_t rx[3] = {};
+    select(ch, true);
+    const HAL_StatusTypeDef ok =
+        HAL_SPI_TransmitReceive(cfg_.hspi, tx, rx, sizeof(tx), CONFIG_WRITE_TIMEOUT_MS);
+    select(ch, false);
+    if (ok != HAL_OK) {
+        return false;
+    }
+    // Match against exactly what init() wrote. A non-responding device returns 0x00 here.
+    const uint8_t expect_cr0 = static_cast<uint8_t>(CR0_CMODE_AUTO | CR0_OCFAULT_1);
+    const uint8_t expect_cr1 = static_cast<uint8_t>(cfg_.tc_type & 0x0F);
+    return rx[1] == expect_cr0 && rx[2] == expect_cr1;
+}
+
 void Max31856Bank::init(const Config& config)
 {
     cfg_ = config;
@@ -65,6 +84,19 @@ void Max31856Bank::init(const Config& config)
         writeRegister(ch, REG_MASK, 0xFF);
         writeRegister(ch, REG_CR0, static_cast<uint8_t>(CR0_CMODE_AUTO | CR0_OCFAULT_1));
         writeRegister(ch, REG_CR1, static_cast<uint8_t>(cfg_.tc_type & 0x0F));
+    }
+
+    // SPI sanity check: read the config back per channel. If a device does not echo what we
+    // just wrote, the SPI link to it is dead (e.g. wrong clock phase, unpowered, MISO not
+    // wired) — record that so parseFrame forces the channel Faulted rather than reporting the
+    // all-zero reads as a valid 0 C. comms_ok rides ThermocoupleInfo into the extended state.
+    for (std::size_t ch = 0; ch < THERMOCOUPLE_COUNT; ++ch) {
+        config_ok_[ch]            = verifyConfig(ch);
+        info_[ch].status.comms_ok = config_ok_[ch] ? 1u : 0u;
+        if (!config_ok_[ch]) {
+            info_[ch].state             = ThermocoupleState::Faulted;
+            info_[ch].status.data_valid = 0u;
+        }
     }
 
     // Arm the SPI6 interrupt transport for the per-loop reads: a fixed 7-byte frame,
@@ -141,8 +173,12 @@ void Max31856Bank::parseFrame(std::size_t ch, const uint8_t* rx)
     info.status.over_under_v = (sr & 0x02u) ? 1u : 0u;  // SR.OVUV
     info.status.tc_out_range = (sr & 0x40u) ? 1u : 0u;  // SR.TCRANGE
     info.status.cj_out_range = (sr & 0x80u) ? 1u : 0u;  // SR.CJRANGE
+    info.status.comms_ok     = config_ok_[ch] ? 1u : 0u;
 
-    const bool faulted       = sr != 0u;
+    // A dead SPI link returns an all-zero frame, which has sr == 0 and would otherwise look
+    // like a clean 0 C reading. Gate on the init-time readback so a non-responding device is
+    // always Faulted, never a cheerful 0.
+    const bool faulted       = (sr != 0u) || !config_ok_[ch];
     info.status.data_valid   = faulted ? 0u : 1u;
     info.state               = faulted ? ThermocoupleState::Faulted : ThermocoupleState::Active;
 }

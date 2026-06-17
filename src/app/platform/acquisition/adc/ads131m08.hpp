@@ -414,11 +414,37 @@ union CH3_GCAL_LSB_Reg {
 };
 
 /**
- * @brief  Board wiring for the ADS131M08, supplied by platform bring-up so the
- *         driver carries no board-specific pin numbers (it ports across boards).
+ * @brief  Per-channel PGA analog gain. The value IS the 3-bit PGAGAINn register code
+ *         (GAIN 0x04 for ch0-3, GAIN2 0x05 for ch4-7), so it writes straight into the
+ *         bitfield — no magic literal. This is the coarse analog gain ahead of the ADC;
+ *         the digital GCAL trim (see gcal_gain) is a separate, fine adjustment near unity.
+ */
+enum class PgaGain : uint8_t {
+    x1   = 0b000,
+    x2   = 0b001,
+    x4   = 0b010,
+    x8   = 0b011,
+    x16  = 0b100,
+    x32  = 0b101,
+    x64  = 0b110,
+    x128 = 0b111,
+};
+
+/** @brief Reset value of a channel's 24-bit GCAL gain-calibration register = unity (x1 trim).
+ *         Use this as the gcal_gain entry for a channel you do not want to trim. */
+inline constexpr int32_t GCAL_UNITY = 0x800000;
+
+/**
+ * @brief  Board wiring + per-channel calibration for the ADS131M08, supplied by platform
+ *         bring-up so the driver carries no board-specific values (it ports across boards).
  *
- * The DRDY pin must be configured by the board as a falling-edge EXTI input,
- * with a matching EXTI vector handler, before start() arms @c drdy_irqn.
+ * The DRDY pin must be configured by the board as a falling-edge EXTI input, with a matching
+ * EXTI vector handler, before start() arms @c drdy_irqn.
+ *
+ * Calibration is one constant per channel and is board/sensor-specific, so it lives here (set
+ * by the board), not baked into the shared driver. The defaults reproduce the historical fixed
+ * setting (all channels x32 PGA gain, no offset, unity GCAL), so a board that omits them is
+ * unchanged; override any channel's entry to tune it. init() programs all three into the device.
  */
 struct Config {
     SPI_HandleTypeDef* hspi;       /**< DMA-capable SPI peripheral handle. */
@@ -426,6 +452,21 @@ struct Config {
     uint16_t           cs_pin;     /**< Chip-select GPIO pin. */
     uint16_t           drdy_pin;   /**< DRDY GPIO pin, matched in the EXTI callback. */
     IRQn_Type          drdy_irqn;  /**< NVIC line for the DRDY EXTI group; armed by start(). */
+
+    /** Per-channel PGA analog gain (default x32 — the historical fixed setting). */
+    std::array<PgaGain, ADC_CHANNEL_COUNT> pga_gain = {
+        PgaGain::x32, PgaGain::x32, PgaGain::x32, PgaGain::x32,
+        PgaGain::x32, PgaGain::x32, PgaGain::x32, PgaGain::x32,
+    };
+    /** Per-channel 24-bit signed OCAL offset calibration, in ADC counts; subtracted before
+     *  output. 0 = no offset (the chip reset value), so the default array is all zeros. */
+    std::array<int32_t, ADC_CHANNEL_COUNT> ocal_offset = {};
+    /** Per-channel 24-bit GCAL gain-calibration (fine digital trim). GCAL_UNITY = x1 (no trim);
+     *  the default array is all-unity, matching the chip reset. */
+    std::array<int32_t, ADC_CHANNEL_COUNT> gcal_gain = {
+        GCAL_UNITY, GCAL_UNITY, GCAL_UNITY, GCAL_UNITY,
+        GCAL_UNITY, GCAL_UNITY, GCAL_UNITY, GCAL_UNITY,
+    };
 };
 
 /**

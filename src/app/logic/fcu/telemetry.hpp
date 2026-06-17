@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -123,7 +124,10 @@ public:
         // records (ecu_log_).
         clearLog(log_);
         clearLog(ecu_log_);
-        last_adc_ms_  = 0;
+        last_adc_ms_      = 0;
+        downlink_off_     = 0;
+        tail_recorded_    = false;
+        ecu_downlink_off_ = 0;
 
         recorder_.init();   // mounts the volume + opens data_fast/slow/ext.bin
     }
@@ -172,20 +176,35 @@ public:
     void drain(uint32_t now_ms)
     {
         while (log_.ready[log_.tail]) {
+            // Acquire: the producer (TIM6 ISR) published the slot's bytes before setting ready;
+            // read them only after observing the flag. Pairs with the release in logAppend.
+            std::atomic_thread_fence(std::memory_order_acquire);
             const uint8_t  t     = log_.tail;
             const uint16_t bytes = log_.used[t];
 
+            // SD-log the whole slot once, the first time we touch it — independent of the GS
+            // downlink pacing below, so a busy Ethernet TX never re-writes the slot to the card.
             // SD logging is the shared recorder's policy (raw data_fast.bin vs averaged
-            // data_slow.bin, per the flags); the downlink below is unconditional and
-            // full-rate, so the GS always sees live data regardless of recording mode.
-            recorder_.recordSystemState(
-                std::span<uint8_t>(log_.data[t], detail::LOG_HALF_BYTES), bytes, now_ms);
+            // data_slow.bin, per the flags); the downlink is unconditional and full-rate, so the
+            // GS always sees live data regardless of recording mode.
+            if (!tail_recorded_) {
+                recorder_.recordSystemState(
+                    std::span<uint8_t>(log_.data[t], detail::LOG_HALF_BYTES), bytes, now_ms);
+                tail_recorded_ = true;
+            }
 
-            downlink(BoardId::FillingStation,
+            downlink_off_ = downlink(BoardId::FillingStation,
                      static_cast<uint8_t>(logic::control::persistent_state.fill_state),
-                     std::span<const uint8_t>(log_.data[t], bytes), sizeof(FcuSystemState), now_ms);
-            log_.ready[t] = false;
-            log_.tail = static_cast<uint8_t>((t + 1) % detail::LOG_BUFFER_COUNT);
+                     std::span<const uint8_t>(log_.data[t], bytes), sizeof(FcuSystemState),
+                     downlink_off_, now_ms);
+            if (downlink_off_ < bytes) {
+                return;   // link busy: resume this slot next tick (not released, not dropped)
+            }
+
+            log_.ready[t]  = false;
+            log_.tail      = static_cast<uint8_t>((t + 1) % detail::LOG_BUFFER_COUNT);
+            downlink_off_  = 0;
+            tail_recorded_ = false;
         }
     }
 
@@ -265,32 +284,46 @@ public:
     void drainRelayedEcu(uint32_t now_ms)
     {
         while (ecu_log_.ready[ecu_log_.tail]) {
-            const uint8_t t = ecu_log_.tail;
-            downlink(BoardId::Engine, ecu_relay_state_,
-                     std::span<const uint8_t>(ecu_log_.data[t], ecu_log_.used[t]),
-                     sizeof(EcuSystemState), now_ms);
+            const uint8_t  t     = ecu_log_.tail;
+            const uint16_t bytes = ecu_log_.used[t];
+            ecu_downlink_off_ = downlink(BoardId::Engine, ecu_relay_state_,
+                     std::span<const uint8_t>(ecu_log_.data[t], bytes),
+                     sizeof(EcuSystemState), ecu_downlink_off_, now_ms);
+            if (ecu_downlink_off_ < bytes) {
+                return;   // link busy: resume this relay slot next tick (not dropped)
+            }
             ecu_log_.ready[t] = false;
             ecu_log_.tail = static_cast<uint8_t>((t + 1) % detail::LOG_BUFFER_COUNT);
+            ecu_downlink_off_ = 0;
         }
     }
 
 private:
-    // Stream a run of fixed-size telemetry records to the GS, batched so each
-    // datagram carries only whole records (the GS never sees a split one). The wire
-    // framing (header + CRC + send) is the communication layer's job; the batching
-    // is ours, because record size is a telemetry-stream concern.
-    void downlink(BoardId sourceId, uint8_t sourceState,
-                  std::span<const uint8_t> records, std::size_t record_size, uint32_t now_ms)
+    // Stream a run of fixed-size telemetry records to the GS, batched so each datagram carries only
+    // whole records (the GS never sees a split one), resuming from @p start_off — a byte offset that
+    // is always a whole multiple of the datagram batch. Stops at the first datagram the link rejects
+    // (the single-in-flight Ethernet TX reports Busy while one is still clocking out) and returns the
+    // offset reached, so the caller resumes there next tick: a busy link PACES the stream rather than
+    // dropping records. Returns >= records.size() once the whole span has gone out. The wire framing
+    // (header + CRC + send) is the communication layer's job; the batching is ours, because record
+    // size is a telemetry-stream concern.
+    std::size_t downlink(BoardId sourceId, uint8_t sourceState, std::span<const uint8_t> records,
+                         std::size_t record_size, std::size_t start_off, uint32_t now_ms)
     {
         const std::size_t per_packet  = Comm::GS_PAYLOAD_CAPACITY / record_size;
         const std::size_t batch_bytes = per_packet * record_size;
-        for (std::size_t off = 0; off < records.size(); off += batch_bytes) {
+        std::size_t off = start_off;
+        for (; off < records.size(); off += batch_bytes) {
             const std::size_t chunk =
                 records.size() - off < batch_bytes ? records.size() - off : batch_bytes;
-            comm_.sendToGs(sourceId, PayloadType::Telemetry,
-                           static_cast<uint8_t>(TelemetryType::SystemState),
-                           sourceState, /*seq=*/0, records.subspan(off, chunk), now_ms);
+            if (comm_.sendToGs(sourceId, PayloadType::Telemetry,
+                               static_cast<uint8_t>(TelemetryType::SystemState),
+                               sourceState, /*seq=*/0, records.subspan(off, chunk), now_ms)
+                    .has_value()) {
+                break;   // link busy: resume from this datagram next tick (not dropped)
+            }
         }
+        return off;
     }
 
     // Build an FcuSystemState from the ADC's info record (a fresh conversion on the
@@ -349,6 +382,9 @@ private:
                 }
                 return;
             }
+            // Release: commit the slot's record bytes (filled by prior logAppend calls) before
+            // publishing ready, so the foreground drain never sees ready ahead of the data.
+            std::atomic_thread_fence(std::memory_order_release);
             log_.ready[h]   = true;      // hand the now-full slot to the consumer
             log_.head       = next;
             log_.used[next] = 0;
@@ -409,6 +445,8 @@ private:
     detail::LogBuffer log_;            // .axisram in firmware; left uninitialised until init()
     volatile uint32_t  last_adc_ms_ = 0;  // last tick a conversion was drained; gates the silent-ADC filler
     uint32_t           last_extended_ms_ = 0;  // throttles produceExtended() to ~10 Hz
+    std::size_t        downlink_off_  = 0;     // byte cursor into the tail log_ slot: how far the GS downlink got
+    bool               tail_recorded_ = false; // the tail log_ slot has been SD-logged (once, regardless of downlink pacing)
     logic::communication::can::SystemStateReassembler   ecu_reassembler_;           // rebuilds ECU SystemState from CAN (batched relay)
     logic::communication::can::ExtendedStateReassembler ecu_extended_reassembler_;  // rebuilds ECU ExtendedSystemState from CAN (relayed straight to the GS)
 
@@ -419,6 +457,7 @@ private:
     // controller's .axisram placement like log_ (it does not need DMA-reachable memory).
     detail::LogBuffer ecu_log_;
     uint8_t           ecu_relay_state_ = 0;  // ECU state from the last reassembled record; tags the relay datagram
+    std::size_t       ecu_downlink_off_ = 0;  // byte cursor into the tail ecu_log_ relay slot: how far the GS downlink got
 
     static_assert(std::extent_v<decltype(SystemStateBase::valve_info)> == 2,
                   "FcuSystemState expects exactly two valves (Fill, Dump)");

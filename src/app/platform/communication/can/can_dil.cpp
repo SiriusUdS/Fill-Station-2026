@@ -49,23 +49,28 @@ struct RxRing {
 
 RxRing s_rxRing;
 
-/* Software TX rings, in TWO priority lanes. The ECU's full-rate telemetry drain hands off
-   a whole double-buffer half at once (~73 records = ~73 FD frames) and, if the main loop
-   stalled, possibly both halves; the 16-deep hardware TX FIFO cannot hold that, so send()
-   queues into a RAM ring and pumpTx() feeds the FIFO as it drains (from the TX-FIFO-empty
-   ISR + opportunistically on the main loop).
+/* Software TX rings, in TWO priority lanes. The ECU's full-rate telemetry drain hands off a whole
+   telemetry slot at once — one 16 KB SD-block slot holds ~292 records = ~292 FD frames — and, if
+   the main loop stalled, the drain may chase several slots; the 16-deep hardware TX FIFO cannot hold
+   that, so send() queues into a RAM ring and pumpTx() feeds the FIFO as it drains (from the
+   TX-FIFO-empty ISR + opportunistically on the main loop).
 
    Two lanes so a command/response never queues behind that telemetry burst: send() lanes a
    frame by its id priority bit (FrameCanHeader::priority, the id's MSB), and pumpTx() always
    empties the HI lane before the LO lane. Combined with the hardware running in TX-QUEUE mode
    (lowest id transmitted first, set in init()), an urgent frame preempts both the software
    backlog and any telemetry already queued in the hardware — its latency drops to about one
-   in-flight frame instead of the ~24 ms it would wait behind a single FIFO ring.
+   in-flight frame instead of the ~44 ms it would wait behind a single full LO lane.
 
-   LO holds both telemetry halves plus margin; HI is small — commands/responses are short and
-   infrequent, but a dropped one is serious (counted separately). send() (main loop) is the
-   sole producer; pumpTx() (under an FDCAN1_IT0 mask) is the sole consumer. */
-constexpr std::size_t TX_RING_LO_FRAMES = 192;   // telemetry (full-rate burst)
+   LO is sized to hold one whole telemetry slot's worth of records (≥ ~292 at the 16 KB SD block)
+   so a drain burst fits WITHOUT pacing — full-rate, no throttle. The telemetry drain additionally
+   honours this ring's fullness as backpressure (it holds its cursor and retries rather than
+   dropping), so a transient backlog degrades gracefully instead of silently losing frames; the
+   ring size keeps that safety net from ever engaging in steady state. Bump LO higher if a deeper
+   backlog (e.g. a longer SD stall) must ride without pacing. HI is small — commands/responses are
+   short and infrequent, but a dropped one is serious (counted separately). send() (main loop) is
+   the sole producer; pumpTx() (under an FDCAN1_IT0 mask) is the sole consumer. */
+constexpr std::size_t TX_RING_LO_FRAMES = 320;   // telemetry: one 16 KB slot (~292 records) + margin
 constexpr std::size_t TX_RING_HI_FRAMES = 32;    // commands / responses (low-rate, must not drop)
 
 template <std::size_t Capacity>

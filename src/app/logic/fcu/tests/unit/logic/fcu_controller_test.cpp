@@ -120,6 +120,20 @@ std::vector<uint8_t> makeValveRequest(BoardId device, FcuValves valve, ValveComm
     return payload;
 }
 
+/* Build a no-payload CommandType::Ping datagram addressed to `device` (the GS heartbeat). */
+std::vector<uint8_t> makePingRequest(BoardId device)
+{
+    EthernetHeader header = {};
+    header.target_id    = static_cast<uint8_t>(device);
+    header.payload_type = static_cast<uint8_t>(PayloadType::Command);
+    header.payload_id   = static_cast<uint8_t>(CommandType::Ping);
+
+    std::vector<uint8_t> payload(sizeof(EthernetHeader));
+    std::memcpy(payload.data(), &header, sizeof(EthernetHeader));
+    appendGsCrc(payload);
+    return payload;
+}
+
 /* Build a CAN frame with the given header fields and payload. */
 CanFrame makeCanFrame(BoardId sender, BoardId target, uint8_t messageId,
                       std::array<uint8_t, 8> data = {})
@@ -176,6 +190,7 @@ protected:
             {logic::control::REFUSED_VALVE_NONE, 0, 0, logic::control::State::Init};
         logic::control::refused_valve_count = 0;
         logic::control::state_entered_ms = 0;   // reset the dwell clock between tests
+        logic::control::last_ping_ms = 0;       // reset the heartbeat clock between tests
         controller_.init();
     }
 
@@ -267,6 +282,54 @@ TEST_F(FcuControllerTest, FullTelemetryBufferDownlinksGetSystem)
     std::memcpy(&header, sys->payload.data(), sizeof(EthernetHeader));
     EXPECT_EQ(header.sender_id, static_cast<uint8_t>(BoardId::FillingStation));
     EXPECT_EQ(header.payload_id, static_cast<uint8_t>(TelemetryType::SystemState));
+}
+
+/* Backpressure: when the single-in-flight Ethernet TX is busy, the telemetry drain holds its
+   cursor and retries — it never drops records, and the ready slot is SD-logged exactly once
+   regardless of how many drain passes the busy link forces. Once the TX frees, every record in the
+   slot downlinks. Mirror of the ECU's CAN backpressure; here the link is the UDP downlink to GS. */
+TEST_F(FcuControllerTest, BackpressureHoldsRecordsAndResumesWithoutLoss)
+{
+    reachSafe();  // clears udp_tx / can_tx
+    logic::control::base_control_flags.set(ControlFlagBase::FastRecording, true);  // raw -> data_fast + downlink
+
+    // Fill exactly one telemetry slot (and start a second) WITHOUT draining, so a full slot is ready
+    // to downlink. One record per produceRecord (one queued conversion each).
+    const std::size_t per_slot =
+        logic::telemetry::SD_BLOCK_PAYLOAD_CAP / sizeof(FcuSystemState);
+    const AdcInfo sample{};
+    for (std::size_t i = 0; i < per_slot + 2; ++i) {
+        adc_.push(sample);
+        controller_.produceRecord(++now_ms_);
+    }
+    bus().udp_tx.clear();   // discard any extended datagrams produced incidentally
+
+    const auto systemStateRecords = [] {
+        std::size_t bytes = 0;
+        for (const auto& d : bus().udp_tx) {
+            EthernetHeader h;
+            std::memcpy(&h, d.payload.data(), sizeof(h));
+            if (static_cast<TelemetryType>(h.payload_id) == TelemetryType::SystemState) {
+                bytes += h.payload_size_bytes;
+            }
+        }
+        return bytes / sizeof(FcuSystemState);
+    };
+
+    // TX busy: draining over several ticks downlinks NOTHING and drops NOTHING, and SD-logs the
+    // ready slot exactly once (the cursor + tail_recorded_ guard hold across the rejected passes).
+    eth_.fail_sends = true;
+    for (int i = 0; i < 5; ++i) {
+        step();
+    }
+    EXPECT_EQ(systemStateRecords(), 0u);
+    EXPECT_EQ(storage_fast_.writes.size(), 1u);   // recorded once despite 5 blocked drain passes
+
+    // TX frees: the whole held slot downlinks, none lost, and it is not re-recorded to SD.
+    eth_.fail_sends = false;
+    step();
+    EXPECT_EQ(systemStateRecords(), per_slot);
+    EXPECT_EQ(storage_fast_.writes.size(), 1u);
 }
 
 /* The FCU must downlink the FULL FcuSystemState (base + eth_info), not just the shared
@@ -478,6 +541,36 @@ TEST_F(FcuControllerTest, ExtendedRecordReportsTheLiveControlFlags)
         FcuExtendedSystemState ext;
         std::memcpy(&ext, d.payload.data() + sizeof(EthernetHeader), sizeof(ext));
         EXPECT_NE(ext.base.control_flags_base & (1u << static_cast<uint8_t>(ControlFlagBase::FastRecording)), 0u);
+        found = true;
+    }
+    EXPECT_TRUE(found) << "no ExtendedSystemState was downlinked";
+}
+
+/* The ExtendedSystemState reports how stale the GS heartbeat is: whole seconds since the last Ping
+   this board received, saturating at 255. */
+TEST_F(FcuControllerTest, ExtendedRecordReportsSecondsSinceLastPing)
+{
+    reachSafe();  // clears udp_tx
+
+    // A broadcast Ping stamps the heartbeat clock at the current time.
+    bus().push_udp(Endpoint{}, makePingRequest(BoardId::Broadcast));
+    step();
+    const uint32_t ping_ms = now_ms_;
+    bus().udp_tx.clear();   // drop the self-Pong + any record produced at the ping tick
+
+    // ~2.3 s later, an extended record reports 2 whole seconds since that Ping.
+    stepTo(ping_ms + 2300);
+
+    bool found = false;
+    for (const auto& d : bus().udp_tx) {
+        EthernetHeader h;
+        std::memcpy(&h, d.payload.data(), sizeof(h));
+        if (static_cast<TelemetryType>(h.payload_id) != TelemetryType::ExtendedSystemState) {
+            continue;
+        }
+        FcuExtendedSystemState ext;
+        std::memcpy(&ext, d.payload.data() + sizeof(EthernetHeader), sizeof(ext));
+        EXPECT_EQ(ext.base.seconds_since_last_ping, 2u);
         found = true;
     }
     EXPECT_TRUE(found) << "no ExtendedSystemState was downlinked";
@@ -919,6 +1012,50 @@ TEST_F(FcuControllerTest, EcuTelemetryIsBatchedAndRelayedToGs)
     EXPECT_EQ(first.base.creation_timestamp_ms, 0xABCDEF01u);  // bytes round-tripped intact
 }
 
+/* The FCU RELAYS the ECU's incoming telemetry to the GS but MUST NOT record it on its own SD card:
+   the relay path (relayEcuFrame -> ecuLogAppend -> ecu_log_ -> drainRelayedEcu) is downlink-only and
+   never touches the SD recorder, which logs ONLY the FCU's own records. Feed a full ECU high-rate
+   stream (enough to fill + drain a relay half) while producing NO FCU records of our own, then assert
+   the FCU's SystemState SD streams (data_fast.bin / data_slow.bin) stayed empty. */
+TEST_F(FcuControllerTest, DoesNotRecordRelayedEcuTelemetryToSd)
+{
+    namespace codec = logic::communication::can;
+    reachSafe();  // clears udp_tx / can_tx
+
+    auto relayedToGs = []() -> bool {
+        for (const auto& d : bus().udp_tx) {
+            EthernetHeader h;
+            std::memcpy(&h, d.payload.data(), sizeof(h));
+            if (h.sender_id == static_cast<uint8_t>(BoardId::Engine) &&
+                static_cast<TelemetryType>(h.payload_id) == TelemetryType::SystemState) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    EcuSystemState record{};
+    record.base.creation_timestamp_ms = 0x0EC00000;
+    for (int i = 0; i < 4000 && !relayedToGs(); ++i) {
+        std::array<CanFrame, codec::SYSTEM_STATE_FRAGMENTS> frames;
+        codec::packSystemState(record, BoardId::Engine, BoardId::FillingStation,
+                               static_cast<uint8_t>(logic::control::State::Unsafe),
+                               static_cast<uint8_t>(i & 0x0F),
+                               std::span<CanFrame, codec::SYSTEM_STATE_FRAGMENTS>(frames));
+        for (const auto& f : frames) {
+            bus().push_can(f);
+        }
+        step();   // drains CAN, reassembles + relays; NB: no produceRecord() — the FCU logs nothing of its own
+    }
+
+    ASSERT_TRUE(relayedToGs()) << "the ECU stream never relayed to the GS — the path was not exercised";
+
+    // The whole ECU stream reached the GS, but NONE of it was written to the FCU's SD SystemState
+    // streams: those are fed only by the FCU's own produceRecord/drain, which we never called here.
+    EXPECT_TRUE(storage_fast_.writes.empty()) << "ECU telemetry was recorded to the FCU's data_fast.bin";
+    EXPECT_TRUE(storage_slow_.writes.empty()) << "ECU telemetry was recorded to the FCU's data_slow.bin";
+}
+
 /* The ECU's low-rate ExtendedSystemState is relayed to the GS UNBATCHED — streamed on as soon
    as a record reassembles off CAN (unlike the batched SystemState relay above), tagged as the
    ECU's (sender BoardId::Engine) and carrying the ECU's state. One CAN record in -> one GS
@@ -1047,6 +1184,30 @@ TEST_F(FcuControllerTest, EmatchPresenceRidesTheExtendedRecord)
         FcuExtendedSystemState ext;
         std::memcpy(&ext, d.payload.data() + sizeof(EthernetHeader), sizeof(ext));
         EXPECT_EQ(ext.ematch_info.status.detected, 1u);   // mirrored from the detect line
+        found = true;
+    }
+    EXPECT_TRUE(found) << "no ExtendedSystemState was downlinked";
+}
+
+/* The SD card-present (SD_DETECT) signal rides the extended record's board-wide SD engine health.
+   The recorder reads it off the fast store (all three share the one engine), so script that one. */
+TEST_F(FcuControllerTest, SdCardDetectRidesTheExtendedRecord)
+{
+    reachSafe();
+    storage_fast_.engine_info_value.card_detected = 1u;   // a card is seated in the socket
+    bus().udp_tx.clear();
+    controller_.tick(now_ms_ += 150);    // cross the ~10 Hz extended interval -> one record
+
+    bool found = false;
+    for (const auto& d : bus().udp_tx) {
+        EthernetHeader h;
+        std::memcpy(&h, d.payload.data(), sizeof(h));
+        if (static_cast<TelemetryType>(h.payload_id) != TelemetryType::ExtendedSystemState) {
+            continue;
+        }
+        FcuExtendedSystemState ext;
+        std::memcpy(&ext, d.payload.data() + sizeof(EthernetHeader), sizeof(ext));
+        EXPECT_EQ(ext.base.sd_write_engine_info.card_detected, 1u);   // surfaced from the SD_DETECT line
         found = true;
     }
     EXPECT_TRUE(found) << "no ExtendedSystemState was downlinked";

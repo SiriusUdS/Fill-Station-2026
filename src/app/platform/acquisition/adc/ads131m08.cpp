@@ -211,21 +211,41 @@ void Ads131m08::init(const Config& config)
     CLOCK_REG.bits.OSR = 0b100; // osr 2048 = 2kSPS
     write_register_blocking(REG_ADDR_CLOCK, CLOCK_REG.all);
 
+    // PGA analog gain: a 3-bit code per channel. The PgaGain enum value IS that code, so it
+    // drops straight into the bitfield. Channels 0-3 live in GAIN (0x04), channels 4-7 in
+    // GAIN2 (0x05); reserved bits stay 0 (the .all = 0 clears them).
     REG_GAIN_t GAIN_REG;
     GAIN_REG.all = 0;
-    GAIN_REG.bits.PGAGAIN0 = 0b101; // 101 = 32 gain
-    GAIN_REG.bits.PGAGAIN1 = 0b101;
-    GAIN_REG.bits.PGAGAIN2 = 0b101;
-    GAIN_REG.bits.PGAGAIN3 = 0b101;
+    GAIN_REG.bits.PGAGAIN0 = static_cast<uint16_t>(cfg_.pga_gain[0]);
+    GAIN_REG.bits.PGAGAIN1 = static_cast<uint16_t>(cfg_.pga_gain[1]);
+    GAIN_REG.bits.PGAGAIN2 = static_cast<uint16_t>(cfg_.pga_gain[2]);
+    GAIN_REG.bits.PGAGAIN3 = static_cast<uint16_t>(cfg_.pga_gain[3]);
     write_register_blocking(REG_ADDR_GAIN, GAIN_REG.all);
 
     REG_GAIN2_t GAIN_REG2;
     GAIN_REG2.all = 0;
-    GAIN_REG2.bits.PGAGAIN4 = 0b101;
-    GAIN_REG2.bits.PGAGAIN5 = 0b101;
-    GAIN_REG2.bits.PGAGAIN6 = 0b101;
-    GAIN_REG2.bits.PGAGAIN7 = 0b101;
+    GAIN_REG2.bits.PGAGAIN4 = static_cast<uint16_t>(cfg_.pga_gain[4]);
+    GAIN_REG2.bits.PGAGAIN5 = static_cast<uint16_t>(cfg_.pga_gain[5]);
+    GAIN_REG2.bits.PGAGAIN6 = static_cast<uint16_t>(cfg_.pga_gain[6]);
+    GAIN_REG2.bits.PGAGAIN7 = static_cast<uint16_t>(cfg_.pga_gain[7]);
     write_register_blocking(REG_ADDR_GAIN2, GAIN_REG2.all);
+
+    // Per-channel OCAL offset + GCAL gain calibration. The channel register banks are regular:
+    // channel n starts at CH0_CFG + n*CH_REG_STRIDE, and within a bank the order is
+    // CFG, OCAL_MSB, OCAL_LSB, GCAL_MSB, GCAL_LSB. Each cal value is 24-bit: the MSB register
+    // holds bits 23:8, the LSB register holds bits 7:0 in its high byte (low byte reserved 0).
+    constexpr uint8_t CH_REG_STRIDE = REG_ADDR_CH1_CFG - REG_ADDR_CH0_CFG;  // 5 registers per channel
+    for (std::size_t ch = 0; ch < channel_count; ++ch) {
+        const uint8_t base = static_cast<uint8_t>(REG_ADDR_CH0_CFG + ch * CH_REG_STRIDE);
+
+        const uint32_t ocal = static_cast<uint32_t>(cfg_.ocal_offset[ch]) & 0x00FFFFFFu;
+        write_register_blocking(base + 1u, static_cast<uint16_t>((ocal >> 8) & 0xFFFFu));   // OCAL_MSB (23:8)
+        write_register_blocking(base + 2u, static_cast<uint16_t>((ocal & 0xFFu) << 8));     // OCAL_LSB (7:0)
+
+        const uint32_t gcal = static_cast<uint32_t>(cfg_.gcal_gain[ch]) & 0x00FFFFFFu;
+        write_register_blocking(base + 3u, static_cast<uint16_t>((gcal >> 8) & 0xFFFFu));   // GCAL_MSB (23:8)
+        write_register_blocking(base + 4u, static_cast<uint16_t>((gcal & 0xFFu) << 8));     // GCAL_LSB (7:0)
+    }
 }
 
 void Ads131m08::start()

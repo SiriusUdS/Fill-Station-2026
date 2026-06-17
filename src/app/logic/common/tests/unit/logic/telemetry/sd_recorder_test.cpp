@@ -146,12 +146,13 @@ TEST_F(SdRecorderTest, DisableLoggingFinalizesAllFilesAndStops)
    fast stream, since all three share the one engine) for the low-rate ExtendedSystemState. */
 TEST_F(SdRecorderTest, EngineHealthIsSurfacedFromTheStore)
 {
-    fast_.engine_info_value = SdWriteEngineInfo{ /*overrun_count=*/7u, /*errored=*/1u, /*reserved=*/0u };
+    fast_.engine_info_value = SdWriteEngineInfo{ /*overrun_count=*/7u, /*errored=*/1u, /*card_detected=*/1u };
 
     const SdWriteEngineInfo health = rec_.engineHealth();
 
     EXPECT_EQ(health.overrun_count, 7u);
     EXPECT_EQ(health.errored, 1u);
+    EXPECT_EQ(health.card_detected, 1u);   // card-present rides the same board-wide engine health
 }
 
 } // namespace

@@ -78,15 +78,16 @@ constexpr uint16_t LOCAL_PORT      = 55555;
 
 /* ---- RX DMA pool --------------------------------------------------------- */
 constexpr std::size_t RX_BUF_SIZE_BYTES = 1536;
-/* MUST stay strictly greater than ETH_RX_DESC_CNT (4). When the RX ISR pops a frame it
-   immediately re-arms that descriptor via HAL_ETH_RxAllocateCallback (the only path that
-   re-arms RX descriptors). With as many buffers as descriptors there is never a spare buffer
-   at that instant, the callback returns null, the descriptor is left dead, and after the DMA
-   chews through its descriptors RX stops for good (telemetry TX keeps running, masking it).
-   The spare buffers here guarantee the re-arm always finds one — even when a whole halt's worth
-   of frames (the debugger case) is drained in one ISR pass. 12 buffers = 4 descriptors + 8
-   spare, ~18 KB in the 288 KB Ethernet DMA SRAM region. */
-constexpr std::size_t RX_BUF_COUNT      = 12;
+/* MUST stay strictly greater than ETH_RX_DESC_CNT. When the RX ISR pops a frame it immediately
+   re-arms that descriptor via HAL_ETH_RxAllocateCallback (the only path that re-arms RX
+   descriptors). With as many buffers as descriptors there is never a spare buffer at that instant,
+   the callback returns null, the descriptor is left dead, and after the DMA chews through its
+   descriptors RX stops for good (telemetry TX keeps running, masking it). The spare buffers here
+   guarantee the re-arm always finds one — even when a whole halt's worth of frames (the debugger
+   case) is drained in one ISR pass. Derived from ETH_RX_DESC_CNT (+8 spare) so it can never drift
+   below the descriptor ring when the CubeMX descriptor count changes — at 16 descriptors this is
+   24 buffers, ~36 KB of the 288 KB Ethernet DMA SRAM region. */
+constexpr std::size_t RX_BUF_COUNT      = ETH_RX_DESC_CNT + 8;
 
 /* ---- RX datagram ring for the UDP seam ----------------------------------- */
 constexpr std::size_t MAX_UDP_PAYLOAD_BYTES      = IPV4_MAX_DATA_LEN_BYTES - 8;  // minus UDP header
@@ -145,7 +146,7 @@ struct __attribute__((packed)) ArpPacket {
 
 /* ---- RX pool state (shared with the HAL DMA callbacks below) -------------- */
 uint8_t   rx_pool[RX_BUF_COUNT][RX_BUF_SIZE_BYTES] __attribute__((section(".RxBuffSection")));
-BufStatus rx_buf_status[RX_BUF_COUNT];
+volatile BufStatus rx_buf_status[RX_BUF_COUNT];   // written in the RX ISR, read in tick(): volatile
 volatile uint8_t rx_queue_size = 0;
 
 /* ---- RX datagram ring ---------------------------------------------------- */
@@ -155,58 +156,100 @@ struct RxSlot {
     std::size_t length_bytes = 0;
 };
 
+// The datagram ring is filled (enqueue_rx, via tick()->process_eth_frame) and emptied (receive())
+// entirely in the foreground main loop — the RX ISR only marks rx_buf_status/rx_queue_size, it does
+// NOT parse frames. So this ring is single-context: plain indices, no volatile or barrier needed.
 std::array<RxSlot, RX_RING_CAPACITY_DATAGRAMS> rx_ring{};
 std::size_t rx_ring_head = 0;
 std::size_t rx_ring_tail = 0;
 
-/* ---- TX frame templates (scatter-gather buffers in the DMA TX region) ----- */
-ETH_BufferTypeDef tx_eth_hdr_buf;
-EthHeader         tx_eth_hdr __attribute__((section(".TxBuffSection")));
+/* ---- TX buffer pool (decoupled, multi-frame-in-flight) ------------------- *
+ * Every transmit (UDP telemetry, ICMP echo reply, ARP reply) is assembled into one pool slot as a
+ * single CONTIGUOUS Ethernet frame and handed to the DMA as ONE descriptor. The pool lets up to
+ * TX_POOL_SIZE frames be in flight at once, so the telemetry drain's burst neither reuses a buffer
+ * the DMA is still reading (the frame-corruption bug) nor serializes on the wire — ETH egress is
+ * fully decoupled from the foreground. Sized to hold a whole 16 KB telemetry slot (~12 datagrams)
+ * plus margin. Lives in the ETH DMA region (.TxBuffSection / D2 SRAM, non-cached).
+ *
+ * Requires the HAL TX descriptor ring to be at least TX_POOL_SIZE deep (one descriptor per frame):
+ * set the ETH "Tx Descriptors Length" (ETH_TX_DESC_CNT) to >= TX_POOL_SIZE in CubeMX.
+ *
+ * A slot is reclaimed only AFTER its frame has fully transmitted: TxConfig.pData carries the slot,
+ * the per-packet TX-complete interrupt runs HAL_ETH_ReleaseTxPacket() (which drains ALL completed
+ * packets, so it is correct even when several finish between interrupts), and that invokes
+ * HAL_ETH_TxFreeCallback(slot) -> marks the slot free. send() claims a free slot; if the pool is
+ * full it reports Busy and the telemetry drain holds its cursor and retries (paced, never dropped).
+ * (Setting pData non-NULL also makes the HAL's PacketAddress gate engage, so the descriptors are
+ * reclaimed by that release path rather than the OWN bit alone — the release IS required now.) */
+constexpr std::size_t TX_POOL_SIZE       = 16;
+constexpr std::size_t TX_FRAME_MAX_BYTES = sizeof(EthHeader) + ETH_MAX_PAYLOAD_LEN_BYTES;
 
-ETH_BufferTypeDef tx_ipv4_hdr_buf;
-Ipv4Header        tx_ipv4_hdr __attribute__((section(".TxBuffSection")));
+struct TxSlot {
+    uint8_t           frame[TX_FRAME_MAX_BYTES];
+    ETH_BufferTypeDef buf;
+};
+TxSlot        s_tx_pool[TX_POOL_SIZE] __attribute__((section(".TxBuffSection")));
+volatile bool s_tx_slot_free[TX_POOL_SIZE];   // true = free; cleared by send() (CPU), set by the TX-free ISR
 
-ETH_BufferTypeDef tx_icmp_reply_buf;
-uint8_t           tx_icmp_reply[IPV4_MAX_DATA_LEN_BYTES] __attribute__((section(".TxBuffSection")));
-
-ETH_BufferTypeDef tx_udp_hdr_buf;
-UdpHeader         tx_udp_hdr __attribute__((section(".TxBuffSection")));
-
-ETH_BufferTypeDef tx_udp_data_buf;
-uint8_t           tx_udp_data[IPV4_MAX_DATA_LEN_BYTES] __attribute__((section(".TxBuffSection")));
-
-ETH_BufferTypeDef tx_arp_buf;
-ArpPacket         tx_arp __attribute__((section(".TxBuffSection")));
-
-/* ---- Header preparation -------------------------------------------------- */
-void prepare_eth_header(const uint8_t dst[6], uint16_t ethertype)
+/* Claim a free pool slot (send() is the sole claimer, CPU context), or -1 if the pool is full. */
+int claim_tx_slot()
 {
-    std::memcpy(tx_eth_hdr.dst, dst, 6);
-    tx_eth_hdr.ethertype = hton16(ethertype);
+    for (std::size_t i = 0; i < TX_POOL_SIZE; ++i) {
+        if (s_tx_slot_free[i]) {
+            s_tx_slot_free[i] = false;
+            return static_cast<int>(i);
+        }
+    }
+    return -1;
 }
 
-void prepare_ipv4_header(uint16_t data_len_bytes, uint8_t protocol, uint32_t dst_ip)
+/* Assemble the Ethernet + IPv4 headers at the front of @p frame; return the bytes written. The
+   IPv4 header + L4 checksums are left zero — the MAC TX engine inserts them (TxConfig.ChecksumCtrl). */
+std::size_t write_eth_ipv4(uint8_t* frame, const uint8_t dst_mac[6], uint8_t protocol,
+                           uint32_t dst_ip, uint16_t ip_payload_len)
 {
-    tx_ipv4_hdr.len      = hton16(sizeof(Ipv4Header) + data_len_bytes);
-    tx_ipv4_hdr.protocol = protocol;
-    tx_ipv4_hdr.dst      = hton32(dst_ip);
-    tx_eth_hdr_buf.next  = &tx_ipv4_hdr_buf;
+    EthHeader eth{};
+    std::memcpy(eth.dst, dst_mac, 6);
+    std::memcpy(eth.src, heth.Init.MACAddr, 6);
+    eth.ethertype = hton16(ETHERTYPE_IPV4);
+    std::memcpy(frame, &eth, sizeof(eth));
+
+    Ipv4Header ip{};
+    ip.version  = 4;
+    ip.ihl      = 5;
+    ip.len      = hton16(static_cast<uint16_t>(sizeof(Ipv4Header) + ip_payload_len));
+    ip.frag     = hton16(IPV4_DF_FLAG);
+    ip.ttl      = IPV4_DEFAULT_TTL;
+    ip.protocol = protocol;
+    ip.checksum = 0;   // inserted by the MAC
+    ip.src      = hton32(LOCAL_IP);
+    ip.dst      = hton32(dst_ip);
+    std::memcpy(frame + sizeof(EthHeader), &ip, sizeof(ip));
+
+    return sizeof(EthHeader) + sizeof(Ipv4Header);
 }
 
-void prepare_udp_header(uint16_t data_len_bytes, uint16_t dst_port)
+/* Hand a built pool slot's frame (@p frame_len bytes) to the TX DMA. Returns nullopt once queued;
+   on a failure to start it frees the slot and returns the error. pData carries the slot so the
+   TX-complete path can reclaim it. */
+std::optional<NetError> transmit_slot(int slot, uint16_t frame_len)
 {
-    tx_udp_hdr.dst_port = hton16(dst_port);
-    tx_udp_hdr.len      = hton16(sizeof(UdpHeader) + data_len_bytes);
-    tx_udp_data_buf.len = data_len_bytes;
-    tx_ipv4_hdr_buf.next = &tx_udp_hdr_buf;
-}
+    s_tx_pool[slot].buf.buffer = s_tx_pool[slot].frame;
+    s_tx_pool[slot].buf.len    = frame_len;
+    s_tx_pool[slot].buf.next   = nullptr;
 
-void prepare_arp_header(const uint8_t mac[6], uint32_t ip, uint16_t oper)
-{
-    tx_arp.oper = hton16(oper);
-    std::memcpy(tx_arp.tha, mac, 6);
-    tx_arp.tpa = hton32(ip);
-    tx_eth_hdr_buf.next = &tx_arp_buf;
+    TxConfig.TxBuffer = &s_tx_pool[slot].buf;
+    TxConfig.Length   = frame_len;
+    TxConfig.pData    = &s_tx_pool[slot];
+
+    if (HAL_ETH_Transmit_IT(&heth, &TxConfig) == HAL_OK) {
+        s_info.status.tx_busy  = 0u;
+        s_info.status.tx_error = 0u;
+        return std::nullopt;
+    }
+    s_tx_slot_free[slot]   = true;   // never went out — give the slot back
+    s_info.status.tx_error = 1u;
+    return NetError::InternalError;
 }
 
 /* ---- RX dispatch --------------------------------------------------------- */
@@ -232,74 +275,85 @@ void enqueue_rx(const Endpoint& source, const uint8_t* payload, std::size_t leng
 
 void process_udp(Endpoint& source, const uint8_t* udp_buf)
 {
-    const auto* rx_udp = reinterpret_cast<const UdpHeader*>(udp_buf);
-    const uint16_t len = ntoh16(rx_udp->len);
+    UdpHeader rx_udp;
+    std::memcpy(&rx_udp, udp_buf, sizeof(rx_udp));   // copy out of the byte pool (no aliasing UB)
+    const uint16_t len = ntoh16(rx_udp.len);
 
     if (len < sizeof(UdpHeader) || len > IPV4_MAX_DATA_LEN_BYTES) {
         return;
     }
-    if (ntoh16(rx_udp->dst_port) != LOCAL_PORT) {
+    if (ntoh16(rx_udp.dst_port) != LOCAL_PORT) {
         return;  // no application on this port
     }
 
-    source.port = ntoh16(rx_udp->src_port);
+    source.port = ntoh16(rx_udp.src_port);
     enqueue_rx(source, udp_buf + sizeof(UdpHeader), len - sizeof(UdpHeader));
 }
 
 void process_icmp_echo_request(const Endpoint& source, const uint8_t* icmp_buf, uint16_t icmp_len)
 {
-    const auto* rx_icmp = reinterpret_cast<const IcmpEchoHeader*>(icmp_buf);
-    if (rx_icmp->code != 0) {
+    IcmpEchoHeader rx_icmp;
+    std::memcpy(&rx_icmp, icmp_buf, sizeof(rx_icmp));   // copy out of the byte pool (no aliasing UB)
+    if (rx_icmp.code != 0) {
         return;
     }
 
-    prepare_eth_header(source.mac.data(), ETHERTYPE_IPV4);
-    prepare_ipv4_header(icmp_len, IPV4_PROTOCOL_ICMP, source.ipv4);
-    tx_ipv4_hdr_buf.next = &tx_icmp_reply_buf;
-    tx_icmp_reply_buf.len = icmp_len;
+    if (icmp_len > IPV4_MAX_DATA_LEN_BYTES) {
+        return;   // oversized echo; ignore
+    }
+    const int slot = claim_tx_slot();
+    if (slot < 0) {
+        return;   // TX pool full: drop the echo reply (best-effort; the peer retries)
+    }
 
-    std::memcpy(tx_icmp_reply, icmp_buf, icmp_len);
-    reinterpret_cast<IcmpEchoHeader*>(tx_icmp_reply)->type = ICMP_TYPE_ECHO_REPLY;
+    uint8_t* const frame = s_tx_pool[slot].frame;
+    std::size_t    off   = write_eth_ipv4(frame, source.mac.data(), IPV4_PROTOCOL_ICMP,
+                                          source.ipv4, icmp_len);
+    std::memcpy(frame + off, icmp_buf, icmp_len);          // echo the request payload back
+    rx_icmp.type = ICMP_TYPE_ECHO_REPLY;                   // turn the echo request into a reply
+    std::memcpy(frame + off, &rx_icmp, sizeof(rx_icmp));   // patch the ICMP header in place
+    off += icmp_len;
 
-    TxConfig.Length = sizeof(EthHeader) + sizeof(Ipv4Header) + icmp_len;
-    HAL_ETH_Transmit_IT(&heth, &TxConfig);
+    (void)transmit_slot(slot, static_cast<uint16_t>(off));
 }
 
 void process_icmp(const Endpoint& source, const uint8_t* icmp_buf, uint16_t icmp_len)
 {
-    const auto* rx_icmp = reinterpret_cast<const IcmpEchoHeader*>(icmp_buf);
-    if (rx_icmp->type == ICMP_TYPE_ECHO) {
+    IcmpEchoHeader rx_icmp;
+    std::memcpy(&rx_icmp, icmp_buf, sizeof(rx_icmp));   // copy out of the byte pool (no aliasing UB)
+    if (rx_icmp.type == ICMP_TYPE_ECHO) {
         process_icmp_echo_request(source, icmp_buf, icmp_len);
     }
 }
 
 void process_ipv4(Endpoint& source, const uint8_t* ipv4_buf)
 {
-    const auto* rx_ipv4 = reinterpret_cast<const Ipv4Header*>(ipv4_buf);
+    Ipv4Header rx_ipv4;
+    std::memcpy(&rx_ipv4, ipv4_buf, sizeof(rx_ipv4));   // copy out of the byte pool (no aliasing UB)
 
-    if (rx_ipv4->ihl > 5) {
+    if (rx_ipv4.ihl > 5) {
         return;  // options unsupported
     }
-    if (ntoh32(rx_ipv4->dst) != LOCAL_IP) {
+    if (ntoh32(rx_ipv4.dst) != LOCAL_IP) {
         return;  // not for us
     }
 
-    const uint16_t len = ntoh16(rx_ipv4->len);
+    const uint16_t len = ntoh16(rx_ipv4.len);
     if (len < sizeof(Ipv4Header) || len > ETH_MAX_PAYLOAD_LEN_BYTES) {
         return;
     }
 
-    const uint16_t frag = ntoh16(rx_ipv4->frag);
+    const uint16_t frag = ntoh16(rx_ipv4.frag);
     if ((frag & IPV4_MF_FLAG) || (frag & IPV4_OFFSET_MASK)) {
         return;  // fragmentation unsupported
     }
 
-    source.ipv4 = ntoh32(rx_ipv4->src);
+    source.ipv4 = ntoh32(rx_ipv4.src);
 
     const uint8_t* data    = ipv4_buf + sizeof(Ipv4Header);
     const uint16_t data_len = len - sizeof(Ipv4Header);
 
-    switch (rx_ipv4->protocol) {
+    switch (rx_ipv4.protocol) {
         case IPV4_PROTOCOL_ICMP: process_icmp(source, data, data_len); break;
         case IPV4_PROTOCOL_UDP:  process_udp(source, data);            break;
         default: break;
@@ -308,29 +362,52 @@ void process_ipv4(Endpoint& source, const uint8_t* ipv4_buf)
 
 void send_arp_reply(const uint8_t mac[6], uint32_t ip)
 {
-    prepare_eth_header(mac, ETHERTYPE_ARP);
-    prepare_arp_header(mac, ip, ARP_OPER_REPLY);
-    TxConfig.Length = sizeof(EthHeader) + sizeof(ArpPacket);
-    HAL_ETH_Transmit_IT(&heth, &TxConfig);
+    const int slot = claim_tx_slot();
+    if (slot < 0) {
+        return;   // TX pool full: drop the ARP reply (the peer will retry)
+    }
+    uint8_t* const frame = s_tx_pool[slot].frame;
+
+    EthHeader eth{};
+    std::memcpy(eth.dst, mac, 6);
+    std::memcpy(eth.src, heth.Init.MACAddr, 6);
+    eth.ethertype = hton16(ETHERTYPE_ARP);
+    std::memcpy(frame, &eth, sizeof(eth));
+
+    ArpPacket arp{};
+    arp.htype = hton16(ARP_HTYPE_ETHERNET);
+    arp.ptype = hton16(ARP_PTYPE_IPV4);
+    arp.hlen  = ARP_HLEN_ETHERNET;
+    arp.plen  = ARP_PLEN_IPV4;
+    arp.oper  = hton16(ARP_OPER_REPLY);
+    std::memcpy(arp.sha, heth.Init.MACAddr, 6);
+    arp.spa   = hton32(LOCAL_IP);
+    std::memcpy(arp.tha, mac, 6);
+    arp.tpa   = hton32(ip);
+    std::memcpy(frame + sizeof(EthHeader), &arp, sizeof(arp));
+
+    (void)transmit_slot(slot, static_cast<uint16_t>(sizeof(EthHeader) + sizeof(ArpPacket)));
 }
 
 void process_arp(const uint8_t* arp_buf)
 {
-    const auto* rx_arp = reinterpret_cast<const ArpPacket*>(arp_buf);
-    if (ntoh32(rx_arp->tpa) != LOCAL_IP || ntoh16(rx_arp->oper) != ARP_OPER_REQUEST) {
+    ArpPacket rx_arp;
+    std::memcpy(&rx_arp, arp_buf, sizeof(rx_arp));   // copy out of the byte pool (no aliasing UB)
+    if (ntoh32(rx_arp.tpa) != LOCAL_IP || ntoh16(rx_arp.oper) != ARP_OPER_REQUEST) {
         return;
     }
-    send_arp_reply(rx_arp->sha, ntoh32(rx_arp->spa));
+    send_arp_reply(rx_arp.sha, ntoh32(rx_arp.spa));
 }
 
 void process_eth_frame(const uint8_t* frame)
 {
-    const auto* hdr = reinterpret_cast<const EthHeader*>(frame);
-    const uint16_t ethertype = ntoh16(hdr->ethertype);
+    EthHeader hdr;
+    std::memcpy(&hdr, frame, sizeof(hdr));   // copy out of the byte pool (no aliasing UB)
+    const uint16_t ethertype = ntoh16(hdr.ethertype);
     const uint8_t* payload = frame + sizeof(EthHeader);
 
     Endpoint source;
-    std::memcpy(source.mac.data(), hdr->src, MAC_LENGTH_BYTES);
+    std::memcpy(source.mac.data(), hdr.src, MAC_LENGTH_BYTES);
 
     switch (ethertype) {
         case ETHERTYPE_IPV4: process_ipv4(source, payload); break;
@@ -522,45 +599,14 @@ void Ethernet::init()
     TxConfig.Attributes   = ETH_TX_PACKETS_FEATURES_CSUM | ETH_TX_PACKETS_FEATURES_CRCPAD;
     TxConfig.ChecksumCtrl = ETH_CHECKSUM_IPHDR_PAYLOAD_INSERT_PHDR_CALC;
     TxConfig.CRCPadCtrl   = ETH_CRC_PAD_INSERT;
-    TxConfig.TxBuffer     = &tx_eth_hdr_buf;
+    // TxBuffer/Length/pData are set per frame in transmit_slot(); the constant header fields are
+    // written into each pool slot's contiguous frame at send time (write_eth_ipv4 / the ARP path).
 
-    tx_eth_hdr_buf.buffer = reinterpret_cast<uint8_t*>(&tx_eth_hdr);
-    tx_eth_hdr_buf.len    = sizeof(tx_eth_hdr);
-    tx_eth_hdr_buf.next   = nullptr;
-    std::memcpy(tx_eth_hdr.src, heth.Init.MACAddr, 6);
-
-    tx_ipv4_hdr_buf.buffer = reinterpret_cast<uint8_t*>(&tx_ipv4_hdr);
-    tx_ipv4_hdr_buf.len    = sizeof(tx_ipv4_hdr);
-    tx_ipv4_hdr_buf.next   = nullptr;
-    tx_ipv4_hdr.version = 4;
-    tx_ipv4_hdr.ihl     = 5;
-    tx_ipv4_hdr.dscp    = 0;
-    tx_ipv4_hdr.ecn     = 0;
-    tx_ipv4_hdr.id      = 0;
-    tx_ipv4_hdr.frag    = hton16(IPV4_DF_FLAG);
-    tx_ipv4_hdr.ttl     = IPV4_DEFAULT_TTL;
-    tx_ipv4_hdr.src     = hton32(LOCAL_IP);
-
-    tx_icmp_reply_buf.buffer = tx_icmp_reply;
-    tx_icmp_reply_buf.next   = nullptr;
-
-    tx_udp_hdr_buf.buffer = reinterpret_cast<uint8_t*>(&tx_udp_hdr);
-    tx_udp_hdr_buf.len    = sizeof(tx_udp_hdr);
-    tx_udp_hdr_buf.next   = &tx_udp_data_buf;
-    tx_udp_hdr.src_port   = hton16(LOCAL_PORT);
-
-    tx_udp_data_buf.buffer = tx_udp_data;
-    tx_udp_data_buf.next   = nullptr;
-
-    tx_arp_buf.buffer = reinterpret_cast<uint8_t*>(&tx_arp);
-    tx_arp_buf.len    = sizeof(ArpPacket);
-    tx_arp_buf.next   = nullptr;
-    tx_arp.htype = hton16(ARP_HTYPE_ETHERNET);
-    tx_arp.ptype = hton16(ARP_PTYPE_IPV4);
-    tx_arp.hlen  = ARP_HLEN_ETHERNET;
-    tx_arp.plen  = ARP_PLEN_IPV4;
-    std::memcpy(tx_arp.sha, heth.Init.MACAddr, 6);
-    tx_arp.spa = hton32(LOCAL_IP);
+    // All TX pool slots start free; each frame is one contiguous DMA buffer (a single descriptor).
+    for (std::size_t i = 0; i < TX_POOL_SIZE; ++i) {
+        s_tx_pool[i].buf.next = nullptr;
+        s_tx_slot_free[i]     = true;
+    }
 
     s_info.status.initialized = 1u;
     s_info.state              = EthernetState::Up;
@@ -620,28 +666,37 @@ std::optional<NetError> Ethernet::send(const Endpoint& dest, std::span<const uin
         return NetError::InternalError;
     }
 
-    const auto len = static_cast<uint16_t>(payload.size());
-    std::memcpy(tx_udp_data, payload.data(), len);
-
-    prepare_eth_header(dest.mac.data(), ETHERTYPE_IPV4);
-    prepare_ipv4_header(sizeof(UdpHeader) + len, IPV4_PROTOCOL_UDP, dest.ipv4);
-    prepare_udp_header(len, dest.port);
-
-    tx_udp_data_buf.len = len;
-    TxConfig.Length = sizeof(EthHeader) + sizeof(Ipv4Header) + sizeof(UdpHeader) + len;
-
-    switch (HAL_ETH_Transmit_IT(&heth, &TxConfig)) {
-        case HAL_OK:
-            s_info.status.tx_busy  = 0u;
-            s_info.status.tx_error = 0u;
-            return std::nullopt;
-        case HAL_BUSY:
-            s_info.status.tx_busy = 1u;
-            return NetError::Busy;
-        default:
-            s_info.status.tx_error = 1u;
-            return NetError::InternalError;
+    // Claim a free TX pool slot. If none is free the pool (and the DMA ring behind it) is full of
+    // not-yet-transmitted frames: report Busy WITHOUT touching any buffer, so an in-flight frame is
+    // never corrupted. The telemetry drain honours Busy — it holds its cursor and retries next tick,
+    // so the datagram is paced, never dropped. With the pool sized to a whole telemetry slot this is
+    // essentially never hit in steady state.
+    const int slot = claim_tx_slot();
+    if (slot < 0) {
+        s_info.status.tx_busy = 1u;
+        return NetError::Busy;
     }
+
+    const auto     data_len = static_cast<uint16_t>(payload.size());
+    const uint16_t udp_len  = static_cast<uint16_t>(sizeof(UdpHeader) + data_len);
+    uint8_t* const frame    = s_tx_pool[slot].frame;
+
+    std::size_t off = write_eth_ipv4(frame, dest.mac.data(), IPV4_PROTOCOL_UDP, dest.ipv4, udp_len);
+
+    UdpHeader udp{};
+    udp.src_port = hton16(LOCAL_PORT);
+    udp.dst_port = hton16(dest.port);
+    udp.len      = hton16(udp_len);
+    udp.checksum = 0;   // inserted by the MAC (pseudo-header calculated)
+    std::memcpy(frame + off, &udp, sizeof(udp));
+    off += sizeof(udp);
+
+    if (data_len != 0) {
+        std::memcpy(frame + off, payload.data(), data_len);
+        off += data_len;
+    }
+
+    return transmit_slot(slot, static_cast<uint16_t>(off));
 }
 
 std::optional<Datagram> Ethernet::receive()
@@ -715,5 +770,28 @@ extern "C" void HAL_ETH_RxCpltCallback(ETH_HandleTypeDef* eth_handle)
             __enable_irq();
         }
         rx_buf = nullptr;
+    }
+}
+
+/* -------------------------------------------------------------------------- */
+/* HAL ETH TX completion callbacks (reclaim the TX pool)                       */
+/* -------------------------------------------------------------------------- */
+
+/* TX-complete interrupt (one IOC per packet): reclaim EVERY finished TX descriptor.
+   HAL_ETH_ReleaseTxPacket drains all completed packets in one pass — correct even when several
+   finished between interrupts — and calls HAL_ETH_TxFreeCallback below for each, freeing its slot. */
+extern "C" void HAL_ETH_TxCpltCallback(ETH_HandleTypeDef* eth_handle)
+{
+    HAL_ETH_ReleaseTxPacket(eth_handle);
+}
+
+/* Per-packet release hook: buff is the TxConfig.pData we set in transmit_slot() (the TxSlot). Mark
+   that pool slot free so send() can reuse it now that its frame has fully transmitted. */
+extern "C" void HAL_ETH_TxFreeCallback(uint32_t* buff)
+{
+    auto* const     slot = reinterpret_cast<TxSlot*>(buff);
+    const std::size_t idx = static_cast<std::size_t>(slot - s_tx_pool);
+    if (idx < TX_POOL_SIZE) {
+        s_tx_slot_free[idx] = true;
     }
 }

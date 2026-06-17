@@ -1,14 +1,13 @@
 /* ------------------------------------------------------------------------- *
- * Integration test: the FCU routes a ping through to the ECU and relays the
- * ECU's pong back to the ground station.
+ * Integration test: the broadcast Ping heartbeat. The GS always BROADCASTS the ~1 Hz Ping, so one
+ * packet makes the FCU answer for itself AND bridge the ping to the ECU; the ECU's pong is relayed
+ * back to the ground station.
  *
  * Drives the assembled FCU Controller end to end over the FakeBus:
- *   - Ping (Gs->Fcu->Ecu): a UDP Ping from the GS (rxTick -> handleDatagram ->
- *     handlePing) is forwarded to the ECU as a CAN Command/Ping addressed to
- *     Engine; and
- *   - Pong (Ecu->Fcu->Gs): a CAN Response/Pong from the ECU (canTick ->
- *     relayPongToGs) is relayed to the GS as a UDP Response/Pong tagged as the
- *     ECU's (sender BoardId::Engine).
+ *   - Heartbeat (Gs -> {Fcu, Ecu}): a broadcast UDP Ping makes the FCU (a) Pong straight to the GS
+ *     (sender FillingStation) and (b) forward a CAN Command/Ping to the Engine; and
+ *   - Pong (Ecu->Fcu->Gs): a CAN Response/Pong from the ECU is relayed to the GS as a UDP
+ *     Response/Pong tagged as the ECU's (sender BoardId::Engine).
  * No fakes are stubbed per-unit: raw bytes in on one transport, raw bytes out on
  * the other, inspected through the FakeBus tx queues.
  * ------------------------------------------------------------------------- */
@@ -36,13 +35,14 @@ namespace command = logic::communication::command;
 
 namespace {
 
-/* A UDP datagram carrying a no-payload Ping command addressed to the FCU, stamped
-   with the GS's sequence @p seq. */
-std::vector<uint8_t> makePingCommand(uint8_t seq = 0)
+/* A UDP datagram carrying a no-payload Ping command, broadcast by the GS (the heartbeat is always a
+   Broadcast, so both boards answer), stamped with the GS's sequence @p seq. @p target overridable for
+   the unicast-routing cases. */
+std::vector<uint8_t> makePingCommand(uint8_t seq = 0, BoardId target = BoardId::Broadcast)
 {
     EthernetHeader header{};
     header.sender_id    = static_cast<uint8_t>(BoardId::GsControl);
-    header.target_id    = static_cast<uint8_t>(BoardId::FillingStation);
+    header.target_id    = static_cast<uint8_t>(target);
     header.payload_type = static_cast<uint8_t>(PayloadType::Command);
     header.payload_id   = static_cast<uint8_t>(command::CommandType::Ping);
     header.seq          = seq;
@@ -111,12 +111,22 @@ protected:
     }
 };
 
-/* ---- Ping (Gs->Fcu->Ecu) ------------------------------------------------- */
+/* ---- Broadcast heartbeat (Gs -> {Fcu pong, Ecu forward}) ----------------- */
 
-TEST_F(PingRouting, GsPingIsForwardedToEcuOverCan)
+TEST_F(PingRouting, GsBroadcastPingPongsFromFcuAndForwardsToEcu)
 {
-    deliverUdp(makePingCommand());
+    deliverUdp(makePingCommand(/*seq=*/3));   // broadcast heartbeat
 
+    // (a) the FCU answers for itself, a Pong straight to the GS.
+    ASSERT_EQ(bus().udp_tx.size(), 1u);
+    EthernetHeader pong;
+    std::memcpy(&pong, bus().udp_tx.front().payload.data(), sizeof(pong));
+    EXPECT_EQ(static_cast<BoardId>(pong.sender_id), BoardId::FillingStation);
+    EXPECT_EQ(static_cast<PayloadType>(pong.payload_type), PayloadType::Response);
+    EXPECT_EQ(static_cast<ResponseType>(pong.payload_id), ResponseType::Pong);
+    EXPECT_EQ(pong.seq, 3u);
+
+    // (b) and bridges the ping to the ECU over CAN (so the ECU can pong too).
     ASSERT_EQ(bus().can_tx.size(), 1u);
     CanHeader header;
     header.code = bus().can_tx.front().id;
@@ -156,18 +166,28 @@ TEST_F(PingRouting, NonPongCanFrameDoesNotRelayToGs)
 
 TEST_F(PingRouting, GsSeqIsPropagatedThroughTheWholeChain)
 {
-    deliverUdp(makePingCommand(/*seq=*/5));    // GS pings with seq 5
+    deliverUdp(makePingCommand(/*seq=*/5));    // GS broadcasts the heartbeat with seq 5
 
+    // The FCU's own Pong echoes seq 5...
+    ASSERT_EQ(bus().udp_tx.size(), 1u);
+    EthernetHeader self_pong;
+    std::memcpy(&self_pong, bus().udp_tx.front().payload.data(), sizeof(EthernetHeader));
+    EXPECT_EQ(static_cast<BoardId>(self_pong.sender_id), BoardId::FillingStation);
+    EXPECT_EQ(self_pong.seq, 5u);
+
+    // ...and the ping is forwarded to the ECU carrying seq 5.
     ASSERT_EQ(bus().can_tx.size(), 1u);
     CanHeader forwarded;
     forwarded.code = bus().can_tx.front().id;
-    EXPECT_EQ(forwarded.frame.seq, 5u);        // forwarded to the ECU carrying seq 5
+    EXPECT_EQ(forwarded.frame.seq, 5u);
 
+    bus().udp_tx.clear();   // isolate the relayed ECU pong from the FCU's own pong above
     deliverCan(makePongFrame(/*seq=*/5));      // ECU answers, echoing seq 5
 
     ASSERT_EQ(bus().udp_tx.size(), 1u);
     EthernetHeader relayed;
     std::memcpy(&relayed, bus().udp_tx.front().payload.data(), sizeof(EthernetHeader));
+    EXPECT_EQ(static_cast<BoardId>(relayed.sender_id), BoardId::Engine);  // the ECU's pong
     EXPECT_EQ(relayed.seq, 5u);                // relayed back to the GS still carrying seq 5
 }
 

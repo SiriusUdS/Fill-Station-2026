@@ -74,6 +74,8 @@ FakeBus& bus();
  */
 struct FakeEthernet {
     EthernetInfo info_value{};   /**< Returned verbatim by info(); script .state / .status. */
+    bool fail_sends = false;     /**< When true, send() rejects with Busy and records nothing —
+                                      simulates the single-in-flight TX being busy (backpressure). */
 
     void tick() { bus().udp_tick_count++; }
 
@@ -91,6 +93,9 @@ struct FakeEthernet {
     [[nodiscard]] std::optional<logic::communication::NetError> send(
         const logic::communication::Endpoint& dest, std::span<const uint8_t> payload)
     {
+        if (fail_sends) {
+            return logic::communication::NetError::Busy;   // TX busy: nothing recorded, caller retries
+        }
         bus().udp_tx.push_back(SentDatagram{dest, std::vector<uint8_t>(payload.begin(), payload.end())});
         return std::nullopt;
     }
@@ -110,10 +115,15 @@ static_assert(logic::communication::Ethernet<FakeEthernet>);
  */
 struct FakeCan {
     CanInfo info_value{};   /**< Returned verbatim by info(); script .state / .status. */
+    bool fail_sends = false;   /**< When true, send() rejects with InternalError and records nothing —
+                                    simulates a full TX ring (backpressure). */
 
     [[nodiscard]] std::optional<logic::communication::CanError> send(
         const logic::communication::CanFrame& frame)
     {
+        if (fail_sends) {
+            return logic::communication::CanError::InternalError;   // ring full: nothing queued, caller retries
+        }
         bus().can_tx.push_back(frame);
         return std::nullopt;
     }
