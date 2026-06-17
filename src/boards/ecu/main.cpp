@@ -64,5 +64,9 @@ int main(void)
     ecu_app::g_ipa_valve.tick(now);  // advance each valve's open/close + limit-switch state machine
     ecu_app::g_nos_valve.tick(now);
     ecu_app::g_controller.tick(now); // drain CAN, flush telemetry; produceRecord is on the timer
+    // Pace one staged SD block onto the card if the engine is idle and the card is ready — a quick
+    // card-state poll + a DMA kick, never an f_write/f_sync (raw-sector DMA into each file's
+    // pre-allocated extent). Runs after the valve + control ticks so SD never delays actuation.
+    platform::storage::sd_write_engine().tick();
   }
 }

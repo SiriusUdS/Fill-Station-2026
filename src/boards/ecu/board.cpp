@@ -135,12 +135,19 @@ void wireDrivers(void)
       .er_irqn = I2C4_ER_IRQn,
   });
 
+  /* Bring up the single shared async write engine on SDMMC1 BEFORE any file opens (and before
+     its completion IRQ can fire): it arbitrates the one SDMMC peripheral across all three files
+     via raw-sector DMA. One engine per physical card (mirrors the FCU, which uses SDMMC2). */
+  platform::storage::sd_write_engine().init(&hsd1);
+
   /* Bind the three SD log files on SDMMC1 (the app composition left them unbound). They
      share one card: g_controller.init() mounts the volume + creates this boot's session
-     folder once, then opens all three files inside it (same recording policy as the FCU). */
-  g_card_fast.bind(&hsd1, "0:/", "data_fast.bin", /*sync_period_writes=*/16);  // high-rate: sync rarely
-  g_card_slow.bind(&hsd1, "0:/", "data_slow.bin", /*sync_period_writes=*/4);
-  g_card_ext.bind(&hsd1, "0:/", "data_ext.bin",  /*sync_period_writes=*/1);   // low-rate: sync every write
+     folder once, then opens all three files inside it and f_expands each to a fixed contiguous
+     region (same recording policy + pre-alloc sizes as the FCU). The reserved tail is reclaimed
+     by finalize() on a clean shutdown (the DisableLogging flag); tune to the longest run. */
+  g_card_fast.bind(&hsd1, "0:/", "data_fast.bin", /*prealloc_bytes=*/512u * 1024u * 1024u);  // high-rate
+  g_card_slow.bind(&hsd1, "0:/", "data_slow.bin", /*prealloc_bytes=*/ 32u * 1024u * 1024u);
+  g_card_ext.bind(&hsd1, "0:/", "data_ext.bin",  /*prealloc_bytes=*/  8u * 1024u * 1024u);   // low-rate
 
   /* Two propellant ball valves on TIM15: IPA = CH1 (PE5), NOS = CH2 (PE6). 333 Hz
      (3 ms) servo PWM owned here: 100 MHz / (PSC 99 + 1) = 1 MHz tick; ARR 2999 -> 3 ms.

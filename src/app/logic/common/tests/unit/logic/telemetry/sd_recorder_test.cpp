@@ -109,4 +109,49 @@ TEST_F(SdRecorderTest, ExtWritesAccumulateInto4096FooterVerifiedBlocks)
     EXPECT_EQ(view->trailer.payload_bytes % sizeof(FakeExtended), 0u);   // a whole number of records
 }
 
+/* DisableLogging: setting the flag finalizes every file once, flushes any partial block first,
+   and stops all further writes for the session (even if the flag is later cleared). */
+TEST_F(SdRecorderTest, DisableLoggingFinalizesAllFilesAndStops)
+{
+    // Stage a partial ext block so finalize has something to flush (proves no records are lost).
+    struct FakeExtended { uint8_t bytes[200]; };
+    FakeExtended e{};
+    rec_.recordExtended(e, /*now_ms=*/10);
+    EXPECT_TRUE(ext_.writes.empty()) << "partial block must not have flushed yet";
+
+    logic::control::base_control_flags.set(ControlFlagBase::DisableLogging, true);
+
+    // The first record seen with the flag set triggers finalize across all three files.
+    auto block = makeSlot(/*tag=*/1);
+    rec_.recordSystemState(std::span<uint8_t>(block), kSlotPayload, /*now_ms=*/20);
+
+    EXPECT_EQ(fast_.finalize_calls, 1);
+    EXPECT_EQ(slow_.finalize_calls, 1);
+    EXPECT_EQ(ext_.finalize_calls, 1);
+    EXPECT_EQ(ext_.writes.size(), 1u) << "the partial ext block must be flushed before finalize";
+    EXPECT_TRUE(fast_.writes.empty()) << "the triggering record must not be logged";
+
+    // Further records are dropped and nothing re-finalizes, even if the flag is cleared again.
+    logic::control::base_control_flags.set(ControlFlagBase::DisableLogging, false);
+    auto block2 = makeSlot(/*tag=*/2);
+    rec_.recordSystemState(std::span<uint8_t>(block2), kSlotPayload, /*now_ms=*/30);
+    rec_.recordExtended(e, /*now_ms=*/30);
+
+    EXPECT_EQ(fast_.finalize_calls, 1) << "finalize is one-way for the session";
+    EXPECT_TRUE(fast_.writes.empty());
+    EXPECT_EQ(ext_.writes.size(), 1u);
+}
+
+/* engineHealth(): the shared async write-engine health is surfaced from a store (read off the
+   fast stream, since all three share the one engine) for the low-rate ExtendedSystemState. */
+TEST_F(SdRecorderTest, EngineHealthIsSurfacedFromTheStore)
+{
+    fast_.engine_info_value = SdWriteEngineInfo{ /*overrun_count=*/7u, /*errored=*/1u, /*reserved=*/0u };
+
+    const SdWriteEngineInfo health = rec_.engineHealth();
+
+    EXPECT_EQ(health.overrun_count, 7u);
+    EXPECT_EQ(health.errored, 1u);
+}
+
 } // namespace

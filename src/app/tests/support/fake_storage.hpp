@@ -19,10 +19,12 @@
 /** @brief In-memory stand-in for the backing store (models logic::storage::Storage). */
 struct FakeStorage {
     /* ---- inputs the test scripts ---- */
-    StorageInfo info_value{};   /**< Returned verbatim by info(); script .state / .status. */
+    StorageInfo       info_value{};          /**< Returned verbatim by info(); script .state / .status. */
+    SdWriteEngineInfo engine_info_value{};   /**< Returned verbatim by engineInfo(); script the write-engine health. */
 
     /* ---- outputs the test inspects ---- */
-    int                               init_calls = 0;
+    int                               init_calls     = 0;
+    int                               finalize_calls = 0;
     std::vector<std::vector<uint8_t>> writes;   /**< One captured copy per write() block. */
 
     void init() { ++init_calls; }
@@ -32,7 +34,11 @@ struct FakeStorage {
         writes.emplace_back(data.begin(), data.end());
     }
 
+    void finalize() { ++finalize_calls; }
+
     [[nodiscard]] StorageInfo info() const { return info_value; }
+
+    [[nodiscard]] SdWriteEngineInfo engineInfo() const { return engine_info_value; }
 };
 
 // Same compile-time guarantee the SD driver carries: the double really models

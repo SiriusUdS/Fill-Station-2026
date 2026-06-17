@@ -73,6 +73,7 @@ public:
         slow_used_ = 0;
         ext_used_  = 0;
         count_     = 0;
+        finalized_ = false;
         sum_.fill(0);
     }
 
@@ -87,6 +88,9 @@ public:
      */
     void recordSystemState(std::span<uint8_t> block, std::size_t used, uint32_t now_ms)
     {
+        if (loggingDisabled(now_ms)) {
+            return;   // run finalized (tail reclaimed); stream stopped for the session
+        }
         if (logic::control::base_control_flags.get(ControlFlagBase::FastRecording)) {
             // The fast block is the drained ring slot (already SD_LOG_BLOCK_BYTES): stamp the
             // footer over its unused tail [used, end) and write the whole sector-aligned block.
@@ -105,6 +109,9 @@ public:
     {
         static_assert(sizeof(Ext) <= logic::telemetry::SD_BLOCK_PAYLOAD_CAP,
                       "an ExtendedSystemState must fit in one SD block with room for the footer");
+        if (loggingDisabled(now_ms)) {
+            return;   // run finalized (tail reclaimed); stream stopped for the session
+        }
         appendBlock(ext_, ext_block_.data(), ext_used_,
                     reinterpret_cast<const uint8_t*>(&record), sizeof(Ext), now_ms);
     }
@@ -123,7 +130,43 @@ public:
         return infos[0];
     }
 
+    /** @brief The board-wide async SD write engine's health (dropped-block count + sticky DMA
+     *         error), for the low-rate ExtendedSystemState. The engine is shared by all three
+     *         files, so any store reports the same value — read it once off the fast stream. */
+    [[nodiscard]] SdWriteEngineInfo engineHealth() const { return fast_.engineInfo(); }
+
 private:
+    // True once SD logging has been stopped for this session — both record paths no-op after.
+    // Driven by the DisableLogging base control flag: the FIRST record seen with the flag set
+    // finalizes the run (below) and latches finalized_; thereafter logging stays off regardless
+    // of the flag, because finalize() reclaimed each file's pre-allocated tail and the raw-sector
+    // cursor can no longer safely advance into freed space — a reboot is required to log again.
+    [[nodiscard]] bool loggingDisabled(uint32_t now_ms)
+    {
+        if (finalized_) {
+            return true;   // already finalized this session: permanently off (cannot resume safely)
+        }
+        if (!logic::control::base_control_flags.get(ControlFlagBase::DisableLogging)) {
+            return false;  // logging active
+        }
+        finalizeAll(now_ms);
+        finalized_ = true;
+        return true;
+    }
+
+    // End-of-run finalize across all three files: flush the partial slow/ext accumulators so the
+    // last records are not lost (the fast stream has no accumulator — it writes drained slots
+    // directly), then finalize each file. The engine is shared, so the first finalize() drains
+    // every just-flushed block off the card; the rest then truncate their own files' unused tail.
+    void finalizeAll(uint32_t now_ms)
+    {
+        flushBlock(slow_, slow_block_.data(), slow_used_, now_ms);
+        flushBlock(ext_,  ext_block_.data(),  ext_used_,  now_ms);
+        fast_.finalize();
+        slow_.finalize();
+        ext_.finalize();
+    }
+
     // Block-average @p used bytes of high-rate records into the data_slow.bin block. Accumulates
     // per-channel ADC sums; every SLOW_WINDOW samples emits one averaged record (channels =
     // sum >> SLOW_SHIFT; other fields from the window's last sample) into the slow accumulator,
@@ -189,6 +232,7 @@ private:
     std::array<int32_t, ADC_CHANNEL_COUNT> sum_{};   // per-channel sum over the current window
     unsigned count_ = 0;                             // samples accumulated in the window
     Record   last_{};                                // last sample seen (non-numeric template)
+    bool     finalized_ = false;                     // DisableLogging latched: run finalized, streams off
 
     // Per-file SD_LOG_BLOCK_BYTES accumulators for the slow + ext streams, so each writes one
     // footer-stamped sector-aligned block at a time (no sub-block, unaligned writes). NOT zeroed

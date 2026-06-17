@@ -46,7 +46,6 @@ struct BallValveConfig {
     LimitSwitchConfig       open_limit;       /**< Switch asserted when fully open. */
     LimitSwitchConfig       close_limit;      /**< Switch asserted when fully closed. */
     uint32_t                max_transit_timeout_ms;  /**< Open/close time before declaring Fault. */
-    bool                    opened_switch_ignored = false;  /**< No physical open switch: open() floats at 100 %. */
     /* PWM duty-cycle calibration (percent of the PWM period): the duty commanded at 0 % open
        (fully closed) and 100 % open (fully open). init() converts these to the servo's pulse-tick
        endpoints against the timer period. One calibrated pair per valve; defaults are 26 / 54 %. */
@@ -74,9 +73,11 @@ public:
     /**
      * @brief  Command the valve to its fully-open position.
      * @param  bypass_ms  A FORCED open when > 0: drive hard open — unconditionally (skipping the
-     *                    "already open/opening" no-op) and IGNORING the open limit switch (no
-     *                    transit-timeout fault) — for this many ms, after which tick() auto-reverts
-     *                    to a normal switch-monitored open. 0 = a normal open.
+     *                    "already open/opening" no-op, regardless of the current state including
+     *                    Faulted) and IGNORING the limit switches entirely (no early completion and
+     *                    no fault, neither both-switches nor transit-timeout) — for this many ms,
+     *                    after which tick() auto-reverts to a normal switch-monitored open. 0 = a
+     *                    normal open.
      * @return std::nullopt on success, or a ValveError describing the failure.
      */
     [[nodiscard]] std::optional<logic::actuation::ValveError> open(uint32_t bypass_ms = 0);
@@ -84,7 +85,7 @@ public:
     /**
      * @brief  Command the valve to its fully-closed position.
      * @param  bypass_ms  A FORCED close when > 0, the close counterpart of open()'s bypass (drive
-     *                    hard closed, ignore the closed limit switch for this many ms, then revert).
+     *                    hard closed, ignoring the limit switches for this many ms, then revert).
      * @return std::nullopt on success, or a ValveError describing the failure.
      */
     [[nodiscard]] std::optional<logic::actuation::ValveError> close(uint32_t bypass_ms = 0);

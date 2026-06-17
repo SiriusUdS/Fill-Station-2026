@@ -205,6 +205,7 @@ public:
         // Shared prefix: timestamp + base control flags + this board's per-board (FCU) flags +
         // the refused-command diagnostics (SetState + SetControlFlag, with counts).
         logic::telemetry::fillExtendedBase(ext.base, now_ms, logic::control::fcu_control_flags.raw());
+        ext.base.sd_write_engine_info = recorder_.engineHealth();  // board-wide async SD write-engine health
         const auto thermocouples = thermocouples_.info();
         for (std::size_t i = 0; i < THERMOCOUPLE_COUNT; ++i) {
             ext.thermocouple_info[i] = thermocouples[i];

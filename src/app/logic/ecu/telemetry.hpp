@@ -199,6 +199,7 @@ public:
         // Shared prefix: timestamp + base control flags + refused-command diagnostics. The ECU
         // has no per-board flags, so its per-board control-flags byte is 0.
         logic::telemetry::fillExtendedBase(ext.base, now_ms, /*control_flags_board=*/0);
+        ext.base.sd_write_engine_info = recorder_.engineHealth();  // board-wide async SD write-engine health
         ext.power_monitor = power_monitor_.info();  // INA3221 (I2C4), polled at ~10 Hz
         recorder_.recordExtended(ext, now_ms);   // accumulate -> data_ext.bin
         sendExtendedCan(ext);   // downlink to the FCU (unbatched), which relays it to the GS

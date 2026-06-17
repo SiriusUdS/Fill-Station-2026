@@ -62,7 +62,6 @@ void BallValve::init(const BallValveConfig& config)
 
     info_                            = ValveInfo{};   // state Unknown, no status bits, 0 % commanded
     info_.status.initialized         = 1u;            // bound and ready to operate
-    info_.status.opened_switch_ignored = config_.opened_switch_ignored ? 1u : 0u;
     start_movement_ms_               = 0;
     end_movement_ms_                 = 0;
     servo::init(config_.servo);
@@ -70,11 +69,6 @@ void BallValve::init(const BallValveConfig& config)
 
 std::optional<ValveError> BallValve::open(uint32_t bypass_ms)
 {
-    // With no physical open switch there is nothing to confirm an Opened state,
-    // so "open" just drives fully open and floats there (== setOpenPercent(100)).
-    if (config_.opened_switch_ignored) {
-        return setOpenPercent(MAX_OPEN_PERCENT);   // clears bypass_ms_; no open switch to bypass
-    }
     bypass_ms_ = bypass_ms;   // record the forced-actuation window (0 = a normal switch-monitored open)
     if (bypass_ms == 0 &&
         (info_.state == ValveState::Opened || info_.state == ValveState::Opening)) {
@@ -129,11 +123,23 @@ std::optional<ValveError> BallValve::setOpenPercent(float percent)
 
 void BallValve::tick(uint32_t now_ms)
 {
-    // The open switch is ignored on valves wired without one (its GPIO would float).
-    const bool open_hit  = config_.opened_switch_ignored ? false : read_limit(config_.open_limit);
+    const bool open_hit  = read_limit(config_.open_limit);
     const bool close_hit = read_limit(config_.close_limit);
     info_.status.open_limit_high   = open_hit  ? 1u : 0u;
     info_.status.closed_limit_high = close_hit ? 1u : 0u;
+
+    // FORCED window: while inside it, ignore the limit switches ENTIRELY — none of the
+    // switch-driven outcomes below apply: not the both-switches fault, not the transit-timeout
+    // fault, and not a single-switch hit (early completion). The valve is left being driven hard
+    // to the commanded target (state stays Opening/Closing, the servo holds the compare open()/
+    // close() set) until bypass_ms_ elapses, after which the normal switch-monitored logic below
+    // resumes on the next tick. The switches are still sampled into status above for telemetry;
+    // they just don't act. This is what makes a forced command happen regardless of the current
+    // state (including Faulted) or the switch readings.
+    if (bypass_ms_ > 0 && (now_ms - start_movement_ms_) < bypass_ms_) {
+        info_.status.fault_both_switches = 0u;  // forced: never faults on the switches
+        return;
+    }
 
     // Both switches asserted at once is physically impossible — a hard fault.
     if (open_hit && close_hit) {
@@ -152,11 +158,10 @@ void BallValve::tick(uint32_t now_ms)
                 info_.status.in_transition = 0u;
                 end_movement_ms_ = now_ms;
                 idle_servo(config_.servo);   // reached the open stop: idle the servo (duty 0)
-            } else if ((now_ms - start_movement_ms_) >= config_.max_transit_timeout_ms &&
-                       (now_ms - start_movement_ms_) >= bypass_ms_) {
-                // While inside the forced-actuation window (now - start < bypass_ms_) keep driving
-                // open (Opening) without faulting, whether or not the switch asserts; once it
-                // elapses the normal transit-timeout fault resumes.
+            } else if ((now_ms - start_movement_ms_) >= config_.max_transit_timeout_ms) {
+                // Normal (non-forced) transit timed out: the forced window, if any, was already
+                // honoured by the early return at the top of tick(), so reaching here means the
+                // switch genuinely never asserted in time.
                 info_.state = ValveState::Faulted;
                 info_.status.in_transition = 0u;
                 end_movement_ms_ = now_ms;
@@ -169,8 +174,8 @@ void BallValve::tick(uint32_t now_ms)
                 info_.status.in_transition = 0u;
                 end_movement_ms_ = now_ms;
                 idle_servo(config_.servo);   // reached the closed stop: idle the servo (duty 0)
-            } else if ((now_ms - start_movement_ms_) >= config_.max_transit_timeout_ms &&
-                       (now_ms - start_movement_ms_) >= bypass_ms_) {
+            } else if ((now_ms - start_movement_ms_) >= config_.max_transit_timeout_ms) {
+                // Normal transit timed out (the forced window was already honoured above).
                 info_.state = ValveState::Faulted;
                 info_.status.in_transition = 0u;
                 end_movement_ms_ = now_ms;

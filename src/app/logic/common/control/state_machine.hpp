@@ -127,7 +127,7 @@ inline constexpr uint32_t LAUNCH_TO_SAFE_LOCKOUT_MS = 20000;
  *        valves forced open); the mechanism is transition-agnostic, so other valve transitions
  *        (open OR close) can adopt it. See logic::ecu::Control::serviceForcedValves.
  */
-inline constexpr uint32_t FORCED_VALVE_ACTUATION_MS = 2000;
+inline constexpr uint32_t FORCED_VALVE_ACTUATION_MS = 4000;
 
 /**
  * @brief Time-gated leg of the transition policy: is a structurally-legal edge

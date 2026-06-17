@@ -194,13 +194,22 @@ void wireDrivers(void)
       .er_irqn = I2C4_ER_IRQn,
   });
 
+  /* Bring up the shared async SD write engine FIRST: it arbitrates the one SDMMC peripheral
+     across all three files and is driven by the SDMMC2 completion ISR, so it must be online
+     before any file opens (and before that IRQ can fire). One engine per physical card. */
+  platform::storage::sd_write_engine().init(&hsd2);
+
   /* Bind the three SD log files to the HAL handle + FatFs drive + file name (the app
      composition left them unbound). They share one card: g_controller.init() mounts the
-     volume + creates this boot's session folder once, then opens all three files inside
-     it (data_fast.bin / data_slow.bin / data_ext.bin). */
-  g_card_fast.bind(&hsd2, "0:/", "data_fast.bin", /*sync_period_writes=*/16);  // high-rate: sync rarely
-  g_card_slow.bind(&hsd2, "0:/", "data_slow.bin", /*sync_period_writes=*/4);
-  g_card_ext.bind(&hsd2, "0:/", "data_ext.bin",  /*sync_period_writes=*/1);   // low-rate: sync every write
+     volume + creates this boot's session folder once, then opens all three files inside it
+     (data_fast.bin / data_slow.bin / data_ext.bin) and f_expands each to a fixed CONTIGUOUS
+     region. The pre-alloc sizes are this run's space budget per stream (the run stops writing a
+     stream, rather than growing it, once full); finalize() reclaims each file's unused tail on a
+     clean shutdown. Tune to the longest expected run: the fast 2 kHz stream needs far more than
+     the 125 Hz slow stream or the ~10 Hz extended stream. */
+  g_card_fast.bind(&hsd2, "0:/", "data_fast.bin", /*prealloc_bytes=*/512u * 1024u * 1024u);  // high-rate
+  g_card_slow.bind(&hsd2, "0:/", "data_slow.bin", /*prealloc_bytes=*/ 32u * 1024u * 1024u);
+  g_card_ext.bind(&hsd2, "0:/", "data_ext.bin",  /*prealloc_bytes=*/  8u * 1024u * 1024u);   // low-rate
 
   /* Bring up the two local ball valves. The 333 Hz (3 ms) servo PWM frequency is
      owned HERE, not in CubeMX: leave the generated timer at its defaults and set

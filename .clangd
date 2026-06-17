@@ -18,6 +18,6 @@ If:
 ---
 
 CompileFlags:
-  CompilationDatabase: src/boards/fcu/CM7/build
+  CompilationDatabase: src/boards/fcu/CM7/build/Debug
 If:
   PathMatch: src/boards/fcu/.*

@@ -102,6 +102,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${REPO_ROOT}/src/app/platform/communication/spi/spi_dma.cpp
     ${REPO_ROOT}/src/app/platform/communication/spi/spi_irq.cpp
     ${REPO_ROOT}/src/app/platform/storage/sd_card.cpp
+    ${REPO_ROOT}/src/app/platform/storage/sd_write_engine.cpp   # shared async SD write arbiter (raw-sector DMA)
     ${REPO_ROOT}/src/app/platform/communication/can/can_dil.cpp
     ${REPO_ROOT}/src/app/platform/data_integrity/crc/crc.cpp   # backs logic::data_integrity::crc32 (SdRecorder record CRC)
 )

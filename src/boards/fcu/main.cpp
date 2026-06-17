@@ -88,5 +88,10 @@ int main(void)
     fcu_app::g_fill_valve.tick(now);  // advance each valve's open/close + limit-switch state machine
     fcu_app::g_dump_valve.tick(now);
     fcu_app::g_controller.tick(now);  // also services the INA3221 + folds it into the extended record
+    // Pace one staged SD block onto the card if the engine is idle and the card is ready. This is
+    // the only SD work in the loop — a quick card-state poll + a DMA kick, never an f_write/f_sync
+    // (writes are fire-and-forget raw-sector DMA into each file's pre-allocated extent). Runs after
+    // the valve + control ticks so SD never delays actuation.
+    platform::storage::sd_write_engine().tick();
   }
 }

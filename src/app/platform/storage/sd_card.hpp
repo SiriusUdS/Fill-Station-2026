@@ -8,26 +8,28 @@
 #include "fatfs.h"           // FATFS, SDPath, f_* (FatFs middleware)
 
 #include "storage/interfaces/storage.hpp"   // logic::storage::Storage contract + StorageInfo
+#include "storage/sd_write_engine.hpp"      // the shared async write engine + SD_WRITE_BLOCK_BYTES
 
 /* ------------------------------------------------------------------------- *
- * FatFs-backed SD card log file. One instance per LOG FILE (not per card): bind a
- * HAL SD handle, a logical drive and a file name, then init() ensures the volume is
- * mounted and opens that file, kept open for the driver's lifetime. write() appends
- * a record and flushes (f_sync) it in BATCHES — every sync_period_ writes (set per file in
- * bind()) rather than every block — because the FAT/directory flush is the costly part of a save and
- * syncing every block stalls the producer enough to overrun the telemetry double buffer.
- * The first write is always synced so the file's directory entry is committed immediately.
- * The trade is that up to one sync period's records can be lost on a power cut. The
- * FatFs/HAL detail stays in the .cpp; the store owns its
- * StorageInfo (state + status), exposed through info(), and reports the failure
- * cause through Error.
+ * Pre-allocated, raw-sector SD log file (the level-3 datalogger). Each instance is one LOG FILE
+ * (not one card): bind a HAL SD handle, a logical drive, a file name and a pre-allocation size,
+ * then init() mounts the shared volume, opens the file and f_expands it to a fixed CONTIGUOUS
+ * region — so the whole FAT/directory cost is paid once, up front. The file's absolute start
+ * sector (LBA) is then resolved from the cluster chain, and write() simply DMAs each whole
+ * sector-aligned block to the next sector through the shared SdWriteEngine, bumping a cursor.
  *
- * A single physical card can carry several streams in separate files (e.g. the FCU
- * writes the 2 kHz data_fast.bin and the 10 Hz data_slow.bin). Both live inside a
- * fresh per-boot session folder (the highest existing numeric folder + 1), created
- * once via beginSession() — shared by every SdCard on that card — and each instance
- * opens its own file inside it; the mount + folder are NOT per-instance because two
- * FATFS objects on one drive would collide.
+ * Why: the old design appended through f_write + a batched f_sync, and the FAT/dir flush is the
+ * costly, latency-spiky part of a save — it stalled the foreground and overran the telemetry
+ * ring. Here there is NO f_write and NO f_sync on the hot path: the FAT was written by f_expand
+ * at init, and writes are fire-and-forget DMA into the pre-allocated extent. The foreground never
+ * blocks on the card. finalize() (clean shutdown) truncates the file back to the bytes actually
+ * written, returning the unused pre-allocated tail to the volume; a power-cut instead leaves the
+ * file at full size, recoverable via the per-block footer/CRC that marks the true end-of-data.
+ *
+ * One physical card carries several streams in separate files (data_fast/slow/ext), all sharing
+ * the single mounted volume + per-boot session folder (beginSession) and the single SdWriteEngine
+ * that arbitrates the one SDMMC peripheral. The HAL/FatFs detail stays in the .cpp; the store owns
+ * its StorageInfo (state + status, incl. last error cause), exposed through info().
  * ------------------------------------------------------------------------- */
 
 namespace platform::storage {
@@ -48,59 +50,81 @@ public:
      *          composition declare the file without naming a board HAL handle. */
     SdCard() = default;
 
-    /** @brief Default batched-flush period: f_sync once every this many writes. The fast
-     *         (high-rate) stream uses this; slower streams pass a smaller period to bind(). */
-    static constexpr unsigned DEFAULT_SYNC_PERIOD_WRITES = 16;
+    /** @brief Default pre-allocation for a stream's contiguous region. Sized for a generous
+     *         worst-case run; the unused tail is reclaimed by finalize() on a clean shutdown.
+     *         Tune per stream in bind() — the fast stream wants far more than the slow/ext ones. */
+    static constexpr uint32_t DEFAULT_PREALLOC_BYTES = 64u * 1024u * 1024u;  // 64 MiB
 
     /**
      * @brief  Bind the HAL SD handle, FatFs drive and this stream's file name (e.g.
      *         "data_fast.bin"). @p drive and @p filename must outlive the instance
      *         (string literals / static-lifetime buffers). Does not touch hardware;
-     *         init() mounts the volume and opens the file.
-     * @param  sync_period_writes  f_sync once every this many writes (batched flush). Tune
-     *         per stream: the high-rate data_fast.bin syncs rarely to avoid stalling the
-     *         producer, while a low-rate stream can sync every write (pass 1) cheaply. A
-     *         period of 0 is clamped to 1 (sync every write) so the file never goes unsynced.
+     *         init() mounts the volume, opens and pre-allocates the file.
+     * @param  prealloc_bytes  contiguous region to reserve for this run with f_expand. Rounded
+     *         down to a whole block; must exceed what the stream will write in the run (writes
+     *         stop, not grow, when the region fills). The tail is reclaimed by finalize().
      */
     void bind(SD_HandleTypeDef* handle, const char* drive, const char* filename,
-              unsigned sync_period_writes = DEFAULT_SYNC_PERIOD_WRITES)
+              uint32_t prealloc_bytes = DEFAULT_PREALLOC_BYTES)
     {
-        handle_      = handle;
-        drive_       = drive;
-        filename_    = filename;
-        sync_period_ = sync_period_writes == 0u ? 1u : sync_period_writes;
+        handle_         = handle;
+        drive_          = drive;
+        filename_       = filename;
+        prealloc_bytes_ = prealloc_bytes;
     }
 
     /**
-     * @brief  Ensure the volume is mounted and open this stream's log file (kept
-     *         open afterwards). Status becomes ACTIVE on success, ERROR otherwise.
+     * @brief  Ensure the volume is mounted, open this stream's log file and f_expand it to a
+     *         fixed contiguous region, then resolve its absolute start sector. Status becomes
+     *         ACTIVE on success, ERROR otherwise. The shared SdWriteEngine must be init()'d first.
      */
     void init();
 
     /**
-     * @brief  Append @p data to the open file, syncing to the card in batches (every
-     *         sync_period_ writes, plus the first write). No-op unless the store
-     *         is ready (init() succeeded) — a store that never mounted stays inert.
-     *         This just saves whatever the telemetry pipeline hands it.
+     * @brief  Hand one whole sector-aligned block (SD_WRITE_BLOCK_BYTES) to the async write
+     *         engine, targeted at the next sector of the pre-allocated region, and advance the
+     *         cursor. Non-blocking: copies into the engine ring and returns. No-op unless the
+     *         store is ready; silently stops once the region is full (the run outran its
+     *         pre-allocation) — surfaced via the engine's overrun count / this store's state.
      */
     void write(std::span<const uint8_t> data);
 
+    /**
+     * @brief  Clean-shutdown finalize: wait for the engine to drain, then truncate the file to
+     *         the bytes actually written (freeing the unused pre-allocated tail) and f_sync the
+     *         new size. Optional — skipping it (e.g. on a power-cut) just leaves the file at full
+     *         pre-alloc size, still readable via the per-block footers.
+     */
+    void finalize();
+
     /** @brief The store's own info record: state + status (incl. last error cause). */
     StorageInfo info() const { return info_; }
+
+    /** @brief The board-wide async write engine's health (dropped-block count + sticky DMA
+     *         error). Read from the single shared SdWriteEngine, so every file on the card
+     *         reports the same value; the recorder surfaces it once on the extended record. */
+    SdWriteEngineInfo engineInfo() const
+    {
+        const SdWriteEngine& engine = sd_write_engine();
+        return SdWriteEngineInfo{ engine.overrun_count(),
+                                  static_cast<uint8_t>(engine.errored() ? 1u : 0u),
+                                  /*reserved=*/0u };
+    }
 
 private:
     void fail(StorageError code);
 
     // Retained to identify the card; FatFs reaches the media through the linked
-    // diskio driver, not this handle directly.
+    // diskio driver, and the engine drives the same handle for DMA writes.
     SD_HandleTypeDef* handle_{};
     const char*       drive_{};     // FatFs logical drive, e.g. "0:/"
     const char*       filename_{};  // log file name on the volume, e.g. "data_fast.bin"
-    FIL               file_{};      // log file, opened by init() and kept open
+    uint32_t          prealloc_bytes_ = DEFAULT_PREALLOC_BYTES;  // contiguous region reserved at init()
+    FIL               file_{};      // log file, opened + pre-allocated by init(), kept open
+    uint32_t          base_lba_ = 0;          // absolute first card sector of the pre-allocated extent
+    uint32_t          capacity_sectors_ = 0;  // pre-allocated length, in 512-byte sectors
+    uint32_t          sector_cursor_ = 0;     // next sector to write, as an offset from base_lba_
     StorageInfo       info_{};      // state + status (incl. last error cause); see info()
-    unsigned          sync_period_       = DEFAULT_SYNC_PERIOD_WRITES; // f_sync every this many writes (per stream)
-    unsigned          writes_since_sync_ = 0;     // writes accrued since the last f_sync (batched flush)
-    bool              first_sync_done_   = false; // the first write force-syncs to commit the dir entry
 };
 
 // The driver is the logic seam: enforce conformance here so a contract drift is
