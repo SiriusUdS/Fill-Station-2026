@@ -31,8 +31,9 @@ struct FakeValve {
     int      close_calls        = 0;
     int      percent_calls      = 0;
     float    last_percent       = -1.0F;
-    uint32_t last_open_bypass_ms  = 0;   /**< bypass_ms passed to the most recent open(). */
-    uint32_t last_close_bypass_ms = 0;   /**< bypass_ms passed to the most recent close(). */
+    uint32_t last_open_bypass_ms    = 0;   /**< bypass_ms passed to the most recent open(). */
+    uint32_t last_close_bypass_ms   = 0;   /**< bypass_ms passed to the most recent close(). */
+    uint32_t last_percent_bypass_ms = 0;   /**< bypass_ms passed to the most recent setOpenPercent(). */
 
     [[nodiscard]] std::optional<logic::actuation::ValveError> open(uint32_t bypass_ms = 0)
     {
@@ -50,10 +51,12 @@ struct FakeValve {
         return next_error;
     }
 
-    [[nodiscard]] std::optional<logic::actuation::ValveError> setOpenPercent(float percent)
+    [[nodiscard]] std::optional<logic::actuation::ValveError> setOpenPercent(float percent,
+                                                                             uint32_t bypass_ms = 0)
     {
         ++percent_calls;
         last_percent = percent;
+        last_percent_bypass_ms = bypass_ms;
         if (!next_error) { info_.state = ValveState::Floating; info_.current_set_value = static_cast<uint8_t>(percent); }
         return next_error;
     }

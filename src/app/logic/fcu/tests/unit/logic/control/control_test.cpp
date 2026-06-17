@@ -326,14 +326,17 @@ TEST_F(ControlTest, BroadcastSetStateAppliesLocallyAndBridges)
     expectAckToGs(/*seq=*/2);              // local Ack on the commander line (the ECU Acks too)
 }
 
-TEST_F(ControlTest, TransitionToSafeClosesLocalValves)
+TEST_F(ControlTest, TransitionToSafeForceClosesLocalValves)
 {
     setCurrent(State::Unsafe);
     clearValveCalls();
-    deliver(makeSetState(State::Safe));   // any transition into Safe closes the local valves
+    deliver(makeSetState(State::Safe));   // any transition into Safe force-closes the local valves
     EXPECT_EQ(current(), State::Safe);
     EXPECT_EQ(fill_valve_.close_calls, 1);
     EXPECT_EQ(dump_valve_.close_calls, 1);
+    // Into Safe is a FORCED close (limit switches bypassed) like every transition-driven actuation.
+    EXPECT_EQ(fill_valve_.last_close_bypass_ms, logic::control::FORCED_VALVE_ACTUATION_MS);
+    EXPECT_EQ(dump_valve_.last_close_bypass_ms, logic::control::FORCED_VALVE_ACTUATION_MS);
 }
 
 TEST_F(ControlTest, FcuIgniteToLaunchDoesNotActuateValves)

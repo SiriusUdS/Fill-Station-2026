@@ -652,6 +652,17 @@ TEST_F(FcuControllerTest, SetValvePositionForceFlagForcesTheValve)
     requestValve(FcuValves::Fill, ValveCommand::Close, /*value=*/0,
                  BoardId::FillingStation, /*force=*/0);
     EXPECT_EQ(fill_valve_.last_close_bypass_ms, 0u);   // force byte clear -> a normal move
+
+    // The force flag threads through to SetOpenedPct too: a forced proportional hold passes the
+    // bypass window so the valve holds the percent without idling or faulting on a stray switch read.
+    requestValve(FcuValves::Fill, ValveCommand::SetOpenedPct, /*value=*/50,
+                 BoardId::FillingStation, /*force=*/1);
+    EXPECT_FLOAT_EQ(fill_valve_.last_percent, 50.0F);
+    EXPECT_EQ(fill_valve_.last_percent_bypass_ms, logic::control::FORCED_VALVE_ACTUATION_MS);
+
+    requestValve(FcuValves::Fill, ValveCommand::SetOpenedPct, /*value=*/30,
+                 BoardId::FillingStation, /*force=*/0);
+    EXPECT_EQ(fill_valve_.last_percent_bypass_ms, 0u);   // force byte clear -> a normal hold
 }
 
 /* ---- SD recording rate is owned by the state machine --------------------- *
@@ -970,6 +981,23 @@ TEST_F(FcuControllerTest, EmatchEnergisesEnteringIgnite)
     EXPECT_TRUE(ematch_.energised);              // firing line high in Ignite
     EXPECT_EQ(ematch_.energise_calls, 1u);
     EXPECT_NE(ematch_.last_energised_ms, 0u);    // stamped with the transition tick
+}
+
+/* Entering Ignite FORCE-closes Fill + Dump: the line must hold no flow when the e-match fires,
+   and the close is forced (limit switches bypassed) like every transition-driven actuation. */
+TEST_F(FcuControllerTest, EnteringIgniteForceClosesFillAndDump)
+{
+    reachSafe();
+    requestState(logic::control::State::Unsafe);
+    fill_valve_.close_calls = dump_valve_.close_calls = 0;
+    fill_valve_.last_close_bypass_ms = dump_valve_.last_close_bypass_ms = 0;
+
+    requestState(logic::control::State::Ignite);
+    ASSERT_EQ(currentState(), logic::control::State::Ignite);
+    EXPECT_GT(fill_valve_.close_calls, 0);
+    EXPECT_GT(dump_valve_.close_calls, 0);
+    EXPECT_EQ(fill_valve_.last_close_bypass_ms, logic::control::FORCED_VALVE_ACTUATION_MS);
+    EXPECT_EQ(dump_valve_.last_close_bypass_ms, logic::control::FORCED_VALVE_ACTUATION_MS);
 }
 
 /* Leaving Ignite to Launch drops the firing line and records the deenergise tick. */

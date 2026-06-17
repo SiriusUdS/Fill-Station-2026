@@ -49,6 +49,67 @@ static_assert((1u << SLOW_SHIFT) == SLOW_WINDOW, "SLOW_SHIFT must be log2(SLOW_W
 
 } // namespace detail
 
+/* ------------------------------------------------------------------------- *
+ * SD log capacity sizing (shared by both boards).
+ *
+ * Each of the three logs captures one record per production tick at its own cadence, packed into
+ * footer-stamped SD_LOG_BLOCK_BYTES blocks (a stream flips to a new block once another record
+ * would exceed SD_BLOCK_PAYLOAD_CAP). The knobs to set are the three MODE DURATIONS below; each
+ * board's pre-alloc is then computed from them with logBytesForSeconds() and re-checked with
+ * logCapacitySeconds() in a static_assert.
+ *
+ * fast and slow are mutually exclusive in time (the FastRecording flag picks one), so each of those
+ * files only needs its own mode's duration. ext is written in BOTH modes, so it must span fast +
+ * slow — EXT_LOG_DURATION_S is their sum, not an independent knob.
+ *
+ * The cadences MUST match the firmware that drives them: FAST_RECORD_RATE_HZ == each board's TIM6
+ * record rate (board.cpp); SLOW_RECORD_RATE_HZ == that decimated by SLOW_WINDOW; EXT_RECORD_RATE_HZ
+ * == 1000 / EXTENDED_INTERVAL_MS (each board's telemetry.hpp, 100 ms today).
+ * ------------------------------------------------------------------------- */
+
+inline constexpr uint32_t FAST_RECORD_RATE_HZ = 2000;                                      // == TIM6 cadence (board.cpp)
+inline constexpr uint32_t SLOW_RECORD_RATE_HZ = FAST_RECORD_RATE_HZ / detail::SLOW_WINDOW; // 2 kHz / 16 = 125 Hz
+inline constexpr uint32_t EXT_RECORD_RATE_HZ  = 10;                                        // == 1000 / EXTENDED_INTERVAL_MS (100 ms)
+
+/* ---- Configure here: how long each mode must last ------------------------------------- */
+inline constexpr uint32_t FAST_LOG_DURATION_S = 3600;                                      // fast (2 kHz) burn-window budget: 1 h
+inline constexpr uint32_t SLOW_LOG_DURATION_S = 36000;                                     // slow (125 Hz) resting budget: 10 h
+/* ext logs in BOTH modes, so it must outlast fast + slow combined (1 h + 10 h = 11 h). */
+inline constexpr uint32_t EXT_LOG_DURATION_S  = FAST_LOG_DURATION_S + SLOW_LOG_DURATION_S; // 11 h
+
+/** @brief Whole records packed into one footer-stamped block (a stream flips once another record
+ *         would exceed SD_BLOCK_PAYLOAD_CAP, so this is the floor). */
+template <typename Record>
+inline constexpr std::size_t LOG_RECORDS_PER_BLOCK = SD_BLOCK_PAYLOAD_CAP / sizeof(Record);
+
+/**
+ * @brief  Seconds of @p rate_hz logging that @p prealloc_bytes of a contiguous file holds for a
+ *         @p Record stream. Conservative and faithful to how the card is written: counts only whole
+ *         SD_LOG_BLOCK_BYTES blocks (SdCard rounds the pre-alloc down to a block) each packed with
+ *         whole records. Drives the per-board capacity static_asserts (one per stream).
+ */
+template <typename Record>
+[[nodiscard]] inline constexpr uint32_t logCapacitySeconds(uint32_t rate_hz, uint32_t prealloc_bytes)
+{
+    const uint64_t blocks  = prealloc_bytes / SD_LOG_BLOCK_BYTES;
+    const uint64_t records = blocks * LOG_RECORDS_PER_BLOCK<Record>;
+    return static_cast<uint32_t>(records / rate_hz);
+}
+
+/**
+ * @brief  Contiguous pre-alloc bytes needed to hold @p seconds of @p rate_hz logging for a
+ *         @p Record stream — the inverse of logCapacitySeconds(), rounded UP to whole blocks so the
+ *         file always covers the target. Use to size each board's bind() pre-alloc from a duration.
+ */
+template <typename Record>
+[[nodiscard]] inline constexpr uint32_t logBytesForSeconds(uint32_t rate_hz, uint32_t seconds)
+{
+    const uint64_t records           = static_cast<uint64_t>(rate_hz) * seconds;
+    const uint64_t records_per_block  = LOG_RECORDS_PER_BLOCK<Record>;
+    const uint64_t blocks             = (records + records_per_block - 1) / records_per_block;  // ceil
+    return static_cast<uint32_t>(blocks * SD_LOG_BLOCK_BYTES);
+}
+
 /**
  * @brief The three-file SD recording policy, shared by both boards.
  * @tparam S      logic::storage::Storage (one open file each, on the shared volume).

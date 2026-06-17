@@ -202,14 +202,39 @@ void wireDrivers(void)
   /* Bind the three SD log files to the HAL handle + FatFs drive + file name (the app
      composition left them unbound). They share one card: g_controller.init() mounts the
      volume + creates this boot's session folder once, then opens all three files inside it
-     (data_fast.bin / data_slow.bin / data_ext.bin) and f_expands each to a fixed CONTIGUOUS
+     (fcu_data_fast.bin / fcu_data_slow.bin / fcu_data_ext.bin) and f_expands each to a fixed CONTIGUOUS
      region. The pre-alloc sizes are this run's space budget per stream (the run stops writing a
      stream, rather than growing it, once full); finalize() reclaims each file's unused tail on a
-     clean shutdown. Tune to the longest expected run: the fast 2 kHz stream needs far more than
-     the 125 Hz slow stream or the ~10 Hz extended stream. */
-  g_card_fast.bind(&hsd2, "0:/", "data_fast.bin", /*prealloc_bytes=*/512u * 1024u * 1024u);  // high-rate
-  g_card_slow.bind(&hsd2, "0:/", "data_slow.bin", /*prealloc_bytes=*/ 32u * 1024u * 1024u);
-  g_card_ext.bind(&hsd2, "0:/", "data_ext.bin",  /*prealloc_bytes=*/  8u * 1024u * 1024u);   // low-rate
+     clean shutdown. Each pre-alloc is computed from its mode's configured duration (the knobs live
+     in sd_recorder.hpp: FAST/SLOW/EXT_LOG_DURATION_S) via logBytesForSeconds(), then the
+     static_assert re-checks the rounded pre-alloc still covers that duration. fast (2 kHz) and slow
+     (125 Hz) are mutually exclusive in time, so each holds its own mode; ext (~10 Hz) is written in
+     BOTH, so it spans fast + slow (1 h + 10 h = 11 h). FcuSystemState = 60 B, FcuExtendedSystemState
+     the low-rate record. ~718 MiB total per boot session. */
+  namespace tlm = logic::telemetry;
+
+  static constexpr uint32_t FAST_PREALLOC_BYTES =
+      tlm::logBytesForSeconds<FcuSystemState>(tlm::FAST_RECORD_RATE_HZ, tlm::FAST_LOG_DURATION_S);
+  static_assert(tlm::logCapacitySeconds<FcuSystemState>(tlm::FAST_RECORD_RATE_HZ, FAST_PREALLOC_BYTES)
+                    >= tlm::FAST_LOG_DURATION_S,
+                "fcu_data_fast.bin pre-alloc must cover FAST_LOG_DURATION_S of 2 kHz FcuSystemState");
+
+  static constexpr uint32_t SLOW_PREALLOC_BYTES =
+      tlm::logBytesForSeconds<FcuSystemState>(tlm::SLOW_RECORD_RATE_HZ, tlm::SLOW_LOG_DURATION_S);
+  static_assert(tlm::logCapacitySeconds<FcuSystemState>(tlm::SLOW_RECORD_RATE_HZ, SLOW_PREALLOC_BYTES)
+                    >= tlm::SLOW_LOG_DURATION_S,
+                "fcu_data_slow.bin pre-alloc must cover SLOW_LOG_DURATION_S of 125 Hz FcuSystemState");
+
+  static constexpr uint32_t EXT_PREALLOC_BYTES =
+      tlm::logBytesForSeconds<FcuExtendedSystemState>(tlm::EXT_RECORD_RATE_HZ, tlm::EXT_LOG_DURATION_S);
+  // ext logs in both fast and slow, so its budget must span both (EXT_LOG_DURATION_S = fast + slow).
+  static_assert(tlm::logCapacitySeconds<FcuExtendedSystemState>(tlm::EXT_RECORD_RATE_HZ, EXT_PREALLOC_BYTES)
+                    >= tlm::FAST_LOG_DURATION_S + tlm::SLOW_LOG_DURATION_S,
+                "fcu_data_ext.bin pre-alloc must cover fast + slow of ~10 Hz FcuExtendedSystemState (it logs in both modes)");
+
+  g_card_fast.bind(&hsd2, "0:/", "fcu_data_fast.bin", FAST_PREALLOC_BYTES);   // 2 kHz  -> FAST_LOG_DURATION_S (1 h)
+  g_card_slow.bind(&hsd2, "0:/", "fcu_data_slow.bin", SLOW_PREALLOC_BYTES);   // 125 Hz -> SLOW_LOG_DURATION_S (10 h)
+  g_card_ext.bind (&hsd2, "0:/", "fcu_data_ext.bin",  EXT_PREALLOC_BYTES);    // ~10 Hz -> fast + slow (11 h)
 
   /* Bring up the two local ball valves. The 333 Hz (3 ms) servo PWM frequency is
      owned HERE, not in CubeMX: leave the generated timer at its defaults and set

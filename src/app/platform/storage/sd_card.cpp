@@ -113,6 +113,18 @@ void SdCard::init()
         return;
     }
 
+    // f_expand updates the FAT chain and the in-memory file object, but NOT the on-disk directory
+    // entry (start cluster + size) — that is written only by a sync. The run then writes raw sectors
+    // that bypass FatFs and never f_write/f_sync again until finalize(), so we must commit the
+    // metadata NOW. Without this the directory entry stays at size 0: a card pulled mid-run (or any
+    // run that never calls finalize) shows a 0-byte file even though the sectors already hold data.
+    // The file is committed at its full reserved size; the per-block footers mark the true data end,
+    // and finalize() (clean shutdown) truncates the unused tail back.
+    if (f_sync(&file_) != FR_OK) {
+        fail(StorageError::FileWriteFail);
+        return;
+    }
+
     // Resolve the absolute first card sector (LBA) of the contiguous extent from its start
     // cluster: data-area base + (start cluster - 2) * sectors-per-cluster. The engine writes
     // sequential sectors from here, so no further FatFs lookups are needed during the run.

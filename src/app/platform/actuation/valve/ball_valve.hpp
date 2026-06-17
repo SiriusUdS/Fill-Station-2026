@@ -92,10 +92,16 @@ public:
 
     /**
      * @brief  Command the valve to a proportional open position.
-     * @param  percent  Desired opening, 0 (closed) to 100 (open); clamped.
+     * @param  percent    Desired opening, 0 (closed) to 100 (open); clamped.
+     * @param  bypass_ms  A FORCED hold when > 0: hold @p percent while IGNORING the limit switches
+     *                    for this many ms — tick() neither faults (both-switches) nor idles the
+     *                    servo, so the proportional hold off both limits is not knocked to
+     *                    Opened/Closed/Faulted by a stray switch read — after which tick()
+     *                    auto-reverts to a normal hold that idles once it settles. 0 = a normal hold.
      * @return std::nullopt on success, or a ValveError describing the failure.
      */
-    [[nodiscard]] std::optional<logic::actuation::ValveError> setOpenPercent(float percent);
+    [[nodiscard]] std::optional<logic::actuation::ValveError> setOpenPercent(float percent,
+                                                                             uint32_t bypass_ms = 0);
 
     /**
      * @brief  The valve's own info record (state + status + commanded position),
@@ -118,11 +124,13 @@ private:
     uint32_t        start_movement_ms_ = 0;  /**< When the current open/close began (timeout base). */
     uint32_t        end_movement_ms_   = 0;  /**< When the valve last reached a limit / faulted. */
     uint32_t        bypass_ms_         = 0;  /**< Forced-actuation window from start_movement_ms_:
-                                                  while within it, tick() suppresses the transit-
-                                                  timeout fault so the valve is driven hard to the
-                                                  target regardless of its limit switch, then it
-                                                  auto-reverts to normal. Set by open/close(bypass_ms);
-                                                  0 (cleared) by a normal open/close/setOpenPercent. */
+                                                  while within it, tick() ignores the limit switches
+                                                  entirely (no both-switches fault, no transit-timeout
+                                                  fault, no idle) so the valve is driven hard to the
+                                                  target / held at the commanded percent regardless of
+                                                  its switches, then it auto-reverts to normal. Set by
+                                                  open/close/setOpenPercent(bypass_ms); 0 (cleared) by a
+                                                  normal (bypass_ms == 0) open/close/setOpenPercent. */
 };
 
 // The driver is the logic seam: enforce conformance at compile time, here, so a

@@ -375,20 +375,24 @@ private:
 
     // The FCU's per-transition action hook. The legal edges are shared with the ECU (see
     // logic::control::isTransitionAllowed); the SIDE EFFECTS are board-specific:
-    //   - Any transition INTO Safe drives the local Fill/Dump valves closed (people may
-    //     approach the system, so it must hold no flow).
+    //   - Any transition INTO Safe FORCE-closes the local Fill/Dump valves (people may approach
+    //     the system, so it must hold no flow). Like every transition-driven actuation it is
+    //     forced — the limit switches are bypassed for FORCED_VALVE_ACTUATION_MS so the close
+    //     takes effect even if a switch is flaky; each valve then reverts to a normal move.
     //   - Any transition INTO Abort FORCE-actuates the line shut + vented (close Fill, open Dump)
-    //     with the limit switches bypassed for FORCED_VALVE_ACTUATION_MS, so an abort takes effect
-    //     for certain even if a switch is flaky; each valve then reverts to a normal move on its
-    //     own. Independent of the operator valve-command gate.
-    //   - On Unsafe -> Ignite the FCU energises the e-match firing line; on leaving Ignite
-    //     by ANY path (Launch, Abort, Safe) it de-energises it, so the igniter is never left
-    //     hot once Ignite is exited. (Only Unsafe reaches Ignite per the transition table.)
+    //     the same way. Independent of the operator valve-command gate.
+    //   - On Unsafe -> Ignite the FCU FORCE-closes Fill + Dump (the line must hold no flow when
+    //     the e-match fires), then energises the e-match firing line; on leaving Ignite by ANY
+    //     path (Launch, Abort, Safe) it de-energises it, so the igniter is never left hot once
+    //     Ignite is exited. (Only Unsafe reaches Ignite per the transition table.)
     void onTransition(State from, State to, uint32_t now_ms)
     {
         if (to == State::Safe) {
-            (void)fill_valve_.close();
-            (void)dump_valve_.close();
+            // Force the local valves shut: a transition-driven actuation must take effect for
+            // certain even if a limit switch is flaky, so it bypasses the switches for
+            // FORCED_VALVE_ACTUATION_MS then each valve reverts to a normal move on its own.
+            (void)fill_valve_.close(logic::control::FORCED_VALVE_ACTUATION_MS);
+            (void)dump_valve_.close(logic::control::FORCED_VALVE_ACTUATION_MS);
         }
         if (to == State::Abort) {
             (void)fill_valve_.close(logic::control::FORCED_VALVE_ACTUATION_MS);  // force the fill shut
@@ -401,6 +405,11 @@ private:
             logic::control::fcu_control_flags.set(FcuControlFlag::SolenoidValve, false);
         }
         if (from == State::Unsafe && to == State::Ignite) {
+            // Force the local Fill/Dump valves shut before energising the igniter: the line must
+            // hold no flow when the e-match fires. Forced like every transition actuation, so the
+            // close takes effect even if a switch is flaky; each valve then reverts to a normal move.
+            (void)fill_valve_.close(logic::control::FORCED_VALVE_ACTUATION_MS);
+            (void)dump_valve_.close(logic::control::FORCED_VALVE_ACTUATION_MS);
             ematch_.energise(now_ms);    // hold the e-match firing line high for the Ignite state
         } else if (from == State::Ignite) {
             ematch_.deenergise(now_ms);  // leaving Ignite (Launch / Abort / Safe): drop the firing line
@@ -460,13 +469,15 @@ private:
             recordRefusedValve(*frame);   // unknown valve id
             return false;
         }
-        // A non-zero force byte makes Open/Close a forced actuation: the valve bypasses its limit
-        // switch for FORCED_VALVE_ACTUATION_MS then reverts (SetOpenedPct has no switch to bypass).
+        // A non-zero force byte makes the actuation forced: the valve bypasses its limit switches
+        // for FORCED_VALVE_ACTUATION_MS then reverts. For Open/Close it drives hard to the stop
+        // ignoring the switch; for SetOpenedPct it holds the percent without idling or faulting on
+        // a stray switch read (a forced proportional hold off both limits).
         const uint32_t bypass_ms = frame->force ? logic::control::FORCED_VALVE_ACTUATION_MS : 0;
         switch (frame->action) {
             case ValveCommand::Open:         (void)valve->open(bypass_ms);  break;
             case ValveCommand::Close:        (void)valve->close(bypass_ms); break;
-            case ValveCommand::SetOpenedPct: (void)valve->setOpenPercent(static_cast<float>(frame->value)); break;
+            case ValveCommand::SetOpenedPct: (void)valve->setOpenPercent(static_cast<float>(frame->value), bypass_ms); break;
         }
         ackGs(cmd.seq, now_ms);
         return true;

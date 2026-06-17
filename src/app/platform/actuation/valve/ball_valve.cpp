@@ -107,12 +107,12 @@ std::optional<ValveError> BallValve::close(uint32_t bypass_ms)
     return std::nullopt;
 }
 
-std::optional<ValveError> BallValve::setOpenPercent(float percent)
+std::optional<ValveError> BallValve::setOpenPercent(float percent, uint32_t bypass_ms)
 {
     if (percent < MIN_OPEN_PERCENT) percent = MIN_OPEN_PERCENT;
     if (percent > MAX_OPEN_PERCENT) percent = MAX_OPEN_PERCENT;
 
-    bypass_ms_                 = 0;  // a proportional hold is never a forced switch-bypass move
+    bypass_ms_                 = bypass_ms;  // forced hold window (0 = a normal switch-monitored hold)
     info_.current_set_value    = static_cast<uint8_t>(percent);
     info_.state                = ValveState::Floating;  // proportional hold, off both limits
     info_.status.in_transition = 1u;   // driving to the position; tick() idles the servo once it settles
@@ -130,12 +130,14 @@ void BallValve::tick(uint32_t now_ms)
 
     // FORCED window: while inside it, ignore the limit switches ENTIRELY — none of the
     // switch-driven outcomes below apply: not the both-switches fault, not the transit-timeout
-    // fault, and not a single-switch hit (early completion). The valve is left being driven hard
-    // to the commanded target (state stays Opening/Closing, the servo holds the compare open()/
-    // close() set) until bypass_ms_ elapses, after which the normal switch-monitored logic below
-    // resumes on the next tick. The switches are still sampled into status above for telemetry;
-    // they just don't act. This is what makes a forced command happen regardless of the current
-    // state (including Faulted) or the switch readings.
+    // fault, not a single-switch hit (early completion), and not the proportional-hold idle. The
+    // valve is left being driven hard to the commanded target (state stays Opening/Closing/Floating,
+    // the servo holds the compare the open()/close()/setOpenPercent() call set) until bypass_ms_
+    // elapses, after which the normal switch-monitored logic below resumes on the next tick. For a
+    // forced setOpenPercent this is what keeps a proportional hold off both limits from being
+    // knocked to Opened/Closed/Faulted (or idled) by a stray switch read. The switches are still
+    // sampled into status above for telemetry; they just don't act. This is what makes a forced
+    // command happen regardless of the current state (including Faulted) or the switch readings.
     if (bypass_ms_ > 0 && (now_ms - start_movement_ms_) < bypass_ms_) {
         info_.status.fault_both_switches = 0u;  // forced: never faults on the switches
         return;

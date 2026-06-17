@@ -378,19 +378,20 @@ TEST_F(EcuControllerTest, IgniteToLaunchForceOpensBothValves)
     EXPECT_EQ(nos_valve_.last_open_bypass_ms, logic::control::FORCED_VALVE_ACTUATION_MS);
 }
 
-TEST_F(EcuControllerTest, TransitionToSafeClosesBothValves)
+TEST_F(EcuControllerTest, TransitionToSafeForceClosesBothValves)
 {
     deliver(makeSetState(State::Unsafe));   // Safe -> Unsafe
     const auto ipa_before = ipa_valve_.close_calls;
     const auto nos_before = nos_valve_.close_calls;
 
-    deliver(makeSetState(State::Safe));     // Unsafe -> Safe: the ECU drives both valves closed
+    deliver(makeSetState(State::Safe));     // Unsafe -> Safe: the ECU force-closes both valves
     EXPECT_EQ(current(), State::Safe);
     EXPECT_GT(ipa_valve_.close_calls, ipa_before);
     EXPECT_GT(nos_valve_.close_calls, nos_before);
-    // Into Safe is a NORMAL close (not forced) — no switch bypass.
-    EXPECT_EQ(ipa_valve_.last_close_bypass_ms, 0u);
-    EXPECT_EQ(nos_valve_.last_close_bypass_ms, 0u);
+    // Into Safe is a FORCED close (limit switches bypassed) like every transition-driven actuation,
+    // so the propellant shuts for certain even if a switch is flaky.
+    EXPECT_EQ(ipa_valve_.last_close_bypass_ms, logic::control::FORCED_VALVE_ACTUATION_MS);
+    EXPECT_EQ(nos_valve_.last_close_bypass_ms, logic::control::FORCED_VALVE_ACTUATION_MS);
 }
 
 TEST_F(EcuControllerTest, TransitionToAbortForceClosesBothValves)
@@ -421,6 +422,17 @@ TEST_F(EcuControllerTest, SetValvePositionForceFlagForcesTheValve)
     deliver(makeValveCmd(EcuValves::NOS, ValveCommand::Close, BoardId::Engine, /*seq=*/2,
                          /*value=*/0, /*force=*/0));
     EXPECT_EQ(nos_valve_.last_close_bypass_ms, 0u);   // force byte clear -> a normal move
+
+    // The force flag threads through to SetOpenedPct too: a forced proportional hold passes the
+    // bypass window so the valve holds the percent without idling or faulting on a stray switch read.
+    deliver(makeValveCmd(EcuValves::IPA, ValveCommand::SetOpenedPct, BoardId::Engine, /*seq=*/3,
+                         /*value=*/50, /*force=*/1));
+    EXPECT_FLOAT_EQ(ipa_valve_.last_percent, 50.0F);
+    EXPECT_EQ(ipa_valve_.last_percent_bypass_ms, logic::control::FORCED_VALVE_ACTUATION_MS);
+
+    deliver(makeValveCmd(EcuValves::NOS, ValveCommand::SetOpenedPct, BoardId::Engine, /*seq=*/4,
+                         /*value=*/30, /*force=*/0));
+    EXPECT_EQ(nos_valve_.last_percent_bypass_ms, 0u);   // force byte clear -> a normal hold
 }
 
 /* Both boards enforce the Launch -> Safe dwell lockout identically (broadcast convention

@@ -190,13 +190,15 @@ private:
             return;
         }
 
-        // A non-zero force byte makes Open/Close a forced actuation: the valve bypasses its limit
-        // switch for FORCED_VALVE_ACTUATION_MS then reverts (SetOpenedPct has no switch to bypass).
+        // A non-zero force byte makes the actuation forced: the valve bypasses its limit switches
+        // for FORCED_VALVE_ACTUATION_MS then reverts. For Open/Close it drives hard to the stop
+        // ignoring the switch; for SetOpenedPct it holds the percent without idling or faulting on
+        // a stray switch read (a forced proportional hold off both limits).
         const uint32_t bypass_ms = payload.force ? logic::control::FORCED_VALVE_ACTUATION_MS : 0;
         switch (payload.action) {
             case ValveCommand::Open:         (void)valve->open(bypass_ms);  break;
             case ValveCommand::Close:        (void)valve->close(bypass_ms); break;
-            case ValveCommand::SetOpenedPct: (void)valve->setOpenPercent(static_cast<float>(payload.value)); break;
+            case ValveCommand::SetOpenedPct: (void)valve->setOpenPercent(static_cast<float>(payload.value), bypass_ms); break;
         }
 
         // Generic acknowledgement: the command was received AND applied. Echoes the seq.
@@ -291,10 +293,11 @@ private:
 
     // The ECU's per-transition action hook. The legal edges are shared with the FCU (see
     // logic::control::isTransitionAllowed); the SIDE EFFECTS are board-specific:
-    //   - INTO Safe drives both propellant valves closed (people may approach).
-    //   - INTO Abort FORCE-closes both propellant valves (limit switches bypassed for
-    //     FORCED_VALVE_ACTUATION_MS) so the propellant shuts for certain even if a switch is
-    //     flaky; each valve then reverts to normal switch-monitoring on its own.
+    //   - INTO Safe FORCE-closes both propellant valves (people may approach). Like every
+    //     transition-driven actuation it is forced — limit switches bypassed for
+    //     FORCED_VALVE_ACTUATION_MS, then each valve reverts to normal switch-monitoring.
+    //   - INTO Abort FORCE-closes both propellant valves the same way, so the propellant shuts
+    //     for certain even if a switch is flaky.
     //   - Ignite -> Launch FORCE-opens both propellant valves the same way (the FCU does nothing).
     // The force is self-contained in each valve command — it carries its own bypass window and the
     // valve auto-reverts — so a later command (e.g. the Abort close superseding a Launch open)
@@ -302,8 +305,11 @@ private:
     void onTransition(logic::control::State from, logic::control::State to)
     {
         if (to == logic::control::State::Safe) {
-            (void)ipa_valve_.close();
-            (void)nos_valve_.close();
+            // Force both propellant valves shut: a transition-driven actuation must take effect for
+            // certain even if a limit switch is flaky, so it bypasses the switches for
+            // FORCED_VALVE_ACTUATION_MS then each valve reverts to a normal move on its own.
+            (void)ipa_valve_.close(logic::control::FORCED_VALVE_ACTUATION_MS);
+            (void)nos_valve_.close(logic::control::FORCED_VALVE_ACTUATION_MS);
         }
         if (to == logic::control::State::Abort) {
             (void)ipa_valve_.close(logic::control::FORCED_VALVE_ACTUATION_MS);

@@ -44,8 +44,15 @@ enum class ValveError {
  *                          force is self-contained in the call: a later command simply supersedes
  *                          it, so there is no separate force state for callers to unwind. 0 = a
  *                          normal switch-monitored move. (Callers pass FORCED_VALVE_ACTUATION_MS.)
- *   - setOpenPercent(p)  — move to a proportional hold;  returns nullopt or a ValveError.
+ *   - setOpenPercent(p, bypass_ms) — move to a proportional hold; returns nullopt or a ValveError.
  *                          p is 0 (closed) .. 100 (open); out-of-range is clamped.
+ *                          bypass_ms (default 0): a FORCED proportional hold. When > 0 the valve
+ *                          holds p for bypass_ms while IGNORING the limit switches — it neither
+ *                          faults (both-switches) nor idles (the servo stays driven at p), so a hold
+ *                          off both limits is not knocked to Opened/Closed/Faulted by a stray switch
+ *                          read — then AUTO-REVERTS to a normal switch-monitored hold. Self-contained
+ *                          like open/close's bypass. 0 = a normal hold that idles once it settles.
+ *                          (Callers pass FORCED_VALVE_ACTUATION_MS.)
  *   - info()             — the valve's own ValveInfo record (state + status + set
  *                          value). The valve owns it and keeps it up to date as it
  *                          operates; consumers just read it (no separate state()
@@ -58,7 +65,7 @@ template <typename T>
 concept Valve = requires(T valve, float percent, uint32_t bypass_ms) {
     { valve.open(bypass_ms) }          -> std::same_as<std::optional<ValveError>>;
     { valve.close(bypass_ms) }         -> std::same_as<std::optional<ValveError>>;
-    { valve.setOpenPercent(percent) }  -> std::same_as<std::optional<ValveError>>;
+    { valve.setOpenPercent(percent, bypass_ms) }  -> std::same_as<std::optional<ValveError>>;
     { valve.info() }                   -> std::same_as<::ValveInfo>;
 };
 

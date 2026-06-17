@@ -143,11 +143,39 @@ void wireDrivers(void)
   /* Bind the three SD log files on SDMMC1 (the app composition left them unbound). They
      share one card: g_controller.init() mounts the volume + creates this boot's session
      folder once, then opens all three files inside it and f_expands each to a fixed contiguous
-     region (same recording policy + pre-alloc sizes as the FCU). The reserved tail is reclaimed
-     by finalize() on a clean shutdown (the DisableLogging flag); tune to the longest run. */
-  g_card_fast.bind(&hsd1, "0:/", "data_fast.bin", /*prealloc_bytes=*/512u * 1024u * 1024u);  // high-rate
-  g_card_slow.bind(&hsd1, "0:/", "data_slow.bin", /*prealloc_bytes=*/ 32u * 1024u * 1024u);
-  g_card_ext.bind(&hsd1, "0:/", "data_ext.bin",  /*prealloc_bytes=*/  8u * 1024u * 1024u);   // low-rate
+     region (same recording policy as the FCU). The reserved tail is reclaimed by finalize() on a
+     clean shutdown (the DisableLogging flag). Each pre-alloc is computed from its mode's configured
+     duration (the knobs live in sd_recorder.hpp: FAST/SLOW/EXT_LOG_DURATION_S) via
+     logBytesForSeconds(), then the static_assert re-checks the rounded pre-alloc still covers that
+     duration. fast (2 kHz) and slow (125 Hz) are mutually exclusive in time, so each holds its own
+     mode; ext (~10 Hz) is written in BOTH, so it spans fast + slow (11 h). The ECU's records are
+     smaller than the FCU's (EcuSystemState = 56 B), so the same durations need slightly less space.
+     Files carry an ecu_ prefix to tell them apart from the FCU's once collected. ~640 MiB per boot
+     session. */
+  namespace tlm = logic::telemetry;
+
+  static constexpr uint32_t FAST_PREALLOC_BYTES =
+      tlm::logBytesForSeconds<EcuSystemState>(tlm::FAST_RECORD_RATE_HZ, tlm::FAST_LOG_DURATION_S);
+  static_assert(tlm::logCapacitySeconds<EcuSystemState>(tlm::FAST_RECORD_RATE_HZ, FAST_PREALLOC_BYTES)
+                    >= tlm::FAST_LOG_DURATION_S,
+                "ecu_data_fast.bin pre-alloc must cover FAST_LOG_DURATION_S of 2 kHz EcuSystemState");
+
+  static constexpr uint32_t SLOW_PREALLOC_BYTES =
+      tlm::logBytesForSeconds<EcuSystemState>(tlm::SLOW_RECORD_RATE_HZ, tlm::SLOW_LOG_DURATION_S);
+  static_assert(tlm::logCapacitySeconds<EcuSystemState>(tlm::SLOW_RECORD_RATE_HZ, SLOW_PREALLOC_BYTES)
+                    >= tlm::SLOW_LOG_DURATION_S,
+                "ecu_data_slow.bin pre-alloc must cover SLOW_LOG_DURATION_S of 125 Hz EcuSystemState");
+
+  static constexpr uint32_t EXT_PREALLOC_BYTES =
+      tlm::logBytesForSeconds<EcuExtendedSystemState>(tlm::EXT_RECORD_RATE_HZ, tlm::EXT_LOG_DURATION_S);
+  // ext logs in both fast and slow, so its budget must span both (EXT_LOG_DURATION_S = fast + slow).
+  static_assert(tlm::logCapacitySeconds<EcuExtendedSystemState>(tlm::EXT_RECORD_RATE_HZ, EXT_PREALLOC_BYTES)
+                    >= tlm::FAST_LOG_DURATION_S + tlm::SLOW_LOG_DURATION_S,
+                "ecu_data_ext.bin pre-alloc must cover fast + slow of ~10 Hz EcuExtendedSystemState (it logs in both modes)");
+
+  g_card_fast.bind(&hsd1, "0:/", "ecu_data_fast.bin", FAST_PREALLOC_BYTES);   // 2 kHz  -> FAST_LOG_DURATION_S (1 h)
+  g_card_slow.bind(&hsd1, "0:/", "ecu_data_slow.bin", SLOW_PREALLOC_BYTES);   // 125 Hz -> SLOW_LOG_DURATION_S (10 h)
+  g_card_ext.bind (&hsd1, "0:/", "ecu_data_ext.bin",  EXT_PREALLOC_BYTES);    // ~10 Hz -> fast + slow (11 h)
 
   /* Two propellant ball valves on TIM15: IPA = CH1 (PE5), NOS = CH2 (PE6). 333 Hz
      (3 ms) servo PWM owned here: 100 MHz / (PSC 99 + 1) = 1 MHz tick; ARR 2999 -> 3 ms.
