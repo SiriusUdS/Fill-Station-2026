@@ -132,7 +132,7 @@ protected:
         logic::control::refused_valve_count = 0;
         logic::control::state_entered_ms = 0;   // reset the dwell clock between tests
         comm_.init();
-        control_.init();
+        control_.init(0);    // cold blob (Init) -> safes actuators + enters Safe
         clearValveCalls();   // discard the boot-safing close() so command tests start clean
     }
 
@@ -364,12 +364,43 @@ TEST_F(ControlTest, TransitionToAbortClosesFillAndOpensDump)
 
 TEST_F(ControlTest, InitDrivesLocalValvesClosed)
 {
-    clearValveCalls();   // drop SetUp's boot-safe, then re-run init and observe it
-    control_.init();
+    // Cold boot (a fresh/invalid blob => Init) safes every actuator and enters Safe.
+    logic::control::persistent_state = logic::control::PersistentState{};  // fill_state = Init
+    clearValveCalls();
+    control_.init(0);
+    EXPECT_EQ(current(), State::Safe);
     EXPECT_EQ(fill_valve_.close_calls, 1);
     EXPECT_EQ(dump_valve_.close_calls, 1);
     EXPECT_EQ(fill_valve_.open_calls, 0);
     EXPECT_EQ(dump_valve_.open_calls, 0);
+}
+
+TEST_F(ControlTest, ReloadReExecutesEntryActuation)
+{
+    // A reload re-executes the resumed state's entry transition (rules bypassed) so the
+    // actuators are driven to match it — it stays in that state, it does not safe down.
+
+    // Abort reload: re-run the abort actuation (close Fill, vent Dump).
+    setCurrent(State::Abort);
+    clearValveCalls();
+    control_.init(0);
+    EXPECT_EQ(current(), State::Abort);
+    EXPECT_EQ(fill_valve_.close_calls, 1);
+    EXPECT_EQ(dump_valve_.open_calls, 1);
+
+    // Ignite reload: re-energise the e-match (the Unsafe -> Ignite entry action).
+    setCurrent(State::Ignite);
+    ematch_.energise_calls = ematch_.deenergise_calls = 0;
+    control_.init(0);
+    EXPECT_EQ(current(), State::Ignite);
+    EXPECT_EQ(ematch_.energise_calls, 1u);
+
+    // Launch reload: leaving Ignite de-energises the e-match (the FCU has no Launch valve action).
+    setCurrent(State::Launch);
+    ematch_.energise_calls = ematch_.deenergise_calls = 0;
+    control_.init(0);
+    EXPECT_EQ(current(), State::Launch);
+    EXPECT_EQ(ematch_.deenergise_calls, 1u);
 }
 
 /* ---- SetValvePosition (gated to Unsafe; local actuation, bridge to ECU, or both) ---------- */
@@ -502,10 +533,10 @@ TEST_F(ControlTest, PongIsRelayedToGsOverEthernet)
 TEST_F(ControlTest, LocalSetControlFlagAppliesAndAcksGs)
 {
     setCurrent(State::Safe);
-    deliver(makeSetControlFlag(ControlFlagBase::PersistingData, /*value=*/1,
+    deliver(makeSetControlFlag(ControlFlagBase::FastRecording, /*value=*/1,
                                BoardId::FillingStation, /*seq=*/3));
 
-    EXPECT_TRUE(logic::control::base_control_flags.get(ControlFlagBase::PersistingData));
+    EXPECT_TRUE(logic::control::base_control_flags.get(ControlFlagBase::FastRecording));
     EXPECT_TRUE(bus().can_tx.empty());   // FillingStation-targeted: applied here, no ECU hop
     expectAckToGs(/*seq=*/3);            // Acked on the commander line
 }
@@ -513,10 +544,10 @@ TEST_F(ControlTest, LocalSetControlFlagAppliesAndAcksGs)
 TEST_F(ControlTest, EngineSetControlFlagBridgesOverCanWithoutLocalApply)
 {
     setCurrent(State::Safe);
-    deliver(makeSetControlFlag(ControlFlagBase::PersistingData, /*value=*/1,
+    deliver(makeSetControlFlag(ControlFlagBase::FastRecording, /*value=*/1,
                                BoardId::Engine, /*seq=*/6));
 
-    EXPECT_FALSE(logic::control::base_control_flags.get(ControlFlagBase::PersistingData));  // not ours to set
+    EXPECT_FALSE(logic::control::base_control_flags.get(ControlFlagBase::FastRecording));  // not ours to set
     EXPECT_TRUE(bus().udp_tx.empty());   // the ECU Acks; the FCU does not Ack locally
 
     ASSERT_EQ(bus().can_tx.size(), 1u);
@@ -531,17 +562,17 @@ TEST_F(ControlTest, EngineSetControlFlagBridgesOverCanWithoutLocalApply)
     ASSERT_GE(sent.length, sizeof(SetControlFlagFrame));
     SetControlFlagFrame bridged{};
     std::memcpy(&bridged, sent.data.data(), sizeof(bridged));   // the frame rides verbatim over CAN
-    EXPECT_EQ(bridged.flag, static_cast<uint16_t>(ControlFlagBase::PersistingData));
+    EXPECT_EQ(bridged.flag, static_cast<uint16_t>(ControlFlagBase::FastRecording));
     EXPECT_EQ(bridged.value, 1u);
 }
 
 TEST_F(ControlTest, BroadcastSetControlFlagAppliesLocallyAndBridges)
 {
     setCurrent(State::Safe);
-    deliver(makeSetControlFlag(ControlFlagBase::PersistingData, /*value=*/1,
+    deliver(makeSetControlFlag(ControlFlagBase::FastRecording, /*value=*/1,
                                BoardId::Broadcast, /*seq=*/2));
 
-    EXPECT_TRUE(logic::control::base_control_flags.get(ControlFlagBase::PersistingData));  // applied locally
+    EXPECT_TRUE(logic::control::base_control_flags.get(ControlFlagBase::FastRecording));  // applied locally
     EXPECT_EQ(bus().can_tx.size(), 1u);   // and bridged to the ECU
     EXPECT_EQ(bus().udp_tx.size(), 1u);   // local Ack to the GS
 }
@@ -549,7 +580,7 @@ TEST_F(ControlTest, BroadcastSetControlFlagAppliesLocallyAndBridges)
 TEST_F(ControlTest, AckFromEcuClearsThePendingBridgedCommand)
 {
     setCurrent(State::Safe);
-    deliver(makeSetControlFlag(ControlFlagBase::PersistingData, /*value=*/1,
+    deliver(makeSetControlFlag(ControlFlagBase::FastRecording, /*value=*/1,
                                BoardId::Engine, /*seq=*/8));
     ASSERT_EQ(bus().can_tx.size(), 1u);   // bridged once
 

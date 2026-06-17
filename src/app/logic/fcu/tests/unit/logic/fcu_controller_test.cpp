@@ -18,6 +18,7 @@
 #include "control/persistent_state.hpp"
 #include "control/state_timing.hpp"     // logic::control::state_entered_ms
 #include "control/state_machine.hpp"    // logic::control::LAUNCH_TO_SAFE_LOCKOUT_MS
+#include "control/backup_status.hpp"    // logic::control::backup_status (boot retention probe)
 #include "control/refused_valve.hpp"    // logic::control::last_refused_valve (+ count)
 #include "command/set_valve_position.hpp"   // SetValvePositionFrame, ValveCommand
 #include "system/state.hpp"
@@ -100,9 +101,9 @@ std::vector<uint8_t> makeControlFlagRequest(BoardId device, uint16_t flag, uint8
 }
 
 /* Build a CommandType::SetValvePosition datagram addressed to `device`: a 12-byte
-   EthernetHeader followed by the 3-byte SetValvePositionFrame. */
+   EthernetHeader followed by the 4-byte SetValvePositionFrame. */
 std::vector<uint8_t> makeValveRequest(BoardId device, FcuValves valve, ValveCommand action,
-                                      uint8_t value)
+                                      uint8_t value, uint8_t force = 0)
 {
     EthernetHeader header = {};
     header.target_id    = static_cast<uint8_t>(device);
@@ -110,7 +111,7 @@ std::vector<uint8_t> makeValveRequest(BoardId device, FcuValves valve, ValveComm
     header.payload_id   = static_cast<uint8_t>(CommandType::SetValvePosition);
     header.payload_size_bytes = static_cast<uint16_t>(sizeof(SetValvePositionFrame));
 
-    const SetValvePositionFrame body{valve, action, value};
+    const SetValvePositionFrame body{valve, action, value, force};
 
     std::vector<uint8_t> payload(sizeof(EthernetHeader) + sizeof(SetValvePositionFrame));
     std::memcpy(payload.data(), &header, sizeof(EthernetHeader));
@@ -217,9 +218,9 @@ protected:
 
     /* Send a CommandType::SetValvePosition command (addressed to us) and tick once. */
     void requestValve(FcuValves valve, ValveCommand action, uint8_t value = 0,
-                      BoardId device = BoardId::FillingStation)
+                      BoardId device = BoardId::FillingStation, uint8_t force = 0)
     {
-        bus().push_udp(Endpoint{}, makeValveRequest(device, valve, action, value));
+        bus().push_udp(Endpoint{}, makeValveRequest(device, valve, action, value, force));
         step();
     }
 };
@@ -463,7 +464,7 @@ TEST_F(FcuControllerTest, PowerMonitorDownlinksInTheLowRateExtendedRecord)
 TEST_F(FcuControllerTest, ExtendedRecordReportsTheLiveControlFlags)
 {
     reachSafe();  // clears udp_tx
-    logic::control::base_control_flags.set(ControlFlagBase::FastRecording, true);  // PersistingData stays off
+    logic::control::base_control_flags.set(ControlFlagBase::FastRecording, true);
 
     controller_.tick(now_ms_ += 150);  // cross the extended interval
 
@@ -477,7 +478,6 @@ TEST_F(FcuControllerTest, ExtendedRecordReportsTheLiveControlFlags)
         FcuExtendedSystemState ext;
         std::memcpy(&ext, d.payload.data() + sizeof(EthernetHeader), sizeof(ext));
         EXPECT_NE(ext.base.control_flags_base & (1u << static_cast<uint8_t>(ControlFlagBase::FastRecording)), 0u);
-        EXPECT_EQ(ext.base.control_flags_base & (1u << static_cast<uint8_t>(ControlFlagBase::PersistingData)), 0u);
         found = true;
     }
     EXPECT_TRUE(found) << "no ExtendedSystemState was downlinked";
@@ -620,6 +620,111 @@ TEST_F(FcuControllerTest, AbortBackToSafe)
     EXPECT_EQ(currentState(), logic::control::State::Safe);
 }
 
+/* ---- Forced valve actuation ---------------------------------------------- */
+
+/* A transition INTO Abort FORCE-actuates the line shut + vented: Fill is force-closed and Dump
+   is force-opened, both with the limit switches bypassed for the standard dwell, so the abort
+   takes effect even if a switch is flaky. */
+TEST_F(FcuControllerTest, AbortForceActuatesFillClosedAndDumpOpen)
+{
+    reachSafe();
+    requestState(logic::control::State::Unsafe);
+    requestState(logic::control::State::Abort);
+    ASSERT_EQ(currentState(), logic::control::State::Abort);
+
+    EXPECT_GT(fill_valve_.close_calls, 0);
+    EXPECT_GT(dump_valve_.open_calls, 0);
+    EXPECT_EQ(fill_valve_.last_close_bypass_ms, logic::control::FORCED_VALVE_ACTUATION_MS);
+    EXPECT_EQ(dump_valve_.last_open_bypass_ms, logic::control::FORCED_VALVE_ACTUATION_MS);
+}
+
+/* The operator's SetValvePosition carries the force flag through to the local valve: a non-zero
+   force byte makes the FCU drive the valve with its limit switches bypassed (forced). */
+TEST_F(FcuControllerTest, SetValvePositionForceFlagForcesTheValve)
+{
+    reachSafe();
+    requestState(logic::control::State::Unsafe);   // operator valve commands are Unsafe-only
+
+    requestValve(FcuValves::Fill, ValveCommand::Open, /*value=*/0,
+                 BoardId::FillingStation, /*force=*/1);
+    EXPECT_EQ(fill_valve_.last_open_bypass_ms, logic::control::FORCED_VALVE_ACTUATION_MS);
+
+    requestValve(FcuValves::Fill, ValveCommand::Close, /*value=*/0,
+                 BoardId::FillingStation, /*force=*/0);
+    EXPECT_EQ(fill_valve_.last_close_bypass_ms, 0u);   // force byte clear -> a normal move
+}
+
+/* ---- SD recording rate is owned by the state machine --------------------- *
+ * The FastRecording control flag tracks the destination state, NOT operator command: it
+ * arms (fast 2 kHz -> data_fast.bin) for the hazardous burn window (Ignite/Launch/Abort)
+ * and falls back to the slow default (averaged -> data_slow.bin) for every resting state.
+ * See logic::control::isFastRecordingState. */
+
+TEST_F(FcuControllerTest, RecordingDefaultsToSlow)
+{
+    reachSafe();   // cold boot Init -> Safe: a resting state, so slow (flag clear)
+    EXPECT_FALSE(logic::control::base_control_flags.get(ControlFlagBase::FastRecording));
+}
+
+TEST_F(FcuControllerTest, UnsafeToIgniteArmsFastRecording)
+{
+    reachSafe();
+    requestState(logic::control::State::Unsafe);
+    EXPECT_FALSE(logic::control::base_control_flags.get(ControlFlagBase::FastRecording));  // Unsafe is resting
+    requestState(logic::control::State::Ignite);
+    EXPECT_TRUE(logic::control::base_control_flags.get(ControlFlagBase::FastRecording));   // armed by the burn window
+}
+
+TEST_F(FcuControllerTest, UnsafeToAbortArmsFastRecording)
+{
+    reachSafe();
+    requestState(logic::control::State::Unsafe);
+    requestState(logic::control::State::Abort);
+    EXPECT_TRUE(logic::control::base_control_flags.get(ControlFlagBase::FastRecording));
+}
+
+/* Ignite -> Launch keeps fast logging on (Launch is part of the burn window) — it is NOT
+   removed on the way into Launch. */
+TEST_F(FcuControllerTest, FastRecordingStaysArmedThroughIgniteToLaunch)
+{
+    reachSafe();
+    requestState(logic::control::State::Unsafe);
+    requestState(logic::control::State::Ignite);
+    requestState(logic::control::State::Launch);
+    EXPECT_TRUE(logic::control::base_control_flags.get(ControlFlagBase::FastRecording));
+}
+
+/* Returning to a resting state (here Abort -> Safe) drops back to slow recording. */
+TEST_F(FcuControllerTest, EnteringSafeFallsBackToSlowRecording)
+{
+    reachSafe();
+    requestState(logic::control::State::Unsafe);
+    requestState(logic::control::State::Abort);
+    ASSERT_TRUE(logic::control::base_control_flags.get(ControlFlagBase::FastRecording));   // armed
+    requestState(logic::control::State::Safe);
+    EXPECT_FALSE(logic::control::base_control_flags.get(ControlFlagBase::FastRecording));  // back to slow
+}
+
+/* The state machine OWNS the rate: a manual GS override to fast while resting is reclaimed
+   for slow by the next transition into a resting state (here Safe -> Unsafe). */
+TEST_F(FcuControllerTest, EnteringUnsafeForcesSlowRecordingOverManualOverride)
+{
+    reachSafe();
+    logic::control::base_control_flags.set(ControlFlagBase::FastRecording, true);  // operator forces fast
+    requestState(logic::control::State::Unsafe);
+    EXPECT_FALSE(logic::control::base_control_flags.get(ControlFlagBase::FastRecording));
+}
+
+/* A warm reboot resuming an in-progress burn state (Launch) re-arms fast logging, even though
+   control flags are not battery-backed (they boot to off/slow). */
+TEST_F(FcuControllerTest, ResumeIntoLaunchReArmsFastRecording)
+{
+    logic::control::persistent_state.saveState(logic::control::State::Launch);
+    controller_.init();
+    ASSERT_EQ(currentState(), logic::control::State::Launch);
+    EXPECT_TRUE(logic::control::base_control_flags.get(ControlFlagBase::FastRecording));
+}
+
 /* ---- Rejected state transitions ----------------------------------------- */
 
 TEST_F(FcuControllerTest, SafeRejectsIgnite)
@@ -691,6 +796,31 @@ TEST_F(FcuControllerTest, RefusedTransitionAppearsInExtendedSystemState)
     EXPECT_EQ(ext.base.refused_command_info.set_state_from, static_cast<uint8_t>(logic::control::State::Safe));
     EXPECT_EQ(ext.base.refused_command_info.set_state_to,   static_cast<uint8_t>(logic::control::State::Ignite));
     EXPECT_EQ(ext.base.refused_command_info.set_state_refused_count, 1u);   // one refusal so far
+}
+
+TEST_F(FcuControllerTest, BackupStatusAppearsInExtendedSystemState)
+{
+    // The platform records the backup-domain retention probe in this global at boot; the extended
+    // record must carry it so the GS can see whether the saved state will survive a power loss.
+    logic::control::backup_status = logic::control::BackupStatus::Unretained;
+    reachSafe();
+
+    FcuExtendedSystemState ext{};
+    bool found = false;
+    for (int i = 0; i < 200 && !found; ++i) {
+        stepTo(now_ms_ + 50);
+        for (const auto& d : bus().udp_tx) {
+            EthernetHeader h;
+            std::memcpy(&h, d.payload.data(), sizeof(h));
+            if (static_cast<TelemetryType>(h.payload_id) == TelemetryType::ExtendedSystemState) {
+                std::memcpy(&ext, d.payload.data() + sizeof(EthernetHeader), sizeof(ext));
+                found = true;
+                break;
+            }
+        }
+    }
+    ASSERT_TRUE(found) << "no ExtendedSystemState downlinked";
+    EXPECT_EQ(ext.base.backup_status, static_cast<uint8_t>(logic::control::BackupStatus::Unretained));
 }
 
 /* ---- CAN ------------------------------------------------------------------ *
@@ -1193,13 +1323,23 @@ TEST_F(FcuControllerTest, StateTransitionIsPersisted)
     EXPECT_EQ(*loaded, logic::control::State::Unsafe);
 }
 
-TEST_F(FcuControllerTest, ResumesPersistedStateOnInit)
+TEST_F(FcuControllerTest, ResumesInProgressStateOnInit)
 {
-    /* Simulate a reset while UNSAFE: the blob is already committed in Backup SRAM. */
+    /* Simulate a reset while LAUNCH (an in-progress state): the blob is committed in Backup SRAM.
+       Only Abort/Launch/Ignite resume across a reboot; the rest boot fresh to Safe. */
+    logic::control::persistent_state.saveState(logic::control::State::Launch);
+
+    controller_.init();  // reboot resumes the in-progress state (before any tick advances it)
+    EXPECT_EQ(currentState(), logic::control::State::Launch);
+}
+
+TEST_F(FcuControllerTest, DoesNotResumeNonInProgressState)
+{
+    /* A reset while UNSAFE is NOT resumed (not one of Abort/Launch/Ignite): boots fresh to Safe. */
     logic::control::persistent_state.saveState(logic::control::State::Unsafe);
 
-    controller_.init();  // reboot resumes the persisted state (before any tick advances it)
-    EXPECT_EQ(currentState(), logic::control::State::Unsafe);
+    controller_.init();
+    EXPECT_EQ(currentState(), logic::control::State::Safe);
 }
 
 TEST_F(FcuControllerTest, ColdBootWithInvalidBlobDoesNotResumeStaleState)

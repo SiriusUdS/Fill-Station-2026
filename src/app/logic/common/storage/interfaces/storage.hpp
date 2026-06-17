@@ -22,9 +22,8 @@ namespace logic::storage {
  *
  * A conforming type exposes:
  *   - init()        — bring the store online (mount); sets state Active/Error.
- *   - write(data)   — persist a block; no-op unless the store is ready. The decision
- *                     of *whether* to persist (the PersistingData control flag) is the
- *                     caller's (the telemetry pipeline) — the store just saves when told.
+ *   - write(data)   — persist a block; no-op unless the store is ready. The store
+ *                     just saves whatever the telemetry pipeline hands it.
  *   - info()        — the store's own StorageInfo (state + status), kept current.
  */
 template <typename T>

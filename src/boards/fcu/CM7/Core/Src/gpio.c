@@ -49,31 +49,24 @@ void MX_GPIO_Init(void)
   __HAL_RCC_GPIOG_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOE, HEATER_STATE_Pin|ADS_CS_Pin, GPIO_PIN_RESET);
-
-  /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOF, LED1_STATE_Pin|LED2_STATE_Pin|LED3_STATE_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(ADS_CS_GPIO_Port, ADS_CS_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOD, EMATCH_CONT_Pin|SOL_VALVE_CONT_Pin|BUZZER_STATE_Pin|EMATCH_STATE_Pin
-                          |SOL_VALVE_STATE_Pin, GPIO_PIN_RESET);
+                          |SOL_VALVE_STATE_Pin|HEATER_STATE_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(TC1_CS_GPIO_Port, TC1_CS_Pin, GPIO_PIN_RESET);
 
-  /*Configure GPIO pins : FILL_SWITCH_CLOSED_Pin FILL_SWITCH_OPENED_Pin DUMP_SWITCH_CLOSED_Pin ADS_DRDY_Pin
-                           TC2_CS_Pin */
-  GPIO_InitStruct.Pin = FILL_SWITCH_CLOSED_Pin|FILL_SWITCH_OPENED_Pin|DUMP_SWITCH_CLOSED_Pin|ADS_DRDY_Pin
-                          |TC2_CS_Pin;
+  /*Configure GPIO pins : FILL_SWITCH_CLOSED_Pin FILL_SWITCH_OPENED_Pin DUMP_SWITCH_CLOSED_Pin DUMP_SWITCH_OPENED_Pin
+                           ADS_DRDY_Pin TC2_CS_Pin */
+  GPIO_InitStruct.Pin = FILL_SWITCH_CLOSED_Pin|FILL_SWITCH_OPENED_Pin|DUMP_SWITCH_CLOSED_Pin|DUMP_SWITCH_OPENED_Pin
+                          |ADS_DRDY_Pin|TC2_CS_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
-
-  /*Configure GPIO pins : HEATER_STATE_Pin ADS_CS_Pin */
-  GPIO_InitStruct.Pin = HEATER_STATE_Pin|ADS_CS_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
 
   /*Configure GPIO pins : LED1_STATE_Pin LED2_STATE_Pin LED3_STATE_Pin */
@@ -89,10 +82,17 @@ void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOF, &GPIO_InitStruct);
 
+  /*Configure GPIO pin : ADS_CS_Pin */
+  GPIO_InitStruct.Pin = ADS_CS_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(ADS_CS_GPIO_Port, &GPIO_InitStruct);
+
   /*Configure GPIO pins : EMATCH_CONT_Pin SOL_VALVE_CONT_Pin BUZZER_STATE_Pin EMATCH_STATE_Pin
-                           SOL_VALVE_STATE_Pin */
+                           SOL_VALVE_STATE_Pin HEATER_STATE_Pin */
   GPIO_InitStruct.Pin = EMATCH_CONT_Pin|SOL_VALVE_CONT_Pin|BUZZER_STATE_Pin|EMATCH_STATE_Pin
-                          |SOL_VALVE_STATE_Pin;
+                          |SOL_VALVE_STATE_Pin|HEATER_STATE_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;

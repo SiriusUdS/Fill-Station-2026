@@ -78,18 +78,39 @@ public:
     /** @brief Boot-init the control layer: reset the GS-link liveness clock and drive
      *         the local valves to a safe (closed) position.
      *
-     * Actuation is the control layer's authority, so boot-safing the valves lives here
-     * rather than in board bring-up. The controller resumes persistent_state before
-     * calling this, so it CAN be made state-aware — e.g. skip safing on a warm reboot
-     * that resumes into an armed state mid-operation. TODO: decide that policy; for now
-     * it unconditionally safes, matching the previous board-level behaviour. */
-    void init()
+     * Actuation is the control layer's authority, so boot-safing the actuators lives here
+     * rather than in board bring-up. The controller resumes persistent_state BEFORE calling
+     * this, so init() is state-aware and drives the state machine INTO the boot state here,
+     * before normal operation begins:
+     *   - a RELOAD that resumes an in-progress state (Abort / Launch / Ignite) RE-EXECUTES the
+     *     transition into that state, BYPASSING the transition-table rules, so the actuators are
+     *     driven to match the resumed state (Abort closes Fill + vents Dump; Ignite re-energises
+     *     the e-match; Launch leaves it de-energised). onTransition is edge-keyed, so we replay
+     *     the canonical arming edge (reloadEntryFrom). This is intentional: a reload must restore
+     *     the actuators to the live state, not safe them.
+     *   - any other boot (a fresh Init, i.e. cold or corrupt Backup SRAM) safes every actuator
+     *     to its rest position and transitions into Safe.
+     * @param now_ms boot tick (the board passes 0). */
+    void init(uint32_t now_ms)
     {
-        (void)fill_valve_.close();
-        (void)dump_valve_.close();
-        ematch_.deenergise(0);  // boot-safe the firing line through the logic seam (like the valves); t=0
-        solenoid_.close(0);     // boot-safe the solenoid closed through the logic seam; t=0
-        heater_.off(0);         // boot-safe the heater off through the logic seam; t=0
+        const State boot = logic::control::persistent_state.fill_state;  // resumed by the controller
+        if (boot != logic::control::State::Init) {
+            // Reload: re-run the entry actuation for the resumed state (rules bypassed).
+            onTransition(logic::control::reloadEntryFrom(boot), boot, now_ms);
+            logic::control::state_entered_ms = now_ms;  // start the dwell clock for the resumed state
+            // Restore the recording rate to match the resumed state (flags are not battery-backed,
+            // so a warm reboot into Ignite/Launch/Abort must re-arm fast logging).
+            logic::control::base_control_flags.set(
+                ControlFlagBase::FastRecording, logic::control::isFastRecordingState(boot));
+            return;
+        }
+        // Cold / normal boot: safe the non-valve actuators here (the Init -> Safe transition
+        // below does not touch them), then enter Safe — onTransition(Init -> Safe) closes Fill
+        // and Dump, so they are not closed explicitly here.
+        ematch_.deenergise(now_ms);  // boot-safe the firing line through the logic seam
+        solenoid_.close(now_ms);     // boot-safe the solenoid closed through the logic seam
+        heater_.off(now_ms);         // boot-safe the heater off through the logic seam
+        (void)transitionTo(logic::control::State::Safe, now_ms);  // enter Safe (closes Fill + Dump)
     }
 
     /** @brief Sample the e-match detect line and mirror it onto the continuity LED. Called
@@ -204,6 +225,11 @@ public:
         onTransition(from, to, now_ms);
         logic::control::persistent_state.saveState(to);
         logic::control::state_entered_ms = now_ms;  // start the dwell clock for the new state
+        // The state machine OWNS the SD recording rate: arm fast logging for the burn window
+        // (Ignite/Launch/Abort), fall back to the slow default for every resting state. This
+        // overrides any manual GS FastRecording setting on each transition (see isFastRecordingState).
+        logic::control::base_control_flags.set(
+            ControlFlagBase::FastRecording, logic::control::isFastRecordingState(to));
         return true;
     }
 
@@ -351,8 +377,10 @@ private:
     // logic::control::isTransitionAllowed); the SIDE EFFECTS are board-specific:
     //   - Any transition INTO Safe drives the local Fill/Dump valves closed (people may
     //     approach the system, so it must hold no flow).
-    //   - Any transition INTO Abort closes Fill and OPENS Dump (vent the line), independent
-    //     of the operator valve-command gate, which is the abort side effect for the FCU.
+    //   - Any transition INTO Abort FORCE-actuates the line shut + vented (close Fill, open Dump)
+    //     with the limit switches bypassed for FORCED_VALVE_ACTUATION_MS, so an abort takes effect
+    //     for certain even if a switch is flaky; each valve then reverts to a normal move on its
+    //     own. Independent of the operator valve-command gate.
     //   - On Unsafe -> Ignite the FCU energises the e-match firing line; on leaving Ignite
     //     by ANY path (Launch, Abort, Safe) it de-energises it, so the igniter is never left
     //     hot once Ignite is exited. (Only Unsafe reaches Ignite per the transition table.)
@@ -363,8 +391,8 @@ private:
             (void)dump_valve_.close();
         }
         if (to == State::Abort) {
-            (void)fill_valve_.close();  // stop the fill
-            (void)dump_valve_.open();   // vent the line
+            (void)fill_valve_.close(logic::control::FORCED_VALVE_ACTUATION_MS);  // force the fill shut
+            (void)dump_valve_.open(logic::control::FORCED_VALVE_ACTUATION_MS);   // force the line vented
         }
         if (from == State::Unsafe) {
             // The solenoid valve is only armable in Unsafe; clear its flag on the way out so it
@@ -432,9 +460,12 @@ private:
             recordRefusedValve(*frame);   // unknown valve id
             return false;
         }
+        // A non-zero force byte makes Open/Close a forced actuation: the valve bypasses its limit
+        // switch for FORCED_VALVE_ACTUATION_MS then reverts (SetOpenedPct has no switch to bypass).
+        const uint32_t bypass_ms = frame->force ? logic::control::FORCED_VALVE_ACTUATION_MS : 0;
         switch (frame->action) {
-            case ValveCommand::Open:         (void)valve->open();  break;
-            case ValveCommand::Close:        (void)valve->close(); break;
+            case ValveCommand::Open:         (void)valve->open(bypass_ms);  break;
+            case ValveCommand::Close:        (void)valve->close(bypass_ms); break;
             case ValveCommand::SetOpenedPct: (void)valve->setOpenPercent(static_cast<float>(frame->value)); break;
         }
         ackGs(cmd.seq, now_ms);

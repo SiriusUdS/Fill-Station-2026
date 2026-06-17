@@ -27,21 +27,25 @@ struct FakeValve {
     std::optional<logic::actuation::ValveError> next_error{};   /**< Forced result of the next command(s). */
 
     /* ---- outputs the test inspects ---- */
-    int   open_calls    = 0;
-    int   close_calls   = 0;
-    int   percent_calls = 0;
-    float last_percent  = -1.0F;
+    int      open_calls         = 0;
+    int      close_calls        = 0;
+    int      percent_calls      = 0;
+    float    last_percent       = -1.0F;
+    uint32_t last_open_bypass_ms  = 0;   /**< bypass_ms passed to the most recent open(). */
+    uint32_t last_close_bypass_ms = 0;   /**< bypass_ms passed to the most recent close(). */
 
-    [[nodiscard]] std::optional<logic::actuation::ValveError> open()
+    [[nodiscard]] std::optional<logic::actuation::ValveError> open(uint32_t bypass_ms = 0)
     {
         ++open_calls;
+        last_open_bypass_ms = bypass_ms;
         if (!next_error) { info_.state = ValveState::Opening; info_.current_set_value = 100; }
         return next_error;
     }
 
-    [[nodiscard]] std::optional<logic::actuation::ValveError> close()
+    [[nodiscard]] std::optional<logic::actuation::ValveError> close(uint32_t bypass_ms = 0)
     {
         ++close_calls;
+        last_close_bypass_ms = bypass_ms;
         if (!next_error) { info_.state = ValveState::Closing; info_.current_set_value = 0; }
         return next_error;
     }

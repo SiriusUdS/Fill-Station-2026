@@ -62,16 +62,17 @@ CanFrame makeCommand(command::CommandType type, uint8_t senderState,
     return frame;
 }
 
-/* A SetValvePosition command FCU -> Engine: the 3-byte SetValvePositionFrame rides
-   verbatim in the payload (data[0] = valve index, data[1] = action, data[2] = value). */
+/* A SetValvePosition command FCU -> Engine: the 4-byte SetValvePositionFrame rides verbatim in
+   the payload (data[0] = valve index, data[1] = action, data[2] = value, data[3] = force). */
 CanFrame makeValveCmd(EcuValves valve, ValveCommand action, BoardId target = BoardId::Engine,
-                      uint8_t seq = 0, uint8_t value = 0)
+                      uint8_t seq = 0, uint8_t value = 0, uint8_t force = 0)
 {
     CanFrame frame = makeCommand(command::CommandType::SetValvePosition, /*senderState=*/0,
                                  target, seq);
     frame.data[0] = static_cast<uint8_t>(valve);
     frame.data[1] = static_cast<uint8_t>(action);
     frame.data[2] = value;   // opened-%, used by SetOpenedPct (ignored for Open/Close)
+    frame.data[3] = force;   // 0 = normal, non-zero = forced (limit switches bypassed)
     frame.length  = sizeof(SetValvePositionFrame);
     return frame;
 }
@@ -293,10 +294,10 @@ TEST_F(EcuControllerTest, PongEchoesThePingSeq)
 
 TEST_F(EcuControllerTest, SetControlFlagAppliesTheFlagAndAcksTheFcu)
 {
-    deliver(makeSetControlFlag(static_cast<uint16_t>(ControlFlagBase::PersistingData),
+    deliver(makeSetControlFlag(static_cast<uint16_t>(ControlFlagBase::FastRecording),
                                /*value=*/1, BoardId::Engine, /*seq=*/4));
 
-    EXPECT_TRUE(logic::control::base_control_flags.get(ControlFlagBase::PersistingData));
+    EXPECT_TRUE(logic::control::base_control_flags.get(ControlFlagBase::FastRecording));
 
     ASSERT_EQ(bus().can_tx.size(), 1u);
     CanHeader header;
@@ -310,15 +311,15 @@ TEST_F(EcuControllerTest, SetControlFlagAppliesTheFlagAndAcksTheFcu)
 
 TEST_F(EcuControllerTest, SetControlFlagWithZeroValueClearsTheFlag)
 {
-    logic::control::base_control_flags.set(ControlFlagBase::PersistingData, true);
-    deliver(makeSetControlFlag(static_cast<uint16_t>(ControlFlagBase::PersistingData), /*value=*/0));
-    EXPECT_FALSE(logic::control::base_control_flags.get(ControlFlagBase::PersistingData));
+    logic::control::base_control_flags.set(ControlFlagBase::FastRecording, true);
+    deliver(makeSetControlFlag(static_cast<uint16_t>(ControlFlagBase::FastRecording), /*value=*/0));
+    EXPECT_FALSE(logic::control::base_control_flags.get(ControlFlagBase::FastRecording));
 }
 
 TEST_F(EcuControllerTest, UnknownControlFlagIsNotAppliedOrAcked)
 {
     deliver(makeSetControlFlag(/*unknown per-board flag id=*/0xFF, /*value=*/1));
-    EXPECT_FALSE(logic::control::base_control_flags.get(ControlFlagBase::PersistingData));
+    EXPECT_FALSE(logic::control::base_control_flags.get(ControlFlagBase::FastRecording));
     EXPECT_TRUE(bus().can_tx.empty());   // no Ack for a flag we did not apply
 }
 
@@ -361,17 +362,20 @@ TEST_F(EcuControllerTest, SetStateRejectsIllegalTransitionWithoutAck)
     EXPECT_EQ(logic::control::last_refused_transition.to,   State::Ignite);
 }
 
-TEST_F(EcuControllerTest, IgniteToLaunchOpensBothValves)
+TEST_F(EcuControllerTest, IgniteToLaunchForceOpensBothValves)
 {
     deliver(makeSetState(State::Unsafe));   // Safe -> Unsafe
     deliver(makeSetState(State::Ignite));   // Unsafe -> Ignite
     const auto ipa_before = ipa_valve_.open_calls;
     const auto nos_before = nos_valve_.open_calls;
 
-    deliver(makeSetState(State::Launch));    // Ignite -> Launch: the ECU drives both valves open
+    deliver(makeSetState(State::Launch));    // Ignite -> Launch: force both propellant valves open
     EXPECT_EQ(current(), State::Launch);
     EXPECT_GT(ipa_valve_.open_calls, ipa_before);
     EXPECT_GT(nos_valve_.open_calls, nos_before);
+    // Forced open with the limit switches bypassed for the standard dwell.
+    EXPECT_EQ(ipa_valve_.last_open_bypass_ms, logic::control::FORCED_VALVE_ACTUATION_MS);
+    EXPECT_EQ(nos_valve_.last_open_bypass_ms, logic::control::FORCED_VALVE_ACTUATION_MS);
 }
 
 TEST_F(EcuControllerTest, TransitionToSafeClosesBothValves)
@@ -384,18 +388,39 @@ TEST_F(EcuControllerTest, TransitionToSafeClosesBothValves)
     EXPECT_EQ(current(), State::Safe);
     EXPECT_GT(ipa_valve_.close_calls, ipa_before);
     EXPECT_GT(nos_valve_.close_calls, nos_before);
+    // Into Safe is a NORMAL close (not forced) — no switch bypass.
+    EXPECT_EQ(ipa_valve_.last_close_bypass_ms, 0u);
+    EXPECT_EQ(nos_valve_.last_close_bypass_ms, 0u);
 }
 
-TEST_F(EcuControllerTest, TransitionToAbortClosesBothValves)
+TEST_F(EcuControllerTest, TransitionToAbortForceClosesBothValves)
 {
     deliver(makeSetState(State::Unsafe));   // Safe -> Unsafe
     const auto ipa_before = ipa_valve_.close_calls;
     const auto nos_before = nos_valve_.close_calls;
 
-    deliver(makeSetState(State::Abort));    // Unsafe -> Abort: the ECU shuts both propellant valves
+    deliver(makeSetState(State::Abort));    // Unsafe -> Abort: force both propellant valves shut
     EXPECT_EQ(current(), State::Abort);
     EXPECT_GT(ipa_valve_.close_calls, ipa_before);
     EXPECT_GT(nos_valve_.close_calls, nos_before);
+    // An abort force-closes (limit switches bypassed) so the propellant shuts for certain.
+    EXPECT_EQ(ipa_valve_.last_close_bypass_ms, logic::control::FORCED_VALVE_ACTUATION_MS);
+    EXPECT_EQ(nos_valve_.last_close_bypass_ms, logic::control::FORCED_VALVE_ACTUATION_MS);
+}
+
+/* The operator's SetValvePosition carries the force flag: a non-zero force byte makes the ECU
+   drive the valve with its limit switches bypassed (forced); a zero force byte is a normal move. */
+TEST_F(EcuControllerTest, SetValvePositionForceFlagForcesTheValve)
+{
+    deliver(makeSetState(State::Unsafe));   // operator valve commands are Unsafe-only
+
+    deliver(makeValveCmd(EcuValves::IPA, ValveCommand::Open, BoardId::Engine, /*seq=*/1,
+                         /*value=*/0, /*force=*/1));
+    EXPECT_EQ(ipa_valve_.last_open_bypass_ms, logic::control::FORCED_VALVE_ACTUATION_MS);
+
+    deliver(makeValveCmd(EcuValves::NOS, ValveCommand::Close, BoardId::Engine, /*seq=*/2,
+                         /*value=*/0, /*force=*/0));
+    EXPECT_EQ(nos_valve_.last_close_bypass_ms, 0u);   // force byte clear -> a normal move
 }
 
 /* Both boards enforce the Launch -> Safe dwell lockout identically (broadcast convention
@@ -416,27 +441,11 @@ TEST_F(EcuControllerTest, LaunchToSafeIsLockedOutOnTheEcuToo)
     EXPECT_EQ(current(), State::Safe);
 }
 
-/* ---- The shared 3-file recording policy (PersistingData + FastRecording) ---- */
-
-TEST_F(EcuControllerTest, TelemetryDrainsWithoutWritingToSdWhenFlagOff)
-{
-    step();  // Init -> Safe; PersistingData defaults off
-    const AdcInfo sample{};
-    for (int i = 0; i < 2000 && bus().can_tx.empty(); ++i) {
-        adc_.push(sample);
-        controller_.produceRecord(++now_ms_);
-        step();
-    }
-    ASSERT_FALSE(bus().can_tx.empty()) << "a full telemetry half never drained";
-    EXPECT_TRUE(storage_fast_.writes.empty());   // nothing reached the card in any stream
-    EXPECT_TRUE(storage_slow_.writes.empty());
-    EXPECT_TRUE(storage_ext_.writes.empty());
-}
+/* ---- The shared 3-file recording policy (FastRecording picks fast vs slow) ---- */
 
 TEST_F(EcuControllerTest, FastRecordingPersistsRawSystemStateToDataFast)
 {
     step();  // Init -> Safe
-    logic::control::base_control_flags.set(ControlFlagBase::PersistingData, true);
     logic::control::base_control_flags.set(ControlFlagBase::FastRecording, true);   // raw 2 kHz -> data_fast.bin
     const AdcInfo sample{};
     for (int i = 0; i < 2000 && storage_fast_.writes.empty(); ++i) {
@@ -451,7 +460,6 @@ TEST_F(EcuControllerTest, FastRecordingPersistsRawSystemStateToDataFast)
 TEST_F(EcuControllerTest, SlowRecordingPersistsAveragedSystemStateToDataSlow)
 {
     step();  // Init -> Safe; FastRecording stays off -> slow (125 Hz averaged) -> data_slow.bin
-    logic::control::base_control_flags.set(ControlFlagBase::PersistingData, true);
     const AdcInfo sample{};
     for (int i = 0; i < 4000 && storage_slow_.writes.empty(); ++i) {
         adc_.push(sample);
@@ -460,6 +468,35 @@ TEST_F(EcuControllerTest, SlowRecordingPersistsAveragedSystemStateToDataSlow)
     }
     EXPECT_FALSE(storage_slow_.writes.empty());  // averaged records reached data_slow.bin
     EXPECT_TRUE(storage_fast_.writes.empty());    // fast file untouched in slow mode
+}
+
+/* The recording rate is driven by the state machine on the ECU too (it runs the SAME
+   transitionTo as the FCU): the burn window (Ignite/Launch/Abort) arms fast, resting states
+   fall back to slow. See logic::control::isFastRecordingState. */
+TEST_F(EcuControllerTest, UnsafeToIgniteArmsFastRecording)
+{
+    deliver(makeSetState(State::Unsafe));
+    EXPECT_FALSE(logic::control::base_control_flags.get(ControlFlagBase::FastRecording));  // Unsafe is resting
+    deliver(makeSetState(State::Ignite));
+    EXPECT_TRUE(logic::control::base_control_flags.get(ControlFlagBase::FastRecording));   // armed
+}
+
+TEST_F(EcuControllerTest, EnteringSafeFallsBackToSlowRecording)
+{
+    deliver(makeSetState(State::Unsafe));
+    deliver(makeSetState(State::Abort));   // armed fast
+    ASSERT_TRUE(logic::control::base_control_flags.get(ControlFlagBase::FastRecording));
+    deliver(makeSetState(State::Safe));
+    EXPECT_FALSE(logic::control::base_control_flags.get(ControlFlagBase::FastRecording));  // back to slow
+}
+
+/* A warm reboot resuming Launch re-arms fast logging (flags are not battery-backed). */
+TEST_F(EcuControllerTest, ResumeIntoLaunchReArmsFastRecording)
+{
+    logic::control::persistent_state.saveState(State::Launch);
+    controller_.init();
+    ASSERT_EQ(current(), State::Launch);
+    EXPECT_TRUE(logic::control::base_control_flags.get(ControlFlagBase::FastRecording));
 }
 
 /* ---- Telemetry (produce + drain + fragment onto CAN) --------------------- */
@@ -574,6 +611,56 @@ TEST_F(EcuControllerTest, RefusedCommandsRideTheExtendedRecord)
     EXPECT_EQ(rc.set_valve_action, static_cast<uint8_t>(ValveCommand::Close));
     EXPECT_EQ(rc.set_valve_state, static_cast<uint8_t>(State::Safe));
     EXPECT_EQ(rc.set_valve_refused_count, 1u);
+}
+
+/* ---- Reload (Backup SRAM resume) ----------------------------------------- */
+
+TEST_F(EcuControllerTest, ReloadLaunchOpensBothValves)
+{
+    /* A reset while LAUNCH re-executes the entry transition (Ignite -> Launch), driving both
+       propellant valves OPEN to match the resumed state — they MUST be opened on a reload. */
+    logic::control::persistent_state.saveState(State::Launch);
+    ipa_valve_.open_calls = ipa_valve_.close_calls = 0;
+    nos_valve_.open_calls = nos_valve_.close_calls = 0;
+
+    controller_.init();
+
+    EXPECT_EQ(current(), State::Launch);
+    EXPECT_EQ(ipa_valve_.open_calls, 1);
+    EXPECT_EQ(nos_valve_.open_calls, 1);
+    EXPECT_EQ(ipa_valve_.close_calls, 0);
+    EXPECT_EQ(nos_valve_.close_calls, 0);
+}
+
+TEST_F(EcuControllerTest, ReloadAbortClosesBothValves)
+{
+    /* A reset while ABORT re-executes the abort actuation (close both valves). */
+    logic::control::persistent_state.saveState(State::Abort);
+    ipa_valve_.open_calls = ipa_valve_.close_calls = 0;
+    nos_valve_.open_calls = nos_valve_.close_calls = 0;
+
+    controller_.init();
+
+    EXPECT_EQ(current(), State::Abort);
+    EXPECT_EQ(ipa_valve_.close_calls, 1);
+    EXPECT_EQ(nos_valve_.close_calls, 1);
+    EXPECT_EQ(ipa_valve_.open_calls, 0);
+    EXPECT_EQ(nos_valve_.open_calls, 0);
+}
+
+TEST_F(EcuControllerTest, DoesNotResumeNonInProgressState)
+{
+    /* Unsafe is not one of Abort/Launch/Ignite: it is NOT resumed — the ECU boots fresh to Safe
+       (closing both valves), not back into Unsafe. */
+    logic::control::persistent_state.saveState(State::Unsafe);
+    ipa_valve_.open_calls = ipa_valve_.close_calls = 0;
+    nos_valve_.open_calls = nos_valve_.close_calls = 0;
+
+    controller_.init();
+
+    EXPECT_EQ(current(), State::Safe);
+    EXPECT_EQ(ipa_valve_.close_calls, 1);
+    EXPECT_EQ(nos_valve_.close_calls, 1);
 }
 
 } // namespace

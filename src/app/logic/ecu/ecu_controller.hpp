@@ -75,18 +75,18 @@ public:
         // Resume the persisted state first (shared mechanism + policy with the FCU):
         // resumeBootState() resumes ONLY the in-progress states a reset must not silently
         // restart (Abort / Launch / Ignite); any other saved state, and a cold or corrupt
-        // boot, commits a fresh INIT (advanced to Safe below).
+        // boot, commits a fresh INIT.
         (void)logic::control::persistent_state.resumeBootState();
 
-        telemetry_.init();   // zeroes the double buffer and mounts the SD card
-        control_.init();
+        // Control FIRST, so the propellant valves reach their boot position before the slower
+        // SD / telemetry bring-up below — they spend the least time in the unmanaged power-on
+        // state (same rationale as the FCU). Control::init drives the state machine into the
+        // boot state: a cold boot enters Safe (closing both valves); a resumed Abort/Launch/
+        // Ignite RE-EXECUTES its entry transition so the valves are driven to match it (Launch
+        // OPENS both, Abort CLOSES both). t=0 at boot.
+        control_.init(0);
 
-        // As soon as init is done, leave Init for Safe (cold boot), routed through the single
-        // transition point so onTransition runs (both propellant valves driven closed). A
-        // resumed engine/armed state from Backup SRAM is left as-is — only a fresh Init advances.
-        if (logic::control::persistent_state.fill_state == logic::control::State::Init) {
-            (void)control_.transitionTo(logic::control::State::Safe, 0);  // boot transition; t=0
-        }
+        telemetry_.init();   // zeroes the double buffer and mounts the SD card
     }
 
     /**

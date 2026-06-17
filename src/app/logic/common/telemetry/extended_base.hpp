@@ -4,6 +4,7 @@
 
 #include "communication/protocol/telemetry/extended_system_state_base.hpp"  // ExtendedSystemStateBase
 #include "control/control_flags.hpp"           // base_control_flags
+#include "control/backup_status.hpp"           // backup_status (backup-domain retention health)
 #include "control/refused_transition.hpp"      // last_refused_transition + count
 #include "control/refused_control_flag.hpp"    // last_refused_control_flag + count
 #include "control/refused_valve.hpp"           // last_refused_valve + count
@@ -23,6 +24,7 @@ inline void fillExtendedBase(ExtendedSystemStateBase& base, uint32_t now_ms,
     base.creation_timestamp_ms = now_ms;
     base.control_flags_base    = logic::control::base_control_flags.raw();  // common BASE flags (SD recording etc.)
     base.control_flags_board   = control_flags_board;                       // this board's PER-BOARD flags
+    base.backup_status         = static_cast<uint8_t>(logic::control::backup_status);  // backup-domain retention health (boot probe)
 
     RefusedCommandInfo& rc = base.refused_command_info;
     rc.set_state_from = static_cast<uint8_t>(logic::control::last_refused_transition.from);

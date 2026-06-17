@@ -35,8 +35,15 @@ enum class ValveError {
  * @brief The contract a valve must satisfy to be commanded by the logic layer.
  *
  * A conforming type exposes:
- *   - open()             — move to fully open;           returns nullopt or a ValveError.
- *   - close()            — move to fully closed;         returns nullopt or a ValveError.
+ *   - open(bypass_ms)    — move to fully open;            returns nullopt or a ValveError.
+ *   - close(bypass_ms)   — move to fully closed;          returns nullopt or a ValveError.
+ *                          bypass_ms (default 0): a FORCED actuation. When > 0 the valve drives
+ *                          hard to the target — unconditionally (skipping any "already there"
+ *                          no-op) and IGNORING the limit switch (no transit-timeout fault) — for
+ *                          bypass_ms, then AUTO-REVERTS to a normal switch-monitored move. The
+ *                          force is self-contained in the call: a later command simply supersedes
+ *                          it, so there is no separate force state for callers to unwind. 0 = a
+ *                          normal switch-monitored move. (Callers pass FORCED_VALVE_ACTUATION_MS.)
  *   - setOpenPercent(p)  — move to a proportional hold;  returns nullopt or a ValveError.
  *                          p is 0 (closed) .. 100 (open); out-of-range is clamped.
  *   - info()             — the valve's own ValveInfo record (state + status + set
@@ -48,9 +55,9 @@ enum class ValveError {
  * or eagerly via a static_assert next to the concrete type.
  */
 template <typename T>
-concept Valve = requires(T valve, float percent) {
-    { valve.open() }                   -> std::same_as<std::optional<ValveError>>;
-    { valve.close() }                  -> std::same_as<std::optional<ValveError>>;
+concept Valve = requires(T valve, float percent, uint32_t bypass_ms) {
+    { valve.open(bypass_ms) }          -> std::same_as<std::optional<ValveError>>;
+    { valve.close(bypass_ms) }         -> std::same_as<std::optional<ValveError>>;
     { valve.setOpenPercent(percent) }  -> std::same_as<std::optional<ValveError>>;
     { valve.info() }                   -> std::same_as<::ValveInfo>;
 };

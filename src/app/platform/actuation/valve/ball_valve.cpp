@@ -36,6 +36,14 @@ bool read_limit(const platform::actuation::valve::LimitSwitchConfig& limit)
     return HAL_GPIO_ReadPin(limit.port, limit.pin) == GPIO_PIN_SET;
 }
 
+/* Idle the servo: a 0-tick pulse width is 0 % duty — no pulse — so the servo is no longer
+   driven (it relaxes). Used once a movement is complete (the valve rests on a mechanical
+   stop) so the servo is not held forced. */
+void idle_servo(const servo::ServoConfig& s)
+{
+    servo::setPulseWidth(s, 0);
+}
+
 } // namespace
 
 namespace platform::actuation::valve {
@@ -60,18 +68,20 @@ void BallValve::init(const BallValveConfig& config)
     servo::init(config_.servo);
 }
 
-std::optional<ValveError> BallValve::open()
+std::optional<ValveError> BallValve::open(uint32_t bypass_ms)
 {
     // With no physical open switch there is nothing to confirm an Opened state,
     // so "open" just drives fully open and floats there (== setOpenPercent(100)).
     if (config_.opened_switch_ignored) {
-        return setOpenPercent(MAX_OPEN_PERCENT);
+        return setOpenPercent(MAX_OPEN_PERCENT);   // clears bypass_ms_; no open switch to bypass
     }
-    if (info_.state == ValveState::Opened || info_.state == ValveState::Opening) {
-        // No motion needed (already open / opening), but still record the commanded position:
-        // an open command means 100 % regardless of whether it caused movement, so telemetry
-        // reflects the operator's intent even when the actuation is a no-op (e.g. limit
-        // switches unplugged and the valve already reads Opened).
+    bypass_ms_ = bypass_ms;   // record the forced-actuation window (0 = a normal switch-monitored open)
+    if (bypass_ms == 0 &&
+        (info_.state == ValveState::Opened || info_.state == ValveState::Opening)) {
+        // Normal open with no motion needed (already open / opening), but still record the
+        // commanded position: an open command means 100 % regardless of whether it caused
+        // movement, so telemetry reflects the operator's intent. A FORCED open (bypass_ms > 0)
+        // skips this no-op and always (re)drives below, so the actuation is guaranteed.
         info_.current_set_value = static_cast<uint8_t>(MAX_OPEN_PERCENT);
         return std::nullopt;
     }
@@ -83,13 +93,15 @@ std::optional<ValveError> BallValve::open()
     return std::nullopt;
 }
 
-std::optional<ValveError> BallValve::close()
+std::optional<ValveError> BallValve::close(uint32_t bypass_ms)
 {
-    if (info_.state == ValveState::Closed || info_.state == ValveState::Closing) {
-        // No motion needed (already closed / closing), but still record the commanded position:
-        // a close command means 0 % regardless of whether it caused movement, so telemetry
-        // reflects the operator's intent even when the actuation is a no-op (e.g. limit
-        // switches unplugged and the valve already reads Closed).
+    bypass_ms_ = bypass_ms;   // record the forced-actuation window (0 = a normal switch-monitored close)
+    if (bypass_ms == 0 &&
+        (info_.state == ValveState::Closed || info_.state == ValveState::Closing)) {
+        // Normal close with no motion needed (already closed / closing), but still record the
+        // commanded position: a close command means 0 % regardless of whether it caused movement,
+        // so telemetry reflects the operator's intent. A FORCED close (bypass_ms > 0) skips this
+        // no-op and always (re)drives below, so the actuation is guaranteed.
         info_.current_set_value = static_cast<uint8_t>(MIN_OPEN_PERCENT);
         return std::nullopt;
     }
@@ -106,9 +118,11 @@ std::optional<ValveError> BallValve::setOpenPercent(float percent)
     if (percent < MIN_OPEN_PERCENT) percent = MIN_OPEN_PERCENT;
     if (percent > MAX_OPEN_PERCENT) percent = MAX_OPEN_PERCENT;
 
+    bypass_ms_                 = 0;  // a proportional hold is never a forced switch-bypass move
     info_.current_set_value    = static_cast<uint8_t>(percent);
     info_.state                = ValveState::Floating;  // proportional hold, off both limits
-    info_.status.in_transition = 0u;
+    info_.status.in_transition = 1u;   // driving to the position; tick() idles the servo once it settles
+    start_movement_ms_         = HAL_GetTick();  // transit-timeout base: idle after this elapses
     servo::setPercent(config_.servo, open_percent_to_servo_percent(percent));
     return std::nullopt;
 }
@@ -126,6 +140,7 @@ void BallValve::tick(uint32_t now_ms)
         info_.status.fault_both_switches = 1u;
         info_.status.in_transition       = 0u;
         info_.state                      = ValveState::Faulted;
+        idle_servo(config_.servo);   // movement over (faulted): stop driving the servo
         return;
     }
     info_.status.fault_both_switches = 0u;
@@ -136,10 +151,16 @@ void BallValve::tick(uint32_t now_ms)
                 info_.state = ValveState::Opened;
                 info_.status.in_transition = 0u;
                 end_movement_ms_ = now_ms;
-            } else if ((now_ms - start_movement_ms_) >= config_.max_transit_timeout_ms) {
+                idle_servo(config_.servo);   // reached the open stop: idle the servo (duty 0)
+            } else if ((now_ms - start_movement_ms_) >= config_.max_transit_timeout_ms &&
+                       (now_ms - start_movement_ms_) >= bypass_ms_) {
+                // While inside the forced-actuation window (now - start < bypass_ms_) keep driving
+                // open (Opening) without faulting, whether or not the switch asserts; once it
+                // elapses the normal transit-timeout fault resumes.
                 info_.state = ValveState::Faulted;
                 info_.status.in_transition = 0u;
                 end_movement_ms_ = now_ms;
+                idle_servo(config_.servo);   // movement timed out: stop driving the servo
             }
             break;
         case ValveState::Closing:
@@ -147,10 +168,13 @@ void BallValve::tick(uint32_t now_ms)
                 info_.state = ValveState::Closed;
                 info_.status.in_transition = 0u;
                 end_movement_ms_ = now_ms;
-            } else if ((now_ms - start_movement_ms_) >= config_.max_transit_timeout_ms) {
+                idle_servo(config_.servo);   // reached the closed stop: idle the servo (duty 0)
+            } else if ((now_ms - start_movement_ms_) >= config_.max_transit_timeout_ms &&
+                       (now_ms - start_movement_ms_) >= bypass_ms_) {
                 info_.state = ValveState::Faulted;
                 info_.status.in_transition = 0u;
                 end_movement_ms_ = now_ms;
+                idle_servo(config_.servo);   // movement timed out: stop driving the servo
             }
             break;
         case ValveState::Opened:
@@ -160,8 +184,21 @@ void BallValve::tick(uint32_t now_ms)
             if (!close_hit) info_.state = ValveState::Floating;  // drifted off the closed limit
             break;
         case ValveState::Floating:
-            if (open_hit)       info_.state = ValveState::Opened;
-            else if (close_hit) info_.state = ValveState::Closed;
+            if (open_hit) {
+                info_.state = ValveState::Opened;
+                info_.status.in_transition = 0u;
+                idle_servo(config_.servo);   // drifted onto the open stop: idle the servo
+            } else if (close_hit) {
+                info_.state = ValveState::Closed;
+                info_.status.in_transition = 0u;
+                idle_servo(config_.servo);   // drifted onto the closed stop: idle the servo
+            } else if (info_.status.in_transition &&
+                       (now_ms - start_movement_ms_) >= config_.max_transit_timeout_ms) {
+                // The proportional move (setOpenPercent) has had the full transit time to settle:
+                // idle the servo (duty 0) so it is not held at the position, like a completed move.
+                info_.status.in_transition = 0u;
+                idle_servo(config_.servo);
+            }
             break;
         default:  // Unknown / Faulted: adopt a limit if one is now asserted
             if (open_hit)       info_.state = ValveState::Opened;

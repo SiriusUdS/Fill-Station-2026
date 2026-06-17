@@ -95,20 +95,15 @@ public:
         // boot, commits a fresh INIT (advanced to Safe below).
         (void)logic::control::persistent_state.resumeBootState();
 
-        // Control next, so the valves are driven to a safe boot position before the
-        // slower link / SD bring-up below — they spend the least time in the unmanaged
-        // power-on state.
-        control_.init();
+        // Control next, so the actuators reach their boot position before the slower link / SD
+        // bring-up below. Control::init drives the state machine into the boot state: a cold
+        // boot safes every actuator and enters Safe; a resumed Abort/Launch/Ignite RE-EXECUTES
+        // its entry transition (rules bypassed) so the actuators are driven to match the resumed
+        // state. t=0 at boot.
+        control_.init(0);
 
         comm_.init();
         telemetry_.init();   // zeroes the double buffer and mounts the SD card
-
-        // As soon as init is done, leave Init for Safe (cold boot), routed through the single
-        // transition point so onTransition runs (e.g. valves driven closed). A resumed
-        // engine/armed state from Backup SRAM is left as-is — only a fresh Init advances here.
-        if (logic::control::persistent_state.fill_state == logic::control::State::Init) {
-            (void)control_.transitionTo(logic::control::State::Safe, 0);  // boot transition; t=0
-        }
     }
 
     /**

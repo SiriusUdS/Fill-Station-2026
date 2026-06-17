@@ -19,6 +19,7 @@
 #include "control/control_flags.hpp"             // fcu_control_flags — the FCU per-board flags byte
 #include "telemetry/extended_base.hpp"           // logic::telemetry::fillExtendedBase (shared prefix)
 #include "telemetry/sd_recorder.hpp"             // logic::telemetry::SdRecorder (shared 3-file SD policy)
+#include "communication/protocol/telemetry/sd_block_footer.hpp"  // SD_BLOCK_PAYLOAD_CAP (footer reservation)
 
 #include "communication/protocol/framing/payload_type.hpp"        // PayloadType
 #include "communication/protocol/framing/can_header.hpp"          // CanHeader (decode the relayed ECU state)
@@ -165,9 +166,9 @@ public:
     void servicePowerMonitor(uint32_t now_ms) { power_monitor_.service(now_ms); }
 
     /** @brief Flush every ready slot in fill order (from the tail): stream its records to the
-     *         GS (always, full-rate), and — while PersistingData is set — log the SystemState to
-     *         SD per the FastRecording flag: the raw 2 kHz block to data_fast.bin, or the 125 Hz
-     *         block-averaged stream to data_slow.bin. Each drained slot is released. */
+     *         GS (always, full-rate), and log the SystemState to SD per the FastRecording flag:
+     *         the raw 2 kHz block to data_fast.bin, or the 125 Hz block-averaged stream to
+     *         data_slow.bin. Each drained slot is released. */
     void drain(uint32_t now_ms)
     {
         while (log_.ready[log_.tail]) {
@@ -178,7 +179,7 @@ public:
             // data_slow.bin, per the flags); the downlink below is unconditional and
             // full-rate, so the GS always sees live data regardless of recording mode.
             recorder_.recordSystemState(
-                std::span<const uint8_t>(log_.data[t], detail::LOG_HALF_BYTES), bytes);
+                std::span<uint8_t>(log_.data[t], detail::LOG_HALF_BYTES), bytes, now_ms);
 
             downlink(BoardId::FillingStation,
                      static_cast<uint8_t>(logic::control::persistent_state.fill_state),
@@ -190,9 +191,9 @@ public:
 
     /** @brief Build + emit the low-rate ExtendedSystemState (~10 Hz): the slow/bulky
      *         state (the 4 thermocouples; later, event timestamps) the GS does not
-     *         need thousands of times a second. ALWAYS downlinked to the GS;
-     *         additionally logged to data_ext.bin while PersistingData is set
-     *         (regardless of Fast/Slow). Foreground-driven; self-throttled. */
+     *         need thousands of times a second. ALWAYS downlinked to the GS and
+     *         logged to data_ext.bin (regardless of Fast/Slow). Foreground-driven;
+     *         self-throttled. */
     void produceExtended(uint32_t now_ms)
     {
         if ((now_ms - last_extended_ms_) < detail::EXTENDED_INTERVAL_MS) {
@@ -213,8 +214,8 @@ public:
         ext.solenoid_info = solenoid_.info();        // presence + open/closed state + last open/close ticks
         ext.heater_info   = heater_.info();          // on/off state + last on/off ticks
 
+        recorder_.recordExtended(ext, now_ms);   // accumulate -> data_ext.bin
         const std::span<const uint8_t> bytes(reinterpret_cast<const uint8_t*>(&ext), sizeof(ext));
-        recorder_.recordExtended(bytes);   // -> data_ext.bin (gated by PersistingData)
         comm_.sendToGs(BoardId::FillingStation, PayloadType::Telemetry,
                        static_cast<uint8_t>(TelemetryType::ExtendedSystemState),
                        static_cast<uint8_t>(logic::control::persistent_state.fill_state),
@@ -337,7 +338,9 @@ private:
     void logAppend(const FcuSystemState& record)
     {
         uint8_t h = log_.head;
-        if (log_.used[h] + sizeof(FcuSystemState) > detail::LOG_HALF_BYTES) {
+        // Flip at the payload cap (slot size minus the footer), so the drained slot always has
+        // room for the SD block footer the recorder stamps into its tail.
+        if (log_.used[h] + sizeof(FcuSystemState) > logic::telemetry::SD_BLOCK_PAYLOAD_CAP) {
             const uint8_t next = static_cast<uint8_t>((h + 1) % detail::LOG_BUFFER_COUNT);
             if (log_.ready[next]) {      // ring full: the next slot is the oldest, not drained yet
                 if (log_.overrun_count != UINT16_MAX) {

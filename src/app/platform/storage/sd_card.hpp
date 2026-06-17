@@ -13,8 +13,8 @@
  * FatFs-backed SD card log file. One instance per LOG FILE (not per card): bind a
  * HAL SD handle, a logical drive and a file name, then init() ensures the volume is
  * mounted and opens that file, kept open for the driver's lifetime. write() appends
- * a record and flushes (f_sync) it in BATCHES — every SYNC_PERIOD_WRITES writes rather
- * than every block — because the FAT/directory flush is the costly part of a save and
+ * a record and flushes (f_sync) it in BATCHES — every sync_period_ writes (set per file in
+ * bind()) rather than every block — because the FAT/directory flush is the costly part of a save and
  * syncing every block stalls the producer enough to overrun the telemetry double buffer.
  * The first write is always synced so the file's directory entry is committed immediately.
  * The trade is that up to one sync period's records can be lost on a power cut. The
@@ -48,17 +48,27 @@ public:
      *          composition declare the file without naming a board HAL handle. */
     SdCard() = default;
 
+    /** @brief Default batched-flush period: f_sync once every this many writes. The fast
+     *         (high-rate) stream uses this; slower streams pass a smaller period to bind(). */
+    static constexpr unsigned DEFAULT_SYNC_PERIOD_WRITES = 16;
+
     /**
      * @brief  Bind the HAL SD handle, FatFs drive and this stream's file name (e.g.
      *         "data_fast.bin"). @p drive and @p filename must outlive the instance
      *         (string literals / static-lifetime buffers). Does not touch hardware;
      *         init() mounts the volume and opens the file.
+     * @param  sync_period_writes  f_sync once every this many writes (batched flush). Tune
+     *         per stream: the high-rate data_fast.bin syncs rarely to avoid stalling the
+     *         producer, while a low-rate stream can sync every write (pass 1) cheaply. A
+     *         period of 0 is clamped to 1 (sync every write) so the file never goes unsynced.
      */
-    void bind(SD_HandleTypeDef* handle, const char* drive, const char* filename)
+    void bind(SD_HandleTypeDef* handle, const char* drive, const char* filename,
+              unsigned sync_period_writes = DEFAULT_SYNC_PERIOD_WRITES)
     {
-        handle_   = handle;
-        drive_    = drive;
-        filename_ = filename;
+        handle_      = handle;
+        drive_       = drive;
+        filename_    = filename;
+        sync_period_ = sync_period_writes == 0u ? 1u : sync_period_writes;
     }
 
     /**
@@ -69,11 +79,9 @@ public:
 
     /**
      * @brief  Append @p data to the open file, syncing to the card in batches (every
-     *         SYNC_PERIOD_WRITES writes, plus the first write). No-op unless the store
+     *         sync_period_ writes, plus the first write). No-op unless the store
      *         is ready (init() succeeded) — a store that never mounted stays inert.
-     *         Whether records *should* be persisted at all (the PersistingData control
-     *         flag) is decided upstream in the telemetry pipeline; this just saves
-     *         whatever it is handed.
+     *         This just saves whatever the telemetry pipeline hands it.
      */
     void write(std::span<const uint8_t> data);
 
@@ -90,6 +98,7 @@ private:
     const char*       filename_{};  // log file name on the volume, e.g. "data_fast.bin"
     FIL               file_{};      // log file, opened by init() and kept open
     StorageInfo       info_{};      // state + status (incl. last error cause); see info()
+    unsigned          sync_period_       = DEFAULT_SYNC_PERIOD_WRITES; // f_sync every this many writes (per stream)
     unsigned          writes_since_sync_ = 0;     // writes accrued since the last f_sync (batched flush)
     bool              first_sync_done_   = false; // the first write force-syncs to commit the dir entry
 };

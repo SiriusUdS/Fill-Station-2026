@@ -28,6 +28,7 @@
 /* The FCU object graph (defined in main.cpp) + the bits wireDrivers() needs. */
 #include "fcu_objects.hpp"
 #include "memory/backup_ram.hpp"
+#include "control/backup_status.hpp"   // logic::control::backup_status (boot retention probe)
 #include "data_integrity/crc/crc.hpp"
 #include "framing/can_header.hpp"
 #include "system/board_id.hpp"   // BoardId::FillingStation
@@ -44,6 +45,13 @@ namespace board {
 
 void halInit(void)
 {
+  /* Enable the CPU instruction cache. CubeMX has CPU_ICache=Enabled, but it emits
+     SCB_EnableICache() into main.c, which is excluded from this build (we own the entry
+     point), so the call is carried here. I-cache needs no MPU/coherency work — nothing
+     DMAs instructions, and code lives in flash written only at programming time. Done first,
+     matching CubeMX's placement at the top of main(). */
+  SCB_EnableICache();
+
   /* MPU Configuration--------------------------------------------------------*/
   MPU_Config();
 
@@ -108,8 +116,8 @@ void wireDrivers(void)
   g_solenoid_detect.init({.port = SOL_VALVE_DET_GPIO_Port,  .pin = SOL_VALVE_DET_Pin,
                           .active_high = true, .pull = GPIO_NOPULL});
 
-  /* Bring up the heater output on GPIOE (clock enabled by MX_GPIO_Init):
-       - HEATER_STATE (PE5) output — driven on/off straight from the Heater control flag
+  /* Bring up the heater output on GPIOD (clock enabled by MX_GPIO_Init):
+       - HEATER_STATE (PD1) output — driven on/off straight from the Heater control flag
          (Control::serviceHeater) in any state; init() drives it low (off). No detect input
          or continuity LED: the heater is a bare on/off line. */
   g_heater_drive.init({.port = HEATER_STATE_GPIO_Port, .pin = HEATER_STATE_Pin, .active_high = true});
@@ -117,8 +125,11 @@ void wireDrivers(void)
   /* Bring up the backup domain first, so the battery-backed Backup SRAM that
      holds the persistent state is clocked, writable and retained on VBAT before
      the FCU logic reads it. A regulator-timeout only means VBAT retention is
-     unconfirmed; the SRAM is still accessible, so we proceed. */
-  (void)backup_ram::init();
+     unconfirmed; the SRAM is still accessible, so we proceed — but record the
+     outcome so telemetry surfaces whether the saved state will survive a power loss. */
+  logic::control::backup_status =
+      backup_ram::init() ? logic::control::BackupStatus::Unretained
+                         : logic::control::BackupStatus::Retained;
 
   /* Configure the CRC peripheral for the zlib/reflected variant behind the
      logic data-integrity seam (logic::data_integrity::crc32), used to stamp the
@@ -187,9 +198,9 @@ void wireDrivers(void)
      composition left them unbound). They share one card: g_controller.init() mounts the
      volume + creates this boot's session folder once, then opens all three files inside
      it (data_fast.bin / data_slow.bin / data_ext.bin). */
-  g_card_fast.bind(&hsd2, "0:/", "data_fast.bin");
-  g_card_slow.bind(&hsd2, "0:/", "data_slow.bin");
-  g_card_ext.bind(&hsd2, "0:/", "data_ext.bin");
+  g_card_fast.bind(&hsd2, "0:/", "data_fast.bin", /*sync_period_writes=*/16);  // high-rate: sync rarely
+  g_card_slow.bind(&hsd2, "0:/", "data_slow.bin", /*sync_period_writes=*/4);
+  g_card_ext.bind(&hsd2, "0:/", "data_ext.bin",  /*sync_period_writes=*/1);   // low-rate: sync every write
 
   /* Bring up the two local ball valves. The 333 Hz (3 ms) servo PWM frequency is
      owned HERE, not in CubeMX: leave the generated timer at its defaults and set
@@ -214,12 +225,9 @@ void wireDrivers(void)
   g_dump_valve.init({
       .servo       = {.htim = &htim15, .channel = TIM_CHANNEL_2,
                       .min_pulse_ticks = 1000.0F, .max_pulse_ticks = 2000.0F},
-      // No physical open switch on the dump valve (no DUMP_SWITCH_OPENED pin): the
-      // descriptor is null and tick() never reads it (opened_switch_ignored).
-      .open_limit  = {.port = nullptr, .pin = 0},
+      .open_limit  = {.port = DUMP_SWITCH_OPENED_GPIO_Port, .pin = DUMP_SWITCH_OPENED_Pin},
       .close_limit = {.port = DUMP_SWITCH_CLOSED_GPIO_Port, .pin = DUMP_SWITCH_CLOSED_Pin},
       .max_transit_timeout_ms = 5000,
-      .opened_switch_ignored  = true,
   });
 
   /* Bring up the FCU controller. It resumes the persisted state and then safes the

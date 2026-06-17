@@ -14,6 +14,7 @@
 #include "communication/interfaces/power_monitor.hpp"  // logic::communication::PowerMonitor + PowerMonitorInfo
 #include "control/persistent_state.hpp"          // fill_state — tags each downlinked record with the ECU's state
 #include "telemetry/sd_recorder.hpp"             // logic::telemetry::SdRecorder (shared 3-file SD policy)
+#include "communication/protocol/telemetry/sd_block_footer.hpp"  // SD_BLOCK_PAYLOAD_CAP (footer reservation)
 #include "telemetry/extended_base.hpp"           // logic::telemetry::fillExtendedBase (shared prefix)
 
 #include "communication/protocol/telemetry/ecu_system_state.hpp"  // EcuSystemState (+ SystemStateBase)
@@ -53,6 +54,16 @@ inline constexpr std::size_t LOG_HALF_BYTES = logic::telemetry::SD_LOG_BLOCK_BYT
    held off the drain; a deeper ring absorbs those bursts. Costs LOG_BUFFER_COUNT * LOG_HALF_BYTES
    of (AXI-SRAM) RAM. */
 inline constexpr std::size_t LOG_BUFFER_COUNT = 4;
+
+/* Hard cap on ready slots drained per drain() call. drain() runs in the foreground and does a
+   BLOCKING SD write per slot; the 2 kHz producer (record-timer ISR) keeps marking new slots
+   ready, so an UNBOUNDED `while (ready)` could chase the producer indefinitely — never returning
+   to tick()'s command-service loop, starving (or wedging) command handling. Bounding it to a
+   fixed number of slots per call guarantees the foreground yields back to commands between
+   blocking writes. 1 is most responsive; the deep ring above (not a bigger per-call burst) is
+   what absorbs an f_sync stall. A 4096 B slot holds ~60 records vs ~33 slots/s produced, so one
+   slot/pass keeps up with wide margin. */
+inline constexpr unsigned MAX_DRAIN_SLOTS_PER_TICK = 1;
 
 /* If the ADC ring stays empty this long, the ADC is presumed silent and the record
    timer emits filler records (flagged invalid) so the downlink rate holds. */
@@ -149,14 +160,14 @@ public:
      *         now carries the same 2 kHz the SD log does). This only fills the driver's
      *         software TX ring and returns; the ring paces the burst onto the bus in the
      *         background (TX-FIFO-empty ISR), so the loop never waits on the wire. */
-    void drain(uint32_t /*now_ms*/)
+    void drain(uint32_t now_ms)
     {
-        while (log_.ready[log_.tail]) {
+        for (unsigned n = 0; n < detail::MAX_DRAIN_SLOTS_PER_TICK && log_.ready[log_.tail]; ++n) {
             const uint8_t  t     = log_.tail;
             const uint16_t bytes = log_.used[t];
 
             recorder_.recordSystemState(
-                std::span<const uint8_t>(log_.data[t], detail::LOG_HALF_BYTES), bytes);
+                std::span<uint8_t>(log_.data[t], detail::LOG_HALF_BYTES), bytes, now_ms);
 
             // Hand off every whole record in the slot (one FD frame each). The platform
             // CAN driver queues them in its software TX ring, so this is a run of cheap
@@ -172,8 +183,8 @@ public:
         }
     }
 
-    /** @brief Build the low-rate ExtendedSystemState (~10 Hz), log it to data_ext.bin
-     *         (gated by PersistingData), AND downlink it to the FCU over CAN — one record
+    /** @brief Build the low-rate ExtendedSystemState (~10 Hz), log it to data_ext.bin,
+     *         AND downlink it to the FCU over CAN — one record
      *         per send, unbatched (unlike the SystemState stream, which drains a full half
      *         at a time), so the FCU relays it straight on to the GS. Foreground-driven;
      *         self-throttled. */
@@ -189,8 +200,7 @@ public:
         // has no per-board flags, so its per-board control-flags byte is 0.
         logic::telemetry::fillExtendedBase(ext.base, now_ms, /*control_flags_board=*/0);
         ext.power_monitor = power_monitor_.info();  // INA3221 (I2C4), polled at ~10 Hz
-        recorder_.recordExtended(
-            std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(&ext), sizeof(ext)));
+        recorder_.recordExtended(ext, now_ms);   // accumulate -> data_ext.bin
         sendExtendedCan(ext);   // downlink to the FCU (unbatched), which relays it to the GS
     }
 
@@ -233,7 +243,9 @@ private:
     void logAppend(const EcuSystemState& record)
     {
         uint8_t h = log_.head;
-        if (log_.used[h] + sizeof(EcuSystemState) > detail::LOG_HALF_BYTES) {
+        // Flip at the payload cap (slot size minus the footer), so the drained slot always has
+        // room for the SD block footer the recorder stamps into its tail.
+        if (log_.used[h] + sizeof(EcuSystemState) > logic::telemetry::SD_BLOCK_PAYLOAD_CAP) {
             const uint8_t next = static_cast<uint8_t>((h + 1) % detail::LOG_BUFFER_COUNT);
             if (log_.ready[next]) {      // ring full: the next slot is the oldest, not drained yet
                 if (log_.overrun_count != UINT16_MAX) {

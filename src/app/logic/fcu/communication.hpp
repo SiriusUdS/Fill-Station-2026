@@ -65,13 +65,13 @@ inline constexpr std::array<uint8_t, 6> TELEMETRY_MAC  = {0x00, 0xE0, 0x4C, 0x33
 inline constexpr uint32_t               TELEMETRY_IPV4 = make_ipv4(192, 168, 0, 111);
 inline constexpr uint16_t               TELEMETRY_PORT = 7520;
 
-inline constexpr std::array<uint8_t, 6> COMMANDER_MAC  = TELEMETRY_MAC;
-inline constexpr uint32_t               COMMANDER_IPV4 = TELEMETRY_IPV4;
-inline constexpr uint16_t               COMMANDER_PORT = TELEMETRY_PORT;
+// inline constexpr std::array<uint8_t, 6> COMMANDER_MAC  = TELEMETRY_MAC;
+// inline constexpr uint32_t               COMMANDER_IPV4 = TELEMETRY_IPV4;
+// inline constexpr uint16_t               COMMANDER_PORT = TELEMETRY_PORT;
 
-/// inline constexpr std::array<uint8_t, 6> COMMANDER_MAC  = {0xb8, 0x27, 0xeb, 0x1d, 0x20, 0xb9};
-/// inline constexpr uint32_t               COMMANDER_IPV4 = make_ipv4(192, 168, 0, 101);
-/// inline constexpr uint16_t               COMMANDER_PORT = 7520;
+inline constexpr std::array<uint8_t, 6> COMMANDER_MAC  = {0xb8, 0x27, 0xeb, 0x1d, 0x20, 0xb9};
+inline constexpr uint32_t               COMMANDER_IPV4 = make_ipv4(192, 168, 0, 101);
+inline constexpr uint16_t               COMMANDER_PORT = 7520;
 
 } // namespace detail
 

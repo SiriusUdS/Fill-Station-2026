@@ -31,10 +31,10 @@ char  s_session_dir[24]    = {};   // this boot's folder, e.g. "0:/7/"
 
 /* f_sync (the FAT + directory-entry flush) is the costly, latency-spiky part of a save;
    doing it every block stalls the producer enough to overrun the telemetry double buffer.
-   Batch it: sync once every this many writes. The trade is that up to this many writes'
-   worth of records can be lost on a power cut — small relative to a full run, and the
-   telemetry stream is also downlinked live regardless. */
-constexpr unsigned SYNC_PERIOD_WRITES = 16;
+   Batch it: each stream syncs once every sync_period_ writes (set per file in bind(), e.g.
+   16 for the high-rate data_fast.bin, 1 for the low-rate data_ext.bin). The trade is that up
+   to one period's worth of records can be lost on a power cut — small relative to a full run,
+   and the telemetry stream is also downlinked live regardless. */
 
 /* Highest existing numeric folder name in the volume root, + 1 (0 if none). Folder
    names are short numerics, so the 8.3 fname carries them regardless of LFN. */
@@ -132,7 +132,7 @@ void SdCard::write(std::span<const uint8_t> data)
     // overrun the telemetry double buffer. The first write always syncs so the file's
     // directory entry is committed immediately (the file appears on the card right away,
     // not only once a full period of records has accrued).
-    if (++writes_since_sync_ >= SYNC_PERIOD_WRITES || !first_sync_done_) {
+    if (++writes_since_sync_ >= sync_period_ || !first_sync_done_) {
         if (f_sync(&file_) != FR_OK) {
             fail(StorageError::FileWriteFail);
             return;

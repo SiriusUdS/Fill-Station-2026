@@ -12,7 +12,7 @@
  * to every board) and a PER-BOARD set (board-specific), each its own 8-bit bitmask
  * keyed by its own enum — together the 16-bit control-flags space the GS reads from
  * telemetry. A CommandType::SetControlFlag command sets a flag; the subsystem that
- * owns it reads it (e.g. the SD recorder reads PersistingData/FastRecording). Not
+ * owns it reads it (e.g. the SD recorder reads FastRecording). Not
  * battery-backed: all flags reset to off on every boot.
  * ------------------------------------------------------------------------- */
 

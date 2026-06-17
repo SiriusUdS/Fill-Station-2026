@@ -50,3 +50,21 @@ add_executable(status_indicator_test
 target_include_directories(status_indicator_test PRIVATE ${TEST_SUPPORT} ${LOGIC_COMMON_INCLUDE_DIRS})
 target_link_libraries(status_indicator_test PRIVATE GTest::gtest_main)
 gtest_discover_tests(status_indicator_test PROPERTIES LABELS "unit")
+
+# The on-disk SD block footer: format + self-contained reader, stamped with the host CRC seam.
+add_executable(sd_block_footer_test
+    unit/logic/telemetry/sd_block_footer_test.cpp
+    ${CRC_HOST_SRC}
+)
+target_include_directories(sd_block_footer_test PRIVATE ${TEST_SUPPORT} ${LOGIC_COMMON_INCLUDE_DIRS})
+target_link_libraries(sd_block_footer_test PRIVATE GTest::gtest_main)
+gtest_discover_tests(sd_block_footer_test PROPERTIES LABELS "unit")
+
+# The shared SD recorder: footer-stamped 4096-block writes for all three streams (no fragmentation).
+add_executable(sd_recorder_test
+    unit/logic/telemetry/sd_recorder_test.cpp
+    ${CRC_HOST_SRC}
+)
+target_include_directories(sd_recorder_test PRIVATE ${TEST_SUPPORT} ${LOGIC_COMMON_INCLUDE_DIRS})
+target_link_libraries(sd_recorder_test PRIVATE GTest::gtest_main)
+gtest_discover_tests(sd_recorder_test PROPERTIES LABELS "unit")

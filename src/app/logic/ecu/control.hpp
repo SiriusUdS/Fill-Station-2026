@@ -54,9 +54,32 @@ public:
     Control(V& ipa_valve, V& nos_valve, Comm& comm)
         : ipa_valve_(ipa_valve), nos_valve_(nos_valve), comm_(comm) {}
 
-    /** @brief Boot-init the control layer. (The ECU does not boot-safe its valves
-     *         today; that policy, if wanted, hooks in here as on the FCU.) */
-    void init() {}
+    /** @brief Boot-init the control layer, driving the state machine INTO the boot state.
+     *
+     * The controller resumes persistent_state BEFORE calling this:
+     *   - a RELOAD that resumes an in-progress state (Abort / Launch / Ignite) RE-EXECUTES the
+     *     transition into that state, BYPASSING the transition-table rules, so the propellant
+     *     valves are driven to match the resumed state — Launch OPENS both valves, Abort CLOSES
+     *     both. onTransition is edge-keyed, so we replay the canonical arming edge
+     *     (reloadEntryFrom). This is intentional: a reload restores the live valve positions.
+     *   - any other boot (a fresh Init, i.e. cold or corrupt Backup SRAM) transitions into
+     *     Safe, which closes both propellant valves.
+     * @param now_ms boot tick (the board passes 0). */
+    void init(uint32_t now_ms)
+    {
+        const logic::control::State boot = logic::control::persistent_state.fill_state;  // resumed by the controller
+        if (boot != logic::control::State::Init) {
+            // Reload: re-run the entry actuation for the resumed state (rules bypassed).
+            onTransition(logic::control::reloadEntryFrom(boot), boot);
+            logic::control::state_entered_ms = now_ms;  // start the dwell clock for the resumed state
+            // Restore the recording rate to match the resumed state (flags are not battery-backed,
+            // so a warm reboot into Ignite/Launch/Abort must re-arm fast logging).
+            logic::control::base_control_flags.set(
+                ControlFlagBase::FastRecording, logic::control::isFastRecordingState(boot));
+            return;
+        }
+        (void)transitionTo(logic::control::State::Safe, now_ms);  // cold boot: enter Safe (closes IPA + NOS)
+    }
 
     /** @brief THE single point every ECU state change passes through: reject the change if the
      *         shared transition table does not permit it from the current state (recording the
@@ -78,6 +101,11 @@ public:
         onTransition(from, to);
         logic::control::persistent_state.saveState(to);
         logic::control::state_entered_ms = now_ms;  // start the dwell clock for the new state
+        // The state machine OWNS the SD recording rate: arm fast logging for the burn window
+        // (Ignite/Launch/Abort), fall back to the slow default for every resting state. This
+        // overrides any manual GS FastRecording setting on each transition (see isFastRecordingState).
+        logic::control::base_control_flags.set(
+            ControlFlagBase::FastRecording, logic::control::isFastRecordingState(to));
         return true;
     }
 
@@ -162,9 +190,12 @@ private:
             return;
         }
 
+        // A non-zero force byte makes Open/Close a forced actuation: the valve bypasses its limit
+        // switch for FORCED_VALVE_ACTUATION_MS then reverts (SetOpenedPct has no switch to bypass).
+        const uint32_t bypass_ms = payload.force ? logic::control::FORCED_VALVE_ACTUATION_MS : 0;
         switch (payload.action) {
-            case ValveCommand::Open:         (void)valve->open();  break;
-            case ValveCommand::Close:        (void)valve->close(); break;
+            case ValveCommand::Open:         (void)valve->open(bypass_ms);  break;
+            case ValveCommand::Close:        (void)valve->close(bypass_ms); break;
             case ValveCommand::SetOpenedPct: (void)valve->setOpenPercent(static_cast<float>(payload.value)); break;
         }
 
@@ -260,19 +291,27 @@ private:
 
     // The ECU's per-transition action hook. The legal edges are shared with the FCU (see
     // logic::control::isTransitionAllowed); the SIDE EFFECTS are board-specific:
-    //   - Any transition INTO Safe OR Abort drives both propellant valves closed (people may
-    //     approach on Safe; an abort must shut the propellant flow). Independent of the operator
-    //     valve-command gate.
-    //   - Ignite -> Launch drives both propellant valves fully open (the FCU does nothing here).
+    //   - INTO Safe drives both propellant valves closed (people may approach).
+    //   - INTO Abort FORCE-closes both propellant valves (limit switches bypassed for
+    //     FORCED_VALVE_ACTUATION_MS) so the propellant shuts for certain even if a switch is
+    //     flaky; each valve then reverts to normal switch-monitoring on its own.
+    //   - Ignite -> Launch FORCE-opens both propellant valves the same way (the FCU does nothing).
+    // The force is self-contained in each valve command — it carries its own bypass window and the
+    // valve auto-reverts — so a later command (e.g. the Abort close superseding a Launch open)
+    // simply replaces it; there is no separate force state to unwind here.
     void onTransition(logic::control::State from, logic::control::State to)
     {
-        if (to == logic::control::State::Safe || to == logic::control::State::Abort) {
+        if (to == logic::control::State::Safe) {
             (void)ipa_valve_.close();
             (void)nos_valve_.close();
         }
+        if (to == logic::control::State::Abort) {
+            (void)ipa_valve_.close(logic::control::FORCED_VALVE_ACTUATION_MS);
+            (void)nos_valve_.close(logic::control::FORCED_VALVE_ACTUATION_MS);
+        }
         if (from == logic::control::State::Ignite && to == logic::control::State::Launch) {
-            (void)ipa_valve_.open();
-            (void)nos_valve_.open();
+            (void)ipa_valve_.open(logic::control::FORCED_VALVE_ACTUATION_MS);
+            (void)nos_valve_.open(logic::control::FORCED_VALVE_ACTUATION_MS);
         }
     }
 

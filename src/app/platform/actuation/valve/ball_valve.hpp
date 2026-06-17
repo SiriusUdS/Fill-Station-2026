@@ -73,15 +73,21 @@ public:
 
     /**
      * @brief  Command the valve to its fully-open position.
+     * @param  bypass_ms  A FORCED open when > 0: drive hard open — unconditionally (skipping the
+     *                    "already open/opening" no-op) and IGNORING the open limit switch (no
+     *                    transit-timeout fault) — for this many ms, after which tick() auto-reverts
+     *                    to a normal switch-monitored open. 0 = a normal open.
      * @return std::nullopt on success, or a ValveError describing the failure.
      */
-    [[nodiscard]] std::optional<logic::actuation::ValveError> open();
+    [[nodiscard]] std::optional<logic::actuation::ValveError> open(uint32_t bypass_ms = 0);
 
     /**
      * @brief  Command the valve to its fully-closed position.
+     * @param  bypass_ms  A FORCED close when > 0, the close counterpart of open()'s bypass (drive
+     *                    hard closed, ignore the closed limit switch for this many ms, then revert).
      * @return std::nullopt on success, or a ValveError describing the failure.
      */
-    [[nodiscard]] std::optional<logic::actuation::ValveError> close();
+    [[nodiscard]] std::optional<logic::actuation::ValveError> close(uint32_t bypass_ms = 0);
 
     /**
      * @brief  Command the valve to a proportional open position.
@@ -110,6 +116,12 @@ private:
     ValveInfo       info_{};               /**< State + status + commanded position; see info(). */
     uint32_t        start_movement_ms_ = 0;  /**< When the current open/close began (timeout base). */
     uint32_t        end_movement_ms_   = 0;  /**< When the valve last reached a limit / faulted. */
+    uint32_t        bypass_ms_         = 0;  /**< Forced-actuation window from start_movement_ms_:
+                                                  while within it, tick() suppresses the transit-
+                                                  timeout fault so the valve is driven hard to the
+                                                  target regardless of its limit switch, then it
+                                                  auto-reverts to normal. Set by open/close(bypass_ms);
+                                                  0 (cleared) by a normal open/close/setOpenPercent. */
 };
 
 // The driver is the logic seam: enforce conformance at compile time, here, so a

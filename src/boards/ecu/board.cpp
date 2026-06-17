@@ -27,11 +27,14 @@
 /* The ECU object graph (defined in main.cpp) + the bits wireDrivers() needs. */
 #include "ecu_objects.hpp"
 #include "memory/backup_ram.hpp"
+#include "control/backup_status.hpp"   // logic::control::backup_status (boot retention probe)
+#include "data_integrity/crc/crc.hpp"  // crc::init — binds the HW CRC behind logic::data_integrity::crc32
 #include "framing/can_header.hpp"
 #include "system/board_id.hpp"   // BoardId::Engine
 
 using namespace ecu_app;
 namespace backup_ram = platform::memory::backup_ram;
+namespace crc        = platform::data_integrity::crc;
 
 static void SystemClock_Config(void);
 static void PeriphCommonClock_Config(void);
@@ -41,6 +44,13 @@ namespace board {
 
 void halInit(void)
 {
+  /* Enable the CPU instruction cache. CubeMX has CPU_ICache=Enabled, but it emits
+     SCB_EnableICache() into main.c, which is excluded from this build (we own the entry
+     point), so the call is carried here. I-cache needs no MPU/coherency work — nothing
+     DMAs instructions, and code lives in flash written only at programming time. Done first,
+     matching CubeMX's placement at the top of main(). */
+  SCB_EnableICache();
+
   /* MPU + HAL + system clock, then the shared peripheral kernel clocks (SPI1 + I2C4 off
      PLL3 — CubeMX moved these out of the per-peripheral MspInit into PeriphCommonClock_Config
      when I2C4 was added; main.c is excluded from the build, so we call it here), then every
@@ -76,8 +86,19 @@ void wireDrivers(void)
   g_status_indicator.init();
 
   /* Bring up the backup domain first so the battery-backed Backup SRAM that holds
-     the persistent state is clocked + writable before the controller reads it. */
-  (void)backup_ram::init();
+     the persistent state is clocked + writable before the controller reads it. Record
+     the outcome so telemetry can surface whether VBAT retention is confirmed: a
+     RegulatorTimeout means the SRAM is usable this boot but may NOT survive the next
+     VBAT-only power loss. */
+  logic::control::backup_status =
+      backup_ram::init() ? logic::control::BackupStatus::Unretained
+                         : logic::control::BackupStatus::Retained;
+
+  /* Configure the CRC peripheral for the zlib/reflected variant behind the logic
+     data-integrity seam (logic::data_integrity::crc32), used to checksum every SD
+     record. MX_CRC_Init() created the unit in halInit(); this binds + reconfigures it.
+     Must precede the controller (its SdRecorder stamps record CRCs). */
+  crc::init(&hcrc);
 
   /* CAN node — the ECU downlinks telemetry over CAN to the FCU. */
   (void)g_can.init(&hfdcan1, static_cast<uint8_t>(BoardId::Engine));
@@ -117,9 +138,9 @@ void wireDrivers(void)
   /* Bind the three SD log files on SDMMC1 (the app composition left them unbound). They
      share one card: g_controller.init() mounts the volume + creates this boot's session
      folder once, then opens all three files inside it (same recording policy as the FCU). */
-  g_card_fast.bind(&hsd1, "0:/", "data_fast.bin");
-  g_card_slow.bind(&hsd1, "0:/", "data_slow.bin");
-  g_card_ext.bind(&hsd1, "0:/", "data_ext.bin");
+  g_card_fast.bind(&hsd1, "0:/", "data_fast.bin", /*sync_period_writes=*/16);  // high-rate: sync rarely
+  g_card_slow.bind(&hsd1, "0:/", "data_slow.bin", /*sync_period_writes=*/4);
+  g_card_ext.bind(&hsd1, "0:/", "data_ext.bin",  /*sync_period_writes=*/1);   // low-rate: sync every write
 
   /* Two propellant ball valves on TIM15: IPA = CH1 (PE5), NOS = CH2 (PE6). 333 Hz
      (3 ms) servo PWM owned here: 100 MHz / (PSC 99 + 1) = 1 MHz tick; ARR 2999 -> 3 ms.
@@ -143,11 +164,12 @@ void wireDrivers(void)
       .max_transit_timeout_ms = 5000,
   });
 
-  /* Safe boot state: drive both valves closed (no flow). */
-  (void)g_ipa_valve.close();
-  (void)g_nos_valve.close();
-
-  /* Bring up the engine controller (this also mounts the SD card via g_card.init()). */
+  /* Bring up the engine controller (this also mounts the SD card via g_card.init()). The
+     controller owns boot valve positioning: g_controller.init() resumes persistent_state and
+     drives Control::init, which on a cold boot enters Safe (closing both valves) and on a
+     reload re-executes the resumed state's transition (e.g. Launch OPENS both valves). So the
+     board no longer pre-closes the valves here — doing so would fight a reload that must reopen
+     them, and is redundant with the cold-boot Safe transition. */
   g_controller.init();
 
   /* Start the record-production timer last, so records only flow once the logic and
