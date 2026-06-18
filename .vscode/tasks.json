@@ -45,6 +45,58 @@
         "isDefault": true
       },
       "problemMatcher": ["$gcc"]
+    },
+    {
+      "label": "Configure FCU Release (-O1)",
+      "type": "process",
+      "command": "cmake",
+      "args": ["--preset", "fcu-Release"],
+      "problemMatcher": [],
+      "detail": "One-time / after-CMake-change configure of the FCU board at -O1 Release (CMAKE_*_FLAGS_RELEASE = '-O1 -g0' in gcc-arm-none-eabi.cmake, no -flto)."
+    },
+    {
+      "label": "Configure ECU Release (-O1)",
+      "type": "process",
+      "command": "cmake",
+      "args": ["--preset", "ecu-Release"],
+      "problemMatcher": [],
+      "detail": "One-time / after-CMake-change configure of the ECU board at -O1 Release (CMAKE_*_FLAGS_RELEASE = '-O1 -g0' in gcc-arm-none-eabi.cmake, no -flto)."
+    },
+    {
+      "label": "Build FCU Release (-O1)",
+      "type": "process",
+      "command": "cmake",
+      "args": ["--build", "${workspaceFolder}/build/fcu-Release"],
+      "group": "build",
+      "problemMatcher": ["$gcc"],
+      "detail": "Build the FCU at -O1 Release (configure first with 'Configure FCU Release (-O1)' if build/fcu-Release is missing)."
+    },
+    {
+      "label": "Build ECU Release (-O1)",
+      "type": "process",
+      "command": "cmake",
+      "args": ["--build", "${workspaceFolder}/build/ecu-Release"],
+      "group": "build",
+      "problemMatcher": ["$gcc"],
+      "detail": "Build the ECU at -O1 Release (configure first with 'Configure ECU Release (-O1)' if build/ecu-Release is missing)."
+    },
+    {
+      "label": "Flash ECU",
+      "type": "process",
+      "command": "C:/ST/STM32CubeCLT_1.17.0/STM32CubeProgrammer/bin/STM32_Programmer_CLI.exe",
+      "args": ["-c", "port=SWD", "mode=UR", "-w", "${workspaceFolder}/src/boards/ecu/CM7/build-Release/ecu_CM7.elf", "-rst"],
+      "problemMatcher": [],
+      "dependsOn": "Build ECU Release (-O1)",
+      "detail": "Flash the -O1 Release ecu_CM7.elf to the ECU over ST-Link (connect-under-reset), then reset and run. The ExternalProject writes the Release ELF to src/boards/ecu/CM7/build-Release/ (Debug builds go to build-Debug/)."
+    },
+    {
+      "label": "Flash FCU",
+      "type": "process",
+      "command": "C:/ST/STM32CubeCLT_1.17.0/STM32CubeProgrammer/bin/STM32_Programmer_CLI.exe",
+      "args": ["-c", "port=SWD", "mode=UR", "-w", "${workspaceFolder}/src/boards/fcu/CM7/build-Release/fcu_CM7.elf", "-rst"],
+      "problemMatcher": [],
+      "dependsOn": "Build FCU Release (-O1)",
+      "detail": "Flash the -O1 Release fcu_CM7.elf to the FCU over ST-Link (connect-under-reset), then reset and run. The ExternalProject writes the Release ELF to src/boards/fcu/CM7/build-Release/ (Debug builds go to build-Debug/)."
     }
   ]
 }

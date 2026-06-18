@@ -18,6 +18,7 @@
 struct FakeEmatch {
     bool     detect_present     = false;  /**< Test input: is an e-match "plugged in"? poll() reads this. */
     bool     detected           = false;  /**< Last poll()'s reading (mirrors detect_present). */
+    bool     continuity         = false;  /**< Last continuity-line state (mirrors detected, like the real driver). */
     bool     energised          = false;  /**< Firing-line state (true between energise/deenergise). */
     uint32_t last_energised_ms   = 0;     /**< now_ms of the last energise(). */
     uint32_t last_deenergised_ms = 0;     /**< now_ms of the last deenergise(). */
@@ -42,15 +43,17 @@ struct FakeEmatch {
     bool poll()
     {
         ++poll_calls;
-        detected = detect_present;
+        detected   = detect_present;
+        continuity = detected;
         return detected;
     }
 
     [[nodiscard]] EmatchInfo info() const
     {
         EmatchInfo i = {};
-        i.status.detected     = detected  ? 1u : 0u;
-        i.status.energised    = energised ? 1u : 0u;
+        i.status.detected     = detected   ? 1u : 0u;
+        i.status.energised    = energised  ? 1u : 0u;
+        i.status.continuity   = continuity ? 1u : 0u;
         i.last_energised_ms   = last_energised_ms;
         i.last_deenergised_ms = last_deenergised_ms;
         return i;

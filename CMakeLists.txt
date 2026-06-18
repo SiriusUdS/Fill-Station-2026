@@ -26,6 +26,12 @@ if(NOT DEFINED BUILD_CONTEXT)
     set(BUILD_CONTEXT CM7)
 endif()
 
+# Default the build type so the per-config binary dir below is well-formed even when
+# neither a preset nor -DCMAKE_BUILD_TYPE was passed (the presets set Debug/Release).
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Debug)
+endif()
+
 set(CMAKE_PROJECT_NAME firmware)
 project(${CMAKE_PROJECT_NAME})
 
@@ -37,7 +43,7 @@ set(REPO_ROOT ${CMAKE_SOURCE_DIR})
 # CubeMX orchestrator under boards/<board>/ is left for CubeMX regen and is not used
 # as the build entry point).
 ExternalProject_Add(${BOARD}_CM7
-    BINARY_DIR                  ${CMAKE_SOURCE_DIR}/src/boards/${BOARD}/CM7/build
+    BINARY_DIR                  ${CMAKE_SOURCE_DIR}/src/boards/${BOARD}/CM7/build-${CMAKE_BUILD_TYPE}
     SOURCE_DIR                  ${CMAKE_SOURCE_DIR}/src/boards/${BOARD}/CM7
     PREFIX                      ${BOARD}
     CONFIGURE_HANDLED_BY_BUILD  true

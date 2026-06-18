@@ -455,8 +455,8 @@ struct Config {
 
     /** Per-channel PGA analog gain (default x32 — the historical fixed setting). */
     std::array<PgaGain, ADC_CHANNEL_COUNT> pga_gain = {
-        PgaGain::x32, PgaGain::x32, PgaGain::x32, PgaGain::x32,
-        PgaGain::x32, PgaGain::x32, PgaGain::x32, PgaGain::x32,
+        PgaGain::x1, PgaGain::x1, PgaGain::x1, PgaGain::x1,
+        PgaGain::x1, PgaGain::x1, PgaGain::x1, PgaGain::x1,
     };
     /** Per-channel 24-bit signed OCAL offset calibration, in ADC counts; subtracted before
      *  output. 0 = no offset (the chip reset value), so the default array is all zeros. */

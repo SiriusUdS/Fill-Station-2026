@@ -97,7 +97,7 @@ void halInit(void)
   /* Independent watchdog LAST: MX_IWDG_Init() starts the ~30 s counter, so the boot window to the
      first serviced ping starts here. The FCU feeds it only from a GS ping (handlePing ->
      watchdog::kick); a board that cannot service a ping for the timeout is reset as dead. */
-  MX_IWDG_Init();
+  MX_IWDG1_Init();
 }
 
 void wireDrivers(void)
@@ -188,7 +188,7 @@ void wireDrivers(void)
       .drdy_pin  = GPIO_PIN_7,
       .drdy_irqn = EXTI9_5_IRQn,
       //              ch0          ch1          ch2          ch3          ch4          ch5          ch6          ch7
-      .pga_gain    = { PgaGain::x32, PgaGain::x32, PgaGain::x32, PgaGain::x32, PgaGain::x32, PgaGain::x32, PgaGain::x32, PgaGain::x32 },
+      .pga_gain    = { PgaGain::x128, PgaGain::x1, PgaGain::x64, PgaGain::x1, PgaGain::x1, PgaGain::x1, PgaGain::x1, PgaGain::x1 },
       .ocal_offset = {            0,            0,            0,            0,            0,            0,            0,            0 },
       .gcal_gain   = { ads131m08::GCAL_UNITY, ads131m08::GCAL_UNITY, ads131m08::GCAL_UNITY, ads131m08::GCAL_UNITY,
                        ads131m08::GCAL_UNITY, ads131m08::GCAL_UNITY, ads131m08::GCAL_UNITY, ads131m08::GCAL_UNITY },
@@ -290,6 +290,8 @@ void wireDrivers(void)
       .open_limit  = {.port = FILL_SWITCH_OPENED_GPIO_Port, .pin = FILL_SWITCH_OPENED_Pin},
       .close_limit = {.port = FILL_SWITCH_CLOSED_GPIO_Port, .pin = FILL_SWITCH_CLOSED_Pin},
       .max_transit_timeout_ms = 5000,
+      .duty_closed_percent = 26.0F,   // Fill calibration: 26 % duty = fully closed
+      .duty_open_percent   = 54.0F,   //                   54 % duty = fully open
   });
   g_dump_valve.init({
       .servo       = {.htim = &htim15, .channel = TIM_CHANNEL_2,
@@ -297,6 +299,8 @@ void wireDrivers(void)
       .open_limit  = {.port = DUMP_SWITCH_OPENED_GPIO_Port, .pin = DUMP_SWITCH_OPENED_Pin},
       .close_limit = {.port = DUMP_SWITCH_CLOSED_GPIO_Port, .pin = DUMP_SWITCH_CLOSED_Pin},
       .max_transit_timeout_ms = 5000,
+      .duty_closed_percent = 26.0F,   // Dump calibration: 26 % duty = fully closed
+      .duty_open_percent   = 54.0F,   //                   54 % duty = fully open
   });
 
   /* Bring up the FCU controller. It resumes the persisted state and then safes the

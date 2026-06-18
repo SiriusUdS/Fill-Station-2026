@@ -89,7 +89,7 @@ void halInit(void)
   /* Independent watchdog LAST: MX_IWDG_Init() starts the ~30 s counter, so the boot window to the
      first serviced ping starts here. The ECU feeds it only from a bridged GS ping (handlePing ->
      watchdog::kick); a board that cannot service a ping for the timeout is reset as dead. */
-  MX_IWDG_Init();
+  MX_IWDG1_Init();
 }
 
 void wireDrivers(void)
@@ -151,7 +151,7 @@ void wireDrivers(void)
       .drdy_pin  = ADS_DRDY_Pin,       // PA4
       .drdy_irqn = EXTI4_IRQn,
       //              ch0          ch1          ch2          ch3          ch4          ch5          ch6          ch7
-      .pga_gain    = { PgaGain::x32, PgaGain::x32, PgaGain::x32, PgaGain::x32, PgaGain::x32, PgaGain::x32, PgaGain::x32, PgaGain::x32 },
+      .pga_gain    = { PgaGain::x1, PgaGain::x1, PgaGain::x1, PgaGain::x8, PgaGain::x8, PgaGain::x8, PgaGain::x32, PgaGain::x32 },
       .ocal_offset = {            0,            0,            0,            0,            0,            0,            0,            0 },
       .gcal_gain   = { ads131m08::GCAL_UNITY, ads131m08::GCAL_UNITY, ads131m08::GCAL_UNITY, ads131m08::GCAL_UNITY,
                        ads131m08::GCAL_UNITY, ads131m08::GCAL_UNITY, ads131m08::GCAL_UNITY, ads131m08::GCAL_UNITY },
@@ -226,12 +226,17 @@ void wireDrivers(void)
       .open_limit  = {.port = SWITCH_VALVE_IPA_OPENED_GPIO_Port, .pin = SWITCH_VALVE_IPA_OPENED_Pin},
       .close_limit = {.port = SWITCH_VALVE_IPA_CLOSED_GPIO_Port, .pin = SWITCH_VALVE_IPA_CLOSED_Pin},
       .max_transit_timeout_ms = 5000,
+      .duty_closed_percent = 26.0F,   // IPA calibration: 26 % duty = fully closed
+      .duty_open_percent   = 54.0F,   //                  54 % duty = fully open
   });
   g_nos_valve.init({
       .servo       = {.htim = &htim15, .channel = TIM_CHANNEL_2},
       .open_limit  = {.port = SWITCH_VALVE_NOS_OPENED_GPIO_Port, .pin = SWITCH_VALVE_NOS_OPENED_Pin},
       .close_limit = {.port = SWITCH_VALVE_NOS_CLOSED_GPIO_Port, .pin = SWITCH_VALVE_NOS_CLOSED_Pin},
       .max_transit_timeout_ms = 5000,
+      .duty_closed_percent = 26.0F,   // NOS calibration: 26 % duty = fully closed (swapped by .inverted below)
+      .duty_open_percent   = 54.0F,   //                  54 % duty = fully open  (swapped by .inverted below)
+      .inverted    = true,   // NOS valve is mounted reversed: swap duty endpoints + limit switches
   });
 
   /* Bring up the engine controller (this also mounts the SD card via g_card.init()). The

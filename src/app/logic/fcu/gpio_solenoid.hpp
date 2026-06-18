@@ -70,8 +70,9 @@ public:
      *         and non-blocking; call every loop. Returns whether the solenoid is detected. */
     bool poll()
     {
-        detected_ = detect_.read();
-        continuity_.set(detected_);
+        detected_       = detect_.read();
+        continuity_lit_ = detected_;          // the continuity indicator mirrors presence for now
+        continuity_.set(continuity_lit_);
         return detected_;
     }
 
@@ -81,10 +82,11 @@ public:
     [[nodiscard]] SolenoidInfo info() const
     {
         SolenoidInfo i = {};
-        i.status.detected  = detected_ ? 1u : 0u;
-        i.status.open      = open_     ? 1u : 0u;
-        i.last_opened_ms   = last_opened_ms_;
-        i.last_closed_ms   = last_closed_ms_;
+        i.status.detected   = detected_       ? 1u : 0u;
+        i.status.open       = open_           ? 1u : 0u;
+        i.status.continuity = continuity_lit_ ? 1u : 0u;
+        i.last_opened_ms    = last_opened_ms_;
+        i.last_closed_ms    = last_closed_ms_;
         return i;
     }
 
@@ -92,8 +94,9 @@ private:
     Drive&      drive_;       // coil output (SOL_VALVE_STATE)
     Detect&     detect_;      // present input (SOL_VALVE_DET)
     Continuity& continuity_;  // continuity indicator LED (SOL_VALVE_CONT)
-    bool        detected_ = false;  // last poll()'s detect reading (drives the LED)
-    bool        open_     = false;  // open/closed state (true between open/close edges)
+    bool        detected_       = false;  // last poll()'s detect reading (drives the LED)
+    bool        continuity_lit_ = false;  // last state driven onto the continuity line (SOL_VALVE_CONT)
+    bool        open_           = false;  // open/closed state (true between open/close edges)
     uint32_t    last_opened_ms_ = 0;  // tick of the last open edge (0 = never since boot)
     uint32_t    last_closed_ms_ = 0;  // tick of the last close edge (0 = never since boot)
 };

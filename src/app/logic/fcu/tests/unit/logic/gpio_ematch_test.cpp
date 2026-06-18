@@ -57,11 +57,13 @@ TEST_F(GpioEmatchTest, PollMirrorsDetectOntoContinuityAndInfo)
     EXPECT_TRUE(ematch_.poll());
     EXPECT_TRUE(cont_.state);                  // continuity LED lit
     EXPECT_TRUE(ematch_.info().status.detected);
+    EXPECT_TRUE(ematch_.info().status.continuity);   // continuity-line state surfaced in telemetry
 
     detect_.level = false;                     // unplugged
     EXPECT_FALSE(ematch_.poll());
     EXPECT_FALSE(cont_.state);                 // continuity LED off
     EXPECT_FALSE(ematch_.info().status.detected);
+    EXPECT_FALSE(ematch_.info().status.continuity);
 }
 
 } // namespace

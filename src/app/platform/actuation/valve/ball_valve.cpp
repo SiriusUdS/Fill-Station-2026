@@ -13,6 +13,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <utility>   // std::swap (inversion normalisation in init)
 
 using logic::actuation::ValveError;
 
@@ -51,6 +52,16 @@ namespace platform::actuation::valve {
 void BallValve::init(const BallValveConfig& config)
 {
     config_                          = config;
+
+    // An inverted valve is mounted/linked reversed, so its open and closed ends are physically
+    // swapped. Normalise it ONCE here by swapping both the duty endpoints and the two limit
+    // switches: after this, a command to open drives the servo to the (originally closed) endpoint
+    // and watches the (originally closed) switch, and vice-versa — so every command/tick below
+    // stays inversion-agnostic.
+    if (config_.inverted) {
+        std::swap(config_.duty_closed_percent, config_.duty_open_percent);
+        std::swap(config_.open_limit, config_.close_limit);
+    }
 
     // Translate the valve's PWM duty-cycle calibration into the servo's pulse-tick endpoints:
     // duty is a percentage of the full PWM period (ARR + 1), so setPercent() then maps 0..100 %

@@ -65,11 +65,13 @@ TEST_F(GpioSolenoidTest, PollMirrorsDetectOntoContinuityAndInfo)
     EXPECT_TRUE(solenoid_.poll());
     EXPECT_TRUE(cont_.state);                  // continuity LED lit
     EXPECT_TRUE(solenoid_.info().status.detected);
+    EXPECT_TRUE(solenoid_.info().status.continuity);   // continuity-line state surfaced in telemetry
 
     detect_.level = false;                     // disconnected
     EXPECT_FALSE(solenoid_.poll());
     EXPECT_FALSE(cont_.state);                 // continuity LED off
     EXPECT_FALSE(solenoid_.info().status.detected);
+    EXPECT_FALSE(solenoid_.info().status.continuity);
 }
 
 } // namespace

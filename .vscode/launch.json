@@ -10,7 +10,7 @@
             "runEntry": "main",
             "imagesAndSymbols": [
                 {
-                    "imageFileName": "${workspaceFolder}/src/boards/fcu/CM7/build/fcu_CM7.elf"
+                    "imageFileName": "${workspaceFolder}/src/boards/fcu/CM7/build-Debug/fcu_CM7.elf"
                 }
             ],
             "verbose": false
@@ -25,7 +25,7 @@
             "runEntry": "main",
             "imagesAndSymbols": [
                 {
-                    "imageFileName": "${workspaceFolder}/src/boards/ecu/CM7/build/ecu_CM7.elf"
+                    "imageFileName": "${workspaceFolder}/src/boards/ecu/CM7/build-Debug/ecu_CM7.elf"
                 }
             ],
             "verbose": false
