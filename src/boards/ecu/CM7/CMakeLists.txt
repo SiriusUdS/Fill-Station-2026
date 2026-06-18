@@ -105,6 +105,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${REPO_ROOT}/src/app/platform/storage/sd_write_engine.cpp   # shared async SD write arbiter (raw-sector DMA)
     ${REPO_ROOT}/src/app/platform/communication/can/can_dil.cpp
     ${REPO_ROOT}/src/app/platform/data_integrity/crc/crc.cpp   # backs logic::data_integrity::crc32 (SdRecorder record CRC)
+    ${REPO_ROOT}/src/app/platform/system/watchdog/watchdog.cpp   # backs logic::control::watchdog::kick (IWDG feed from handlePing)
 )
 
 # Link directories setup

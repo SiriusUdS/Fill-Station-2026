@@ -24,18 +24,21 @@
 #include "tim.h"
 #include "gpio.h"
 #include "crc.h"
+#include "iwdg.h"
 
 /* The FCU object graph (defined in main.cpp) + the bits wireDrivers() needs. */
 #include "fcu_objects.hpp"
 #include "memory/backup_ram.hpp"
 #include "control/backup_status.hpp"   // logic::control::backup_status (boot retention probe)
 #include "data_integrity/crc/crc.hpp"
+#include "system/watchdog/watchdog.hpp"  // watchdog::init — binds the IWDG behind logic::control::watchdog::kick
 #include "framing/can_header.hpp"
 #include "system/board_id.hpp"   // BoardId::FillingStation
 
 using namespace fcu_app;
 namespace backup_ram = platform::memory::backup_ram;
 namespace crc        = platform::data_integrity::crc;
+namespace watchdog   = platform::system::watchdog;
 
 static void SystemClock_Config(void);
 static void PeriphCommonClock_Config(void);
@@ -91,6 +94,10 @@ void halInit(void)
   MX_TIM1_Init();   // Fill valve servo PWM (PE9 / TIM1_CH1)
   MX_TIM15_Init();  // Dump valve servo PWM (PE6 / TIM15_CH2)
   MX_TIM6_Init();   // record-production cadence (drives g_controller.produceRecord)
+  /* Independent watchdog LAST: MX_IWDG_Init() starts the ~30 s counter, so the boot window to the
+     first serviced ping starts here. The FCU feeds it only from a GS ping (handlePing ->
+     watchdog::kick); a board that cannot service a ping for the timeout is reset as dead. */
+  MX_IWDG_Init();
 }
 
 void wireDrivers(void)
@@ -148,6 +155,10 @@ void wireDrivers(void)
      logic data-integrity seam (logic::data_integrity::crc32), used to stamp the
      telemetry frame CRC. Must precede the first downlink (drainTick in tick()). */
   crc::init(&hcrc);
+
+  /* Bind the IWDG (started by MX_IWDG_Init in halInit) behind the logic watchdog seam
+     (logic::control::watchdog::kick), so a serviced ping in handlePing can refresh it. */
+  watchdog::init(&hiwdg1);
 
   /* Bring up the CAN and Ethernet drivers, then the FCU logic. The board now
      answers ARP and ICMP echo (ping) requests and exchanges UDP/CAN traffic

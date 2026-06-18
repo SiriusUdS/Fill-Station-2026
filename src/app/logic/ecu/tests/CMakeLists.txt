@@ -9,6 +9,7 @@ add_executable(ecu_controller_test
     unit/logic/ecu_controller_test.cpp
     ${FAKES_SRC}
     ${CRC_HOST_SRC}   # the SD recorder now stamps a block-footer CRC via logic::data_integrity::crc32
+    ${WD_HOST_SRC}    # handlePing feeds the watchdog via logic::control::watchdog::kick
     ${LOGIC_COMMON}/control/persistent_state.cpp
 )
 target_include_directories(ecu_controller_test PRIVATE ${ECU_INCLUDE_DIRS})

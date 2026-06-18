@@ -13,6 +13,7 @@ add_executable(fcu_controller_test
     unit/logic/fcu_controller_test.cpp
     ${FAKES_SRC}
     ${CRC_HOST_SRC}
+    ${WD_HOST_SRC}    # handlePing feeds the watchdog via logic::control::watchdog::kick
     ${COMMAND_PARSER_SRC}
     ${LOGIC_COMMON}/control/persistent_state.cpp
 )
@@ -57,6 +58,7 @@ add_executable(control_test
     unit/logic/control/control_test.cpp
     ${FAKES_SRC}
     ${CRC_HOST_SRC}
+    ${WD_HOST_SRC}    # handlePing feeds the watchdog via logic::control::watchdog::kick
     ${COMMAND_PARSER_SRC}
     ${LOGIC_COMMON}/control/persistent_state.cpp
 )
@@ -69,6 +71,7 @@ add_executable(valve_actuation_test
     integration/valve_actuation_test.cpp
     ${FAKES_SRC}
     ${CRC_HOST_SRC}
+    ${WD_HOST_SRC}    # handlePing feeds the watchdog via logic::control::watchdog::kick
     ${COMMAND_PARSER_SRC}
     ${LOGIC_COMMON}/control/persistent_state.cpp
 )
@@ -81,6 +84,7 @@ add_executable(ping_routing_test
     integration/ping_routing_test.cpp
     ${FAKES_SRC}
     ${CRC_HOST_SRC}
+    ${WD_HOST_SRC}    # handlePing feeds the watchdog via logic::control::watchdog::kick
     ${COMMAND_PARSER_SRC}
     ${LOGIC_COMMON}/control/persistent_state.cpp
 )

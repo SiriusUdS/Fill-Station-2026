@@ -87,8 +87,8 @@ void Error_Handler(void);
 #define ADS_MOSI_GPIO_Port GPIOA
 #define ADS_CS_Pin GPIO_PIN_5
 #define ADS_CS_GPIO_Port GPIOC
-#define SD_DETECT_Pin GPIO_PIN_4
-#define SD_DETECT_GPIO_Port GPIOD
+#define SD1_DET_Pin GPIO_PIN_7
+#define SD1_DET_GPIO_Port GPIOC
 
 /* USER CODE BEGIN Private defines */
 

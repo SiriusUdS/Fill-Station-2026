@@ -23,18 +23,21 @@
 #include "sdmmc.h"
 #include "fatfs.h"
 #include "tim.h"
+#include "iwdg.h"
 
 /* The ECU object graph (defined in main.cpp) + the bits wireDrivers() needs. */
 #include "ecu_objects.hpp"
 #include "memory/backup_ram.hpp"
 #include "control/backup_status.hpp"   // logic::control::backup_status (boot retention probe)
 #include "data_integrity/crc/crc.hpp"  // crc::init — binds the HW CRC behind logic::data_integrity::crc32
+#include "system/watchdog/watchdog.hpp"  // watchdog::init — binds the IWDG behind logic::control::watchdog::kick
 #include "framing/can_header.hpp"
 #include "system/board_id.hpp"   // BoardId::Engine
 
 using namespace ecu_app;
 namespace backup_ram = platform::memory::backup_ram;
 namespace crc        = platform::data_integrity::crc;
+namespace watchdog   = platform::system::watchdog;
 
 static void SystemClock_Config(void);
 static void PeriphCommonClock_Config(void);
@@ -83,6 +86,10 @@ void halInit(void)
   MX_FATFS_Init();
   MX_TIM15_Init();       // valve servo PWM (CH1=IPA/PE5, CH2=NOS/PE6)
   MX_TIM6_Init();        // record-production cadence (unused until the controller lands)
+  /* Independent watchdog LAST: MX_IWDG_Init() starts the ~30 s counter, so the boot window to the
+     first serviced ping starts here. The ECU feeds it only from a bridged GS ping (handlePing ->
+     watchdog::kick); a board that cannot service a ping for the timeout is reset as dead. */
+  MX_IWDG_Init();
 }
 
 void wireDrivers(void)
@@ -112,6 +119,10 @@ void wireDrivers(void)
      record. MX_CRC_Init() created the unit in halInit(); this binds + reconfigures it.
      Must precede the controller (its SdRecorder stamps record CRCs). */
   crc::init(&hcrc);
+
+  /* Bind the IWDG (started by MX_IWDG_Init in halInit) behind the logic watchdog seam
+     (logic::control::watchdog::kick), so a serviced ping in handlePing can refresh it. */
+  watchdog::init(&hiwdg1);
 
   /* CAN node — the ECU downlinks telemetry over CAN to the FCU. */
   (void)g_can.init(&hfdcan1, static_cast<uint8_t>(BoardId::Engine));
@@ -161,8 +172,8 @@ void wireDrivers(void)
   /* Bring up the single shared async write engine on SDMMC1 BEFORE any file opens (and before
      its completion IRQ can fire): it arbitrates the one SDMMC peripheral across all three files
      via raw-sector DMA. One engine per physical card (mirrors the FCU, which uses SDMMC2). Also
-     hand it the SD_DETECT socket switch (PD4) so card-present rides the extended telemetry. */
-  platform::storage::sd_write_engine().init(&hsd1, SD_DETECT_GPIO_Port, SD_DETECT_Pin);
+     hand it the SD_DETECT socket switch (PC7) so card-present rides the extended telemetry. */
+  platform::storage::sd_write_engine().init(&hsd1, SD1_DET_GPIO_Port, SD1_DET_Pin);
 
   /* Bind the three SD log files on SDMMC1 (the app composition left them unbound). They
      share one card: g_controller.init() mounts the volume + creates this boot's session

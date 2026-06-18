@@ -23,6 +23,7 @@
 #include "control/state_machine.hpp"                           // toState, isTransitionAllowed, isTransitionLockedOut (shared)
 #include "control/state_timing.hpp"                            // logic::control::state_entered_ms
 #include "control/last_ping.hpp"                               // logic::control::last_ping_ms (GS-heartbeat liveness clock)
+#include "control/watchdog.hpp"                                // logic::control::watchdog::kick (IWDG feed seam)
 #include "control/refused_transition.hpp"                      // logic::control::last_refused_transition
 #include "control/refused_control_flag.hpp"                     // logic::control::last_refused_control_flag
 #include "control/refused_valve.hpp"                            // logic::control::last_refused_valve
@@ -330,9 +331,10 @@ private:
         // Stamp the GS-heartbeat liveness clock; telemetry publishes seconds_since_last_ping from it.
         logic::control::last_ping_ms = now_ms;
         // A serviced Ping proves the GS->FCU link is alive, so this is also where the independent
-        // watchdog gets fed (~1 Hz expected; size the IWDG window to tolerate a few missed beats).
-        // Losing the heartbeat then lets the IWDG reset the board.
-        // TODO(IWDG): refresh the watchdog here once the platform seam lands (e.g. watchdog::kick()).
+        // watchdog gets fed (~1 Hz expected; the IWDG window tolerates a few missed beats). Losing the
+        // heartbeat then lets the IWDG (~30 s) reset the board: a board that cannot service a ping for
+        // the timeout is treated as dead.
+        logic::control::watchdog::kick();
         // -------------------------------------------------------------------------------------
 
         const auto target = static_cast<BoardId>(cmd.target);

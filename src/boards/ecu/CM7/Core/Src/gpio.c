@@ -79,11 +79,11 @@ void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(ADS_CS_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : SD_DETECT_Pin */
-  GPIO_InitStruct.Pin = SD_DETECT_Pin;
+  /*Configure GPIO pin : SD1_DET_Pin */
+  GPIO_InitStruct.Pin = SD1_DET_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(SD_DETECT_GPIO_Port, &GPIO_InitStruct);
+  HAL_GPIO_Init(SD1_DET_GPIO_Port, &GPIO_InitStruct);
 
 }
 
