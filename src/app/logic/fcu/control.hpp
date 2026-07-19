@@ -148,6 +148,19 @@ public:
         driveHeater(heater_tank_, FcuControlFlag::HeaterTank, now_ms);
     }
 
+    /** @brief Feed the independent watchdog each tick WHILE IN SAFE, so losing the ground-station
+     *         link does not reset the board there. Safe is the state in which people are allowed
+     *         near the system, and it is entered precisely for the periods (assembly) when the GS
+     *         is expected to be gone for minutes at a time — silence is normal there, not a dead
+     *         board. In EVERY OTHER state the link is part of the safety case and the only feed is
+     *         a serviced Ping (see handlePing), so ~30 s of silence lets the IWDG reset the board. */
+    void serviceWatchdog()
+    {
+        if (logic::control::persistent_state.fill_state == logic::control::State::Safe) {
+            logic::control::watchdog::kick();
+        }
+    }
+
     /**
      * @brief Handle one inbound ground-station datagram: parse it into a Command,
      *        check it is addressed to us, then gate + dispatch.

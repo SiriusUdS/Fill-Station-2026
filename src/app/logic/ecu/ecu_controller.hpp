@@ -101,6 +101,7 @@ public:
             control_.onCommand(*frame, now_ms);
         }
 
+        control_.serviceWatchdog();              // feed the IWDG while in Safe (comm loss is not a fault there)
         telemetry_.servicePowerMonitor(now_ms);  // advance the non-blocking INA3221 round-robin
         telemetry_.produceExtended(now_ms);  // ~10 Hz ExtendedSystemState -> data_ext.bin
         telemetry_.drain(now_ms);   // flush full halves to SD + downlink over CAN

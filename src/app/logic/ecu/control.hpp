@@ -111,6 +111,21 @@ public:
         return true;
     }
 
+    /** @brief Feed the independent watchdog each tick WHILE IN SAFE, so losing the FCU->ECU CAN
+     *         bridge does not reset the board there. Safe is the state in which people are allowed
+     *         near the system, and it is entered precisely for the periods (assembly) when the link
+     *         is expected to be gone for minutes at a time — silence is normal there, not a dead
+     *         board. In EVERY OTHER state the bridge is part of the safety case and the only feed is
+     *         a serviced Ping (see handlePing), so ~30 s of silence lets the IWDG reset the board.
+     *         The ECU mirrors fill_state from the FCU's bridged SetState, so both boards apply the
+     *         relaxed feed over the same window. */
+    void serviceWatchdog()
+    {
+        if (logic::control::persistent_state.fill_state == logic::control::State::Safe) {
+            logic::control::watchdog::kick();
+        }
+    }
+
     /**
      * @brief Handle one inbound CAN frame: decode the header, check it is addressed
      *        to us, then dispatch the command. Telemetry/response frames and frames

@@ -2,9 +2,10 @@
  * Platform watchdog DIL: the STM32H7 IWDG behind the logic-layer watchdog feed
  * seam (logic::control::watchdog::kick).
  *
- * MX_IWDG_Init() (CubeMX) creates AND starts the watchdog; init() binds the handle
- * so kick() — called from Control::handlePing on every serviced Ping — can refresh
- * it. If no Ping is serviced within the IWDG timeout (~30 s) the board is reset.
+ * MX_IWDG_Init() (CubeMX) creates AND starts the watchdog; init() binds the handle so
+ * kick() can refresh it. The logic layer decides WHEN to kick: on every serviced Ping
+ * in any state, and every tick while in Safe. Outside Safe, no Ping within the IWDG
+ * timeout (~30 s) therefore resets the board.
  * ------------------------------------------------------------------------- */
 
 #include "system/watchdog/watchdog.hpp"

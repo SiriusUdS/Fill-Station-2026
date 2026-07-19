@@ -141,6 +141,7 @@ public:
         control_.serviceEmatch();        // sample EMATCH_DET -> continuity LED (and the extended record)
         control_.serviceSolenoid(now_ms);  // enforce open-only-in-Unsafe on the coil line
         control_.serviceHeaters(now_ms);    // drive each heater on/off straight from its own flag
+        control_.serviceWatchdog();      // feed the IWDG while in Safe (comm loss is not a fault there)
         telemetry_.produceExtended(now_ms);  // ~10 Hz ExtendedSystemState -> GS + data_ext.bin
         telemetry_.drain(now_ms);        // flush full halves to SD + the GS
         control_.servicePending(now_ms); // resend / time out the in-flight reliable command
