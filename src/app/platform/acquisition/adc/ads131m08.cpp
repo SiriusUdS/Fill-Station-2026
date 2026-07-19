@@ -61,6 +61,16 @@ constexpr uint32_t DRDY_IRQ_PRIO = 5;
 // How long a blocking register write waits for its frame to complete at init.
 constexpr uint32_t WRITE_TIMEOUT_MS = 10;
 
+// How many times each register write is issued at init, and how long we pause between
+// attempts. A WREG that the device does not latch is SILENT - it keeps streaming at its
+// power-up defaults, so a dropped write looks exactly like a successful one on DOUT.
+// Repeating each write costs a few frames at boot and makes a single dropped frame
+// non-fatal; writing the same value again is idempotent, so the extra attempts are
+// harmless once one has landed. The pause gives the device time to digest a write that
+// restarts conversions (a CLOCK/OSR change does) before the next frame arrives.
+constexpr uint8_t  WRITE_ATTEMPTS  = 3;
+constexpr uint32_t WRITE_SETTLE_MS = 1;
+
 // Device frame layout: a 3-byte STATUS word, then one 3-byte (24-bit) word per
 // channel, then a 3-byte CRC word - MESSAGE_LENGTH (30) bytes total.
 constexpr std::size_t WORD_BYTES   = 3;
@@ -94,6 +104,25 @@ std::array<uint8_t, 6> make_write_frame(uint8_t address, uint16_t value)
     uint8_t valueLSB = (value & LSB_UINT16_MASK);
 
     return {command.bytes.MSB, command.bytes.LSB, 0, valueMSB, valueLSB, 0};
+}
+
+// The acknowledgment word a MULTI-register RREG reply opens with: 111a aaaa annn nnnn
+// (datasheet table 8-11, note 1) - the address and register count we transmitted, echoed
+// back. The top 3 bits are 111, NOT the 101 RREG opcode.
+//
+// This is the strongest transmit-path check the device offers: the address and count in it
+// can only be right if our command word actually reached DIN. A mismatch localises the fault
+// to the transmit path, separately from the register contents that follow.
+constexpr uint16_t RREG_ACK_CMD = 0b111;
+
+uint16_t expected_read_ack(uint8_t address, uint8_t count)
+{
+    RW_REG ack{};
+    ack.field.REGISTER_NUMBER = static_cast<uint16_t>(count - 1);  // n-1 registers
+    ack.field.ADDRESS         = address;
+    ack.field.CMD             = RREG_ACK_CMD;
+
+    return ack.COMMAND;
 }
 
 // Build the 3-byte RREG command word (read @p count registers starting at
@@ -130,11 +159,16 @@ std::optional<std::span<const uint8_t>> transfer_blocking(std::span<const uint8_
 }
 
 // Issue one WREG and block until the frame completes (or times out), so the
-// init sequence configures registers one at a time without racing the bus.
+// init sequence configures registers one at a time without racing the bus. Repeated
+// WRITE_ATTEMPTS times with a settle between (see the constant) so one dropped frame
+// does not silently leave the register at its power-up default.
 void write_register_blocking(uint8_t address, uint16_t value)
 {
     const std::array<uint8_t, 6> frame = make_write_frame(address, value);
-    (void)transfer_blocking(frame);
+    for (uint8_t attempt = 0; attempt < WRITE_ATTEMPTS; ++attempt) {
+        (void)transfer_blocking(frame);
+        HAL_Delay(WRITE_SETTLE_MS);
+    }
 }
 
 // Read @p count (<=8) consecutive 16-bit registers starting at @p address into
@@ -142,6 +176,15 @@ void write_register_blocking(uint8_t address, uint16_t value)
 // NEXT frame, so we clock the command, discard its (stale) reply, then clock a
 // NULL frame whose reply carries the register words - each in the top 16 bits of
 // a 24-bit device word (bytes [0],[1] of the word; low byte reserved 0).
+//
+// Where the data starts in that reply depends on how many registers were asked for
+// (datasheet 8.5.1.10.7, figures 8-23 and 8-24):
+//   - single register (count == 1): the response word IS the register contents, so the
+//     data is in word 0 - there is no acknowledgment word.
+//   - multiple registers (count > 1): the reply opens with an RREG acknowledgment word
+//     and the register data follows from word 1. That ack echoes the address and count we
+//     transmitted, so it is checked here (see expected_read_ack) - it fails a read whose
+//     command word never reached the device, rather than letting a garbage compare stand in.
 bool read_registers_blocking(uint8_t address, uint8_t count, uint16_t* out)
 {
     const std::array<uint8_t, 3> cmd = make_read_frame(address, count);
@@ -155,8 +198,19 @@ bool read_registers_blocking(uint8_t address, uint8_t count, uint16_t* out)
         return false;
     }
     const std::span<const uint8_t> frame = *reply;
+    const std::size_t first_data_word = (count > 1) ? 1u : 0u;  // skip the RREG ack on a multi-read
+    if (first_data_word != 0u) {
+        if (frame.size() < WORD_BYTES) {
+            return false;  // no room for the ack word
+        }
+        const uint16_t ack =
+            static_cast<uint16_t>((static_cast<uint16_t>(frame[0]) << 8) | frame[1]);
+        if (ack != expected_read_ack(address, count)) {
+            return false;  // the device did not echo our command word back
+        }
+    }
     for (uint8_t i = 0; i < count; ++i) {
-        const std::size_t off = static_cast<std::size_t>(i) * WORD_BYTES;
+        const std::size_t off = (first_data_word + i) * WORD_BYTES;
         if (off + 1 >= frame.size()) {
             return false;  // reply shorter than expected
         }
@@ -304,10 +358,14 @@ void Ads131m08::init(const Config& config)
     // register readback proves the WREGs above actually landed. Read GAIN/GAIN2
     // back (contiguous at 0x04/0x05) and require them to echo exactly what we
     // wrote; their reserved bits are written 0 and read 0, so the compare is
-    // clean (no masking). A mismatch or no reply clears config_successful, which
-    // rides AdcInfo into telemetry so a miswired/misconfigured link shows up
-    // instead of masquerading as good data at the wrong gain. Acquisition still
-    // starts either way - the flag reports, it does not gate.
+    // clean (no masking). The read also checks the RREG acknowledgment word, which
+    // echoes the address and count we transmitted - so the verdict separates a dead
+    // transmit path (the command word never arrived, ack wrong) from writes that
+    // arrived but did not stick (ack right, contents wrong). A failure at either
+    // step clears config_successful, which rides AdcInfo into telemetry so a
+    // miswired/misconfigured link shows up instead of masquerading as good data at
+    // the wrong gain. Acquisition still starts either way - the flag reports, it
+    // does not gate.
     uint16_t readback[2] = {0, 0};
     const bool read_ok = read_registers_blocking(REG_ADDR_GAIN, 2, readback);
     config_successful_ = read_ok &&
