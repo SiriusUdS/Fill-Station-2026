@@ -48,17 +48,19 @@ gpio::DigitalInput   g_ematch_detect;
 gpio::DigitalOutput  g_ematch_cont;
 Ematch               g_ematch{g_ematch_fire, g_ematch_detect, g_ematch_cont};
 
-/* The solenoid valve: same GPIO shape as the e-match. Constructed before g_controller
- * (which holds a reference to it via Control/Telemetry). Plain RAM (no DMA). */
+/* The solenoid valve: a single GPIO output line + the GpioSolenoid over it. Constructed
+ * before g_controller (which holds a reference to it via Control/Telemetry). Plain RAM
+ * (no DMA). */
 gpio::DigitalOutput  g_solenoid_drive;
-gpio::DigitalInput   g_solenoid_detect;
-gpio::DigitalOutput  g_solenoid_cont;
-Solenoid             g_solenoid{g_solenoid_drive, g_solenoid_detect, g_solenoid_cont};
+Solenoid             g_solenoid{g_solenoid_drive};
 
-/* The heater: a single GPIO output line + the GpioHeater over it. Constructed before
- * g_controller (which holds a reference to it via Control/Telemetry). Plain RAM (no DMA). */
+/* The two heaters: a single GPIO output line + the GpioHeater over it, each. Constructed
+ * before g_controller (which holds references to them via Control/Telemetry). Plain RAM
+ * (no DMA). */
 gpio::DigitalOutput  g_heater_drive;
 Heater               g_heater{g_heater_drive};
+gpio::DigitalOutput  g_heater_tank_drive;
+Heater               g_heater_tank{g_heater_tank_drive};
 
 __attribute__((section(".axisram"))) platform::storage::SdCard g_card_fast;
 __attribute__((section(".axisram"))) platform::storage::SdCard g_card_slow;
@@ -66,7 +68,7 @@ __attribute__((section(".axisram"))) platform::storage::SdCard g_card_ext;
 __attribute__((section(".axisram")))
 FcuController g_controller{g_card_fast, g_card_slow, g_card_ext, g_fill_valve, g_dump_valve,
                            g_ads131, g_eth, g_can, g_thermocouples, g_power_monitor,
-                           g_ematch, g_solenoid, g_heater};
+                           g_ematch, g_solenoid, g_heater, g_heater_tank};
 
 }  // namespace fcu_app
 

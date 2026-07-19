@@ -65,17 +65,19 @@ inline constexpr uint8_t  MAX_COMMAND_RETRIES = 3;
  * @tparam Comm The FCU Communication layer (forwards commands to the ECU, the pong to the GS).
  * @tparam EM   logic::actuation::Ematch (the igniter line, energised in the Ignite state).
  * @tparam SOL  logic::actuation::Solenoid (the solenoid valve, open only in the Unsafe state).
- * @tparam HTR  logic::actuation::Heater (the heater, driven straight from its control flag).
+ * @tparam HTR  logic::actuation::Heater (the main and tank heaters, each driven straight from
+ *              its own control flag).
  */
 template <logic::actuation::Valve V, typename Comm, logic::actuation::Ematch EM,
           logic::actuation::Solenoid SOL, logic::actuation::Heater HTR>
 class Control {
 public:
     /** @brief Construct over the local valves, the communication layer, the e-match, the solenoid,
-     *         and the heater. */
-    Control(V& fill_valve, V& dump_valve, Comm& comm, EM& ematch, SOL& solenoid, HTR& heater)
+     *         and the two heaters. */
+    Control(V& fill_valve, V& dump_valve, Comm& comm, EM& ematch, SOL& solenoid, HTR& heater,
+            HTR& heater_tank)
         : fill_valve_(fill_valve), dump_valve_(dump_valve), comm_(comm), ematch_(ematch),
-          solenoid_(solenoid), heater_(heater) {}
+          solenoid_(solenoid), heater_(heater), heater_tank_(heater_tank) {}
 
     /** @brief Boot-init the control layer: reset the GS-link liveness clock and drive
      *         the local valves to a safe (closed) position.
@@ -111,7 +113,8 @@ public:
         // and Dump, so they are not closed explicitly here.
         ematch_.deenergise(now_ms);  // boot-safe the firing line through the logic seam
         solenoid_.close(now_ms);     // boot-safe the solenoid closed through the logic seam
-        heater_.off(now_ms);         // boot-safe the heater off through the logic seam
+        heater_.off(now_ms);         // boot-safe both heaters off through the logic seam
+        heater_tank_.off(now_ms);
         (void)transitionTo(logic::control::State::Safe, now_ms);  // enter Safe (closes Fill + Dump)
     }
 
@@ -119,14 +122,12 @@ public:
      *         every controller tick; cheap and non-blocking (a GPIO read + a GPIO write). */
     void serviceEmatch() { (void)ematch_.poll(); }
 
-    /** @brief Service the solenoid valve each tick: sample its detect line onto the continuity
-     *         LED, then enforce its actuation policy — open ONLY while the SolenoidValve flag is
-     *         set AND the board is in Unsafe; closed otherwise (so it auto-closes on leaving
-     *         Unsafe). Cheap and non-blocking; the open/close edge ticks are stamped by the
-     *         solenoid only on an actual state change. */
+    /** @brief Service the solenoid valve each tick: enforce its actuation policy — open ONLY
+     *         while the SolenoidValve flag is set AND the board is in Unsafe; closed otherwise
+     *         (so it auto-closes on leaving Unsafe). Cheap and non-blocking; the open/close edge
+     *         ticks are stamped by the solenoid only on an actual state change. */
     void serviceSolenoid(uint32_t now_ms)
     {
-        (void)solenoid_.poll();
         const bool want_open =
             logic::control::fcu_control_flags.get(FcuControlFlag::SolenoidValve) &&
             logic::control::persistent_state.fill_state == logic::control::State::Unsafe;
@@ -137,17 +138,14 @@ public:
         }
     }
 
-    /** @brief Service the heater each tick: drive it on/off straight from the Heater control
-     *         flag. Unlike the solenoid the heater is NOT state-gated — it follows its flag in
-     *         any state. Cheap and non-blocking; the on/off edge ticks are stamped by the heater
-     *         only on an actual state change. */
-    void serviceHeater(uint32_t now_ms)
+    /** @brief Service both heaters each tick: drive each on/off straight from its own control
+     *         flag, independently of the other. Unlike the solenoid a heater is NOT state-gated —
+     *         it follows its flag in any state. Cheap and non-blocking; the on/off edge ticks are
+     *         stamped by each heater only on an actual state change. */
+    void serviceHeaters(uint32_t now_ms)
     {
-        if (logic::control::fcu_control_flags.get(FcuControlFlag::Heater)) {
-            heater_.on(now_ms);
-        } else {
-            heater_.off(now_ms);
-        }
+        driveHeater(heater_, FcuControlFlag::Heater, now_ms);
+        driveHeater(heater_tank_, FcuControlFlag::HeaterTank, now_ms);
     }
 
     /**
@@ -645,8 +643,20 @@ private:
     Comm&    comm_;         // injected communication layer; forwards to ECU / GS
     EM&      ematch_;       // injected e-match: energised in Ignite, polled each tick for the cont LED
     SOL&     solenoid_;     // injected solenoid valve: open only while its flag is set AND in Unsafe
-    HTR&     heater_;       // injected heater: driven on/off straight from its flag, any state
+    HTR&     heater_;       // injected heaters: each driven on/off straight from its own flag, any state
+    HTR&     heater_tank_;
     Pending  pending_{};       // the in-flight relayed GS->ECU command (Ping for now)
+
+    /* Drive one heater from one flag. Shared by serviceHeaters so the two heaters cannot
+       drift apart in policy — only in which flag they read. */
+    static void driveHeater(HTR& heater, FcuControlFlag flag, uint32_t now_ms)
+    {
+        if (logic::control::fcu_control_flags.get(flag)) {
+            heater.on(now_ms);
+        } else {
+            heater.off(now_ms);
+        }
+    }
 };
 
 } // namespace logic::fcu

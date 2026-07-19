@@ -125,22 +125,21 @@ void wireDrivers(void)
   g_ematch_detect.init({.port = EMATCH_DET_GPIO_Port, .pin = EMATCH_DET_Pin,
                         .active_high = true, .pull = GPIO_NOPULL});
 
-  /* Bring up the solenoid-valve lines on GPIOD (same shape as the e-match):
-       - SOL_VALVE_STATE (PD14) coil output — driven open ONLY while the SolenoidValve flag is
-         set AND the board is in Unsafe (Control::serviceSolenoid); init() drives it low (closed).
-       - SOL_VALVE_DET  (PD15) present input — active-high "solenoid wired up"; flip active_high here
-         if the board's polarity changes.
-       - SOL_VALVE_CONT (PD9) continuity LED — lit while the solenoid is detected. */
-  g_solenoid_drive.init({.port = SOL_VALVE_STATE_GPIO_Port, .pin = SOL_VALVE_STATE_Pin, .active_high = true});
-  g_solenoid_cont.init({.port = SOL_VALVE_CONT_GPIO_Port,   .pin = SOL_VALVE_CONT_Pin,  .active_high = true});
-  g_solenoid_detect.init({.port = SOL_VALVE_DET_GPIO_Port,  .pin = SOL_VALVE_DET_Pin,
-                          .active_high = true, .pull = GPIO_NOPULL});
+  /* Bring up the solenoid-valve coil output on GPIOB (clock enabled by MX_GPIO_Init):
+       - SOLENOID_VALVE_STATE (PB7) coil output — driven open ONLY while the SolenoidValve flag
+         is set AND the board is in Unsafe (Control::serviceSolenoid); init() drives it low
+         (closed). */
+  g_solenoid_drive.init({.port = SOLENOID_VALVE_STATE_GPIO_Port, .pin = SOLENOID_VALVE_STATE_Pin,
+                         .active_high = true});
 
-  /* Bring up the heater output on GPIOD (clock enabled by MX_GPIO_Init):
-       - HEATER_STATE (PD1) output — driven on/off straight from the Heater control flag
-         (Control::serviceHeater) in any state; init() drives it low (off). No detect input
-         or continuity LED: the heater is a bare on/off line. */
+  /* Bring up the two heater outputs (clocks enabled by MX_GPIO_Init). Each is driven on/off
+     straight from its own control flag (Control::serviceHeaters) in any state; init() drives
+     both low (off):
+       - HEATER_STATE      (PD1) main heater, from the Heater flag.
+       - HEATER_TANK_STATE (PB6) tank heater, from the HeaterTank flag. */
   g_heater_drive.init({.port = HEATER_STATE_GPIO_Port, .pin = HEATER_STATE_Pin, .active_high = true});
+  g_heater_tank_drive.init({.port = HEATER_TANK_STATE_GPIO_Port, .pin = HEATER_TANK_STATE_Pin,
+                            .active_high = true});
 
   /* Bring up the backup domain first, so the battery-backed Backup SRAM that
      holds the persistent state is clocked, writable and retained on VBAT before
@@ -195,26 +194,24 @@ void wireDrivers(void)
   });
   g_ads131.start();
 
-  /* Bring up the 4 MAX31856 thermocouples on SPI6. The board owns the 4 chip-selects:
-     CubeMX left TC1_CS asserted (low) and TC2/3/4_CS as floating inputs, which is wrong
+  /* Bring up the 2 MAX31856 thermocouples on SPI6. The board owns both chip-selects:
+     CubeMX left TC1_CS asserted (low) and TC2_CS as a floating input, which is wrong
      for a shared SPI bus — every CS must be a push-pull output idling deasserted (high).
-     Configure all four as outputs here; the driver then deasserts each, configures the
+     Configure both as outputs here; the driver then deasserts each, configures the
      devices, and polls them NON-BLOCKING from the main loop over interrupt-driven SPI6
-     (so a plugged-in board never stalls the loop). Channel order TC1..TC4 maps to
-     thermocouple_info[0..3]. NOTE: MX_SPI6_Init must use CPHA = 1 (SPI mode 1/3). */
+     (so a plugged-in board never stalls the loop). Channel order TC1..TC2 maps to
+     thermocouple_info[0..1]. NOTE: MX_SPI6_Init must use CPHA = 1 (SPI mode 1/3). */
   GPIO_InitTypeDef tc_cs = {};
   tc_cs.Mode  = GPIO_MODE_OUTPUT_PP;
   tc_cs.Pull  = GPIO_NOPULL;
   tc_cs.Speed = GPIO_SPEED_FREQ_LOW;
   tc_cs.Pin = TC1_CS_Pin; HAL_GPIO_Init(TC1_CS_GPIO_Port, &tc_cs);
   tc_cs.Pin = TC2_CS_Pin; HAL_GPIO_Init(TC2_CS_GPIO_Port, &tc_cs);
-  tc_cs.Pin = TC3_CS_Pin; HAL_GPIO_Init(TC3_CS_GPIO_Port, &tc_cs);
-  tc_cs.Pin = TC4_CS_Pin; HAL_GPIO_Init(TC4_CS_GPIO_Port, &tc_cs);
 
   g_thermocouples.init({
       .hspi     = &hspi6,
-      .cs_ports = { TC1_CS_GPIO_Port, TC2_CS_GPIO_Port, TC3_CS_GPIO_Port, TC4_CS_GPIO_Port },
-      .cs_pins  = { TC1_CS_Pin, TC2_CS_Pin, TC3_CS_Pin, TC4_CS_Pin },
+      .cs_ports = { TC1_CS_GPIO_Port, TC2_CS_GPIO_Port },
+      .cs_pins  = { TC1_CS_Pin, TC2_CS_Pin },
   });
 
   /* Bring up the INA3221 power monitor on I2C4 (PF14 SCL / PF15 SDA). init() writes the
@@ -285,22 +282,22 @@ void wireDrivers(void)
   htim15.Instance->EGR = TIM_EGR_UG;
 
   g_fill_valve.init({
-      .servo       = {.htim = &htim1, .channel = TIM_CHANNEL_1,
-                      .min_pulse_ticks = 1000.0F, .max_pulse_ticks = 2000.0F},
+      .servo       = {.htim = &htim1, .channel = TIM_CHANNEL_1},
       .open_limit  = {.port = FILL_SWITCH_OPENED_GPIO_Port, .pin = FILL_SWITCH_OPENED_Pin},
       .close_limit = {.port = FILL_SWITCH_CLOSED_GPIO_Port, .pin = FILL_SWITCH_CLOSED_Pin},
       .max_transit_timeout_ms = 5000,
       .duty_closed_percent = 26.0F,   // Fill calibration: 26 % duty = fully closed
       .duty_open_percent   = 54.0F,   //                   54 % duty = fully open
+      .inverted            = true,    // The fill valve's servo is installed in the opposite orientation to the dump, so invert the drive direction here (instead of swapping min/max pulse) to keep the duty<->position mapping consistent between them: 26 % duty = closed, 54 % duty = open, for both valves.
   });
   g_dump_valve.init({
-      .servo       = {.htim = &htim15, .channel = TIM_CHANNEL_2,
-                      .min_pulse_ticks = 1000.0F, .max_pulse_ticks = 2000.0F},
+      .servo       = {.htim = &htim15, .channel = TIM_CHANNEL_2},
       .open_limit  = {.port = DUMP_SWITCH_OPENED_GPIO_Port, .pin = DUMP_SWITCH_OPENED_Pin},
       .close_limit = {.port = DUMP_SWITCH_CLOSED_GPIO_Port, .pin = DUMP_SWITCH_CLOSED_Pin},
       .max_transit_timeout_ms = 5000,
       .duty_closed_percent = 26.0F,   // Dump calibration: 26 % duty = fully closed
       .duty_open_percent   = 54.0F,   //                   54 % duty = fully open
+      .inverted            = true,    // The dump valve's servo is installed in the opposite orientation to the fill, so invert the drive direction here (instead of swapping min/max pulse) to keep the duty<->position mapping consistent between them: 26 % duty = closed, 54 % duty = open, for both valves.
   });
 
   /* Bring up the FCU controller. It resumes the persisted state and then safes the

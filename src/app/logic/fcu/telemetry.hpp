@@ -95,7 +95,7 @@ struct LogBuffer {
  * @tparam V logic::actuation::Valve (read for telemetry; both Fill and Dump).
  * @tparam A logic::communication::StreamingAdc (the ADS131M08).
  * @tparam Comm The FCU Communication layer (frames + sends to the GS).
- * @tparam TC logic::communication::ThermocoupleBank (the 4 MAX31856 on SPI6).
+ * @tparam TC logic::communication::ThermocoupleBank (the 2 MAX31856 on SPI6).
  * @tparam PM logic::communication::PowerMonitor (the INA3221 on I2C4).
  */
 template <logic::storage::Storage S, logic::actuation::Valve V,
@@ -107,14 +107,14 @@ public:
     /** @brief Construct over the held drivers + the communication layer. The three
      *         SD streams are the high-rate SystemState (fast/slow, picked by the
      *         FastRecording flag) and the low-rate ExtendedSystemState. The e-match,
-     *         solenoid and heater are read-only here: their info() rides the extended record. */
+     *         solenoid and heaters are read-only here: their info() rides the extended record. */
     Telemetry(S& storage_fast, S& storage_slow, S& storage_ext,
               V& fill_valve, V& dump_valve, A& adc, Comm& comm, TC& thermocouples, PM& power_monitor,
-              EM& ematch, SOL& solenoid, HTR& heater)
+              EM& ematch, SOL& solenoid, HTR& heater, HTR& heater_tank)
         : recorder_(storage_fast, storage_slow, storage_ext),
           fill_valve_(fill_valve), dump_valve_(dump_valve),
           adc_(adc), comm_(comm), thermocouples_(thermocouples), power_monitor_(power_monitor),
-          ematch_(ematch), solenoid_(solenoid), heater_(heater) {}
+          ematch_(ematch), solenoid_(solenoid), heater_(heater), heater_tank_(heater_tank) {}
 
     /** @brief Zero the double buffer and bring the three SD log files online. */
     void init()
@@ -209,7 +209,7 @@ public:
     }
 
     /** @brief Build + emit the low-rate ExtendedSystemState (~10 Hz): the slow/bulky
-     *         state (the 4 thermocouples; later, event timestamps) the GS does not
+     *         state (the 2 thermocouples; later, event timestamps) the GS does not
      *         need thousands of times a second. ALWAYS downlinked to the GS and
      *         logged to data_ext.bin (regardless of Fast/Slow). Foreground-driven;
      *         self-throttled. */
@@ -232,7 +232,8 @@ public:
         ext.power_monitor = power_monitor_.info();   // INA3221 (I2C4), polled at ~10 Hz
         ext.ematch_info   = ematch_.info();          // presence + firing-line state + last energise/deenergise ticks
         ext.solenoid_info = solenoid_.info();        // presence + open/closed state + last open/close ticks
-        ext.heater_info   = heater_.info();          // on/off state + last on/off ticks
+        ext.heater_info[static_cast<std::size_t>(HeaterId::Main)] = heater_.info();       // on/off state + last on/off ticks
+        ext.heater_info[static_cast<std::size_t>(HeaterId::Tank)] = heater_tank_.info();
 
         recorder_.recordExtended(ext, now_ms);   // accumulate -> data_ext.bin
         const std::span<const uint8_t> bytes(reinterpret_cast<const uint8_t*>(&ext), sizeof(ext));
@@ -441,7 +442,8 @@ private:
     PM&   power_monitor_;  // injected INA3221; serviced off-ISR, read into the extended record
     EM&   ematch_;         // injected e-match (read-only here); its info() rides the extended record
     SOL&  solenoid_;       // injected solenoid valve (read-only here); its info() rides the extended record
-    HTR&  heater_;         // injected heater (read-only here); its info() rides the extended record
+    HTR&  heater_;         // injected heaters (read-only here); their info() rides the extended record
+    HTR&  heater_tank_;
     detail::LogBuffer log_;            // .axisram in firmware; left uninitialised until init()
     volatile uint32_t  last_adc_ms_ = 0;  // last tick a conversion was drained; gates the silent-ADC filler
     uint32_t           last_extended_ms_ = 0;  // throttles produceExtended() to ~10 Hz

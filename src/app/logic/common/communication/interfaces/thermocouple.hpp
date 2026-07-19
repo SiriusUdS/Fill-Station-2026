@@ -11,7 +11,7 @@
  *
  * The polled sibling of the ADC seam (adc.hpp): where the streaming ADC pushes
  * every conversion into a ring (StreamingAdc::pop), a thermocouple bank is polled.
- * One object owns all THERMOCOUPLE_COUNT channels (the 4 MAX31856 on SPI6 in
+ * One object owns all THERMOCOUPLE_COUNT channels (the 2 MAX31856 on SPI6 in
  * firmware). Acquisition is NON-BLOCKING: service() advances an interrupt-driven
  * round-robin one step at a time so the caller (the foreground loop) never stalls
  * on the bus, and info() returns the latest snapshot the logic folds into

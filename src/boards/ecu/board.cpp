@@ -226,17 +226,18 @@ void wireDrivers(void)
       .open_limit  = {.port = SWITCH_VALVE_IPA_OPENED_GPIO_Port, .pin = SWITCH_VALVE_IPA_OPENED_Pin},
       .close_limit = {.port = SWITCH_VALVE_IPA_CLOSED_GPIO_Port, .pin = SWITCH_VALVE_IPA_CLOSED_Pin},
       .max_transit_timeout_ms = 5000,
-      .duty_closed_percent = 26.0F,   // IPA calibration: 26 % duty = fully closed
-      .duty_open_percent   = 54.0F,   //                  54 % duty = fully open
+      .duty_closed_percent = 36.0F,   // IPA calibration: 26 % duty = fully closed
+      .duty_open_percent   = 65.0F,   //                  54 % duty = fully open
+      .inverted            = true,    // IPA valve is reversed: 0 % duty = fully open, 100 % duty = fully closed
   });
   g_nos_valve.init({
       .servo       = {.htim = &htim15, .channel = TIM_CHANNEL_2},
       .open_limit  = {.port = SWITCH_VALVE_NOS_OPENED_GPIO_Port, .pin = SWITCH_VALVE_NOS_OPENED_Pin},
       .close_limit = {.port = SWITCH_VALVE_NOS_CLOSED_GPIO_Port, .pin = SWITCH_VALVE_NOS_CLOSED_Pin},
       .max_transit_timeout_ms = 5000,
-      .duty_closed_percent = 26.0F,   // NOS calibration: 26 % duty = fully closed (swapped by .inverted below)
-      .duty_open_percent   = 54.0F,   //                  54 % duty = fully open  (swapped by .inverted below)
-      .inverted    = true,   // NOS valve is mounted reversed: swap duty endpoints + limit switches
+      .duty_closed_percent = 27.0F,   // NOS calibration: 27 % duty = fully closed (swapped by .inverted below)
+      .duty_open_percent   = 52.0F,   //                  52 % duty = fully open  (swapped by .inverted below)
+      .inverted    = false,
   });
 
   /* Bring up the engine controller (this also mounts the SD card via g_card.init()). The

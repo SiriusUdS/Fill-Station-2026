@@ -552,6 +552,7 @@ private:
     GPIO_TypeDef* cs_ports_[1] = {};  /**< Backs BusConfig; instance-lived (instance is static). */
     uint16_t      cs_pins_[1]  = {};
     AdcInfo       info_{};            /**< Latest conversion; see info(). */
+    bool          config_successful_ = false;  /**< init() GAIN/GAIN2 readback verdict; stamped into every frame. */
 
     /* Single-producer (DRDY ISR push) / single-consumer (controller pop) ring. */
     AdcInfo              ring_[RING_SIZE]{};

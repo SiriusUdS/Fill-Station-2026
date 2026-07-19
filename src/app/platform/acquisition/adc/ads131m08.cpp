@@ -96,23 +96,73 @@ std::array<uint8_t, 6> make_write_frame(uint8_t address, uint16_t value)
     return {command.bytes.MSB, command.bytes.LSB, 0, valueMSB, valueLSB, 0};
 }
 
+// Build the 3-byte RREG command word (read @p count registers starting at
+// @p address). The device replies on the FOLLOWING frame, so a read is two
+// frames: this command, then a NULL frame to clock the reply back.
+std::array<uint8_t, 3> make_read_frame(uint8_t address, uint8_t count)
+{
+    RW_REG command{};
+    command.field.REGISTER_NUMBER = static_cast<uint16_t>(count - 1);  // n-1 registers
+    command.field.ADDRESS         = address;
+    command.field.CMD             = RREG_CMD;
+
+    return {command.bytes.MSB, command.bytes.LSB, 0};
+}
+
+// Issue one frame and block until it completes (or times out), returning the
+// bytes the device clocked back. std::nullopt on timeout. Single frame in flight
+// at a time - used only from init(), before DRDY-paced acquisition starts.
+std::optional<std::span<const uint8_t>> transfer_blocking(std::span<const uint8_t> tx)
+{
+    const uint32_t start = HAL_GetTick();
+    while (spi::transfer(BUS, tx) == SpiError::Busy) {
+        if (HAL_GetTick() - start > WRITE_TIMEOUT_MS) {
+            return std::nullopt;  // bus stuck; give up
+        }
+    }
+    std::optional<std::span<const uint8_t>> rx;
+    while (!(rx = spi::receive(BUS))) {
+        if (HAL_GetTick() - start > WRITE_TIMEOUT_MS) {
+            return std::nullopt;  // frame never completed; give up
+        }
+    }
+    return rx;
+}
+
 // Issue one WREG and block until the frame completes (or times out), so the
 // init sequence configures registers one at a time without racing the bus.
 void write_register_blocking(uint8_t address, uint16_t value)
 {
     const std::array<uint8_t, 6> frame = make_write_frame(address, value);
+    (void)transfer_blocking(frame);
+}
 
-    const uint32_t start = HAL_GetTick();
-    while (spi::transfer(BUS, frame) == SpiError::Busy) {
-        if (HAL_GetTick() - start > WRITE_TIMEOUT_MS) {
-            return;  // bus stuck; give up on this write
-        }
+// Read @p count (<=8) consecutive 16-bit registers starting at @p address into
+// @p out. Returns false on timeout / short reply. The RREG reply lands on the
+// NEXT frame, so we clock the command, discard its (stale) reply, then clock a
+// NULL frame whose reply carries the register words - each in the top 16 bits of
+// a 24-bit device word (bytes [0],[1] of the word; low byte reserved 0).
+bool read_registers_blocking(uint8_t address, uint8_t count, uint16_t* out)
+{
+    const std::array<uint8_t, 3> cmd = make_read_frame(address, count);
+
+    if (!transfer_blocking(cmd)) {
+        return false;  // command frame never completed
     }
-    while (!spi::receive(BUS)) {
-        if (HAL_GetTick() - start > WRITE_TIMEOUT_MS) {
-            return;  // frame never completed; give up
-        }
+    const std::optional<std::span<const uint8_t>> reply =
+        transfer_blocking(std::span<const uint8_t>{});  // NULL frame clocks the reply back
+    if (!reply) {
+        return false;
     }
+    const std::span<const uint8_t> frame = *reply;
+    for (uint8_t i = 0; i < count; ++i) {
+        const std::size_t off = static_cast<std::size_t>(i) * WORD_BYTES;
+        if (off + 1 >= frame.size()) {
+            return false;  // reply shorter than expected
+        }
+        out[i] = static_cast<uint16_t>((static_cast<uint16_t>(frame[off]) << 8) | frame[off + 1]);
+    }
+    return true;
 }
 
 // Sign-extend a 24-bit two's-complement sample into a full int32.
@@ -139,9 +189,10 @@ void Ads131m08::handle_frame(std::span<const uint8_t> frame)
         return;  // short frame; leave the last good sample in place
     }
     AdcInfo sample{};
-    sample.state             = AdcState::Streaming;
-    sample.status.initialized = 1u;
-    sample.status.data_valid  = 1u;
+    sample.state                   = AdcState::Streaming;
+    sample.status.initialized      = 1u;
+    sample.status.data_valid       = 1u;
+    sample.status.config_successful = config_successful_ ? 1u : 0u;  // carry the init-time verdict
     for (std::size_t i = 0; i < channel_count; ++i) {
         const uint8_t* w = frame.data() + STATUS_BYTES + i * WORD_BYTES;
         const uint32_t raw = (static_cast<uint32_t>(w[0]) << 16) |
@@ -246,6 +297,23 @@ void Ads131m08::init(const Config& config)
         write_register_blocking(base + 3u, static_cast<uint16_t>((gcal >> 8) & 0xFFFFu));   // GCAL_MSB (23:8)
         write_register_blocking(base + 4u, static_cast<uint16_t>((gcal & 0xFFu) << 8));     // GCAL_LSB (7:0)
     }
+
+    // Config-landed self-check. The ADS131M08 streams conversions in continuous
+    // mode with NO register writes at all (that is the power-up default), so a
+    // silently dead DIN line still yields plausible frames on DOUT - only a
+    // register readback proves the WREGs above actually landed. Read GAIN/GAIN2
+    // back (contiguous at 0x04/0x05) and require them to echo exactly what we
+    // wrote; their reserved bits are written 0 and read 0, so the compare is
+    // clean (no masking). A mismatch or no reply clears config_successful, which
+    // rides AdcInfo into telemetry so a miswired/misconfigured link shows up
+    // instead of masquerading as good data at the wrong gain. Acquisition still
+    // starts either way - the flag reports, it does not gate.
+    uint16_t readback[2] = {0, 0};
+    const bool read_ok = read_registers_blocking(REG_ADDR_GAIN, 2, readback);
+    config_successful_ = read_ok &&
+                         readback[0] == GAIN_REG.all &&
+                         readback[1] == GAIN_REG2.all;
+    info_.status.config_successful = config_successful_ ? 1u : 0u;
 }
 
 void Ads131m08::start()

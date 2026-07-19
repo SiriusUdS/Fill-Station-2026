@@ -46,11 +46,11 @@ using StatusIndicator = logic::indication::StatusIndicator<indication::Led>;
  * GPIO behind the logic seams (EMATCH_STATE / EMATCH_DET / EMATCH_CONT on GPIOD). */
 using Ematch = logic::fcu::GpioEmatch<gpio::DigitalOutput, gpio::DigitalInput, gpio::DigitalOutput>;
 
-/* The FCU solenoid valve: coil output + present-detect input + continuity LED, same
- * GPIO shape as the e-match (SOL_VALVE_STATE / SOL_VALVE_DET / SOL_VALVE_CONT on GPIOD). */
-using Solenoid = logic::fcu::GpioSolenoid<gpio::DigitalOutput, gpio::DigitalInput, gpio::DigitalOutput>;
+/* The FCU solenoid valve: a bare coil output (SOLENOID_VALVE_STATE on GPIOB). */
+using Solenoid = logic::fcu::GpioSolenoid<gpio::DigitalOutput>;
 
-/* The FCU heater: a bare on/off output (HEATER_STATE on GPIOE), no detect input or LED. */
+/* The FCU heaters: a bare on/off output each (HEATER_STATE on GPIOD for the main heater,
+ * HEATER_TANK_STATE on GPIOB for the tank heater). */
 using Heater = logic::fcu::GpioHeater<gpio::DigitalOutput>;
 
 /* The FCU's concrete controller type, instantiated over its real drivers. */
@@ -86,17 +86,17 @@ extern gpio::DigitalInput     g_ematch_detect;  // EMATCH_DET    (e-match-presen
 extern gpio::DigitalOutput    g_ematch_cont;    // EMATCH_CONT   (continuity LED)
 extern Ematch                 g_ematch;
 
-/* The solenoid-valve GPIO lines (SOL_VALVE_STATE / SOL_VALVE_DET / SOL_VALVE_CONT on
- * GPIOD) and the GpioSolenoid composed over them. Bound to their pins by wireDrivers(). */
-extern gpio::DigitalOutput    g_solenoid_drive;   // SOL_VALVE_STATE (coil output)
-extern gpio::DigitalInput     g_solenoid_detect;  // SOL_VALVE_DET   (present input)
-extern gpio::DigitalOutput    g_solenoid_cont;    // SOL_VALVE_CONT  (continuity LED)
+/* The solenoid-valve GPIO line (SOLENOID_VALVE_STATE on GPIOB) and the GpioSolenoid
+ * composed over it. Bound to its pin by wireDrivers(). */
+extern gpio::DigitalOutput    g_solenoid_drive;   // SOLENOID_VALVE_STATE (coil output)
 extern Solenoid               g_solenoid;
 
-/* The heater GPIO line (HEATER_STATE on GPIOE) and the GpioHeater composed over it.
- * Bound to its pin by board::wireDrivers(). */
-extern gpio::DigitalOutput    g_heater_drive;     // HEATER_STATE (heater output)
+/* The two heater GPIO lines and the GpioHeater composed over each. Bound to their pins
+ * by board::wireDrivers(). */
+extern gpio::DigitalOutput    g_heater_drive;       // HEATER_STATE      (main heater output)
 extern Heater                 g_heater;
+extern gpio::DigitalOutput    g_heater_tank_drive;  // HEATER_TANK_STATE (tank heater output)
+extern Heater                 g_heater_tank;
 
 extern FcuController          g_controller;
 

@@ -56,11 +56,11 @@ namespace logic::fcu {
  * @tparam A logic::communication::StreamingAdc (the ADS131M08).
  * @tparam E logic::communication::Ethernet (the UDP link to the GS).
  * @tparam C logic::communication::Can (the FDCAN bus to the ECU).
- * @tparam TC logic::communication::ThermocoupleBank (the 4 MAX31856 on SPI6).
+ * @tparam TC logic::communication::ThermocoupleBank (the 2 MAX31856 on SPI6).
  * @tparam PM logic::communication::PowerMonitor (the INA3221 on I2C4).
  * @tparam EM logic::actuation::Ematch (the e-match igniter line; 3 GPIOs on GPIOD).
- * @tparam SOL logic::actuation::Solenoid (the solenoid valve; 3 GPIOs on GPIOD).
- * @tparam HTR logic::actuation::Heater (the heater; 1 GPIO on GPIOE).
+ * @tparam SOL logic::actuation::Solenoid (the solenoid valve; 1 GPIO).
+ * @tparam HTR logic::actuation::Heater (the main and tank heaters; 1 GPIO each).
  */
 template <logic::storage::Storage S, logic::actuation::Valve V,
           logic::communication::StreamingAdc A, logic::communication::Ethernet E,
@@ -75,11 +75,11 @@ public:
      *         (data_ext.bin); which SystemState file is written is the FastRecording flag's. */
     Controller(S& storage_fast, S& storage_slow, S& storage_ext,
                V& fill_valve, V& dump_valve, A& adc, E& eth, C& can, TC& thermocouples,
-               PM& power_monitor, EM& ematch, SOL& solenoid, HTR& heater)
+               PM& power_monitor, EM& ematch, SOL& solenoid, HTR& heater, HTR& heater_tank)
         : comm_(eth, can),
           telemetry_(storage_fast, storage_slow, storage_ext, fill_valve, dump_valve, adc, comm_,
-                     thermocouples, power_monitor, ematch, solenoid, heater),
-          control_(fill_valve, dump_valve, comm_, ematch, solenoid, heater) {}
+                     thermocouples, power_monitor, ematch, solenoid, heater, heater_tank),
+          control_(fill_valve, dump_valve, comm_, ematch, solenoid, heater, heater_tank) {}
 
     /**
      * @brief  Initialise the FCU logic: communication endpoint, telemetry buffer +
@@ -139,8 +139,8 @@ public:
         telemetry_.serviceThermocouples(now_ms);  // advance the non-blocking MAX31856 round-robin
         telemetry_.servicePowerMonitor(now_ms);   // advance the non-blocking INA3221 round-robin
         control_.serviceEmatch();        // sample EMATCH_DET -> continuity LED (and the extended record)
-        control_.serviceSolenoid(now_ms);  // SOL_VALVE_DET -> cont LED + enforce open-only-in-Unsafe
-        control_.serviceHeater(now_ms);     // drive HEATER_STATE on/off straight from the Heater flag
+        control_.serviceSolenoid(now_ms);  // enforce open-only-in-Unsafe on the coil line
+        control_.serviceHeaters(now_ms);    // drive each heater on/off straight from its own flag
         telemetry_.produceExtended(now_ms);  // ~10 Hz ExtendedSystemState -> GS + data_ext.bin
         telemetry_.drain(now_ms);        // flush full halves to SD + the GS
         control_.servicePending(now_ms); // resend / time out the in-flight reliable command

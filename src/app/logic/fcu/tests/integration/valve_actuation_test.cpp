@@ -64,10 +64,11 @@ protected:
     FakeEmatch           ematch_;
     FakeSolenoid         solenoid_;
     FakeHeater           heater_;
+    FakeHeater           heater_tank_;
     logic::fcu::Controller<FakeStorage, FakeValve, FakeStreamingAdc, FakeEthernet, FakeCan,
                            FakeThermocoupleBank, FakePowerMonitor, FakeEmatch, FakeSolenoid, FakeHeater>
                      controller_{storage_fast_, storage_slow_, storage_ext_,
-                                 fill_valve_, dump_valve_, adc_, eth_, can_, tc_, pm_, ematch_, solenoid_, heater_};
+                                 fill_valve_, dump_valve_, adc_, eth_, can_, tc_, pm_, ematch_, solenoid_, heater_, heater_tank_};
     uint32_t         now_ms_ = 0;
 
     void SetUp() override

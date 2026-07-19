@@ -112,9 +112,10 @@ protected:
     FakeEmatch   ematch_;
     FakeSolenoid solenoid_;
     FakeHeater   heater_;
+    FakeHeater   heater_tank_;
     logic::fcu::Control<FakeValve, logic::fcu::Communication<FakeEthernet, FakeCan>,
                         FakeEmatch, FakeSolenoid, FakeHeater>
-                 control_{fill_valve_, dump_valve_, comm_, ematch_, solenoid_, heater_};
+                 control_{fill_valve_, dump_valve_, comm_, ematch_, solenoid_, heater_, heater_tank_};
     uint32_t     now_ms_ = 0;
 
     void SetUp() override

@@ -10,9 +10,9 @@
  *
  * The control + telemetry layers depend ONLY on the @ref Solenoid concept below: any
  * type with the right members models it, checked at compile time. There is no vtable
- * and no HAL type here — logic opens/closes the solenoid and reads its presence
- * without knowing about GPIO lines or pin polarities. The firmware models it with a
- * GpioSolenoid composed over the digital-in/out seams; host tests inject a FakeSolenoid.
+ * and no HAL type here — logic opens/closes the solenoid without knowing about the GPIO
+ * line or its polarity. The firmware models it with a GpioSolenoid composed over a single
+ * digital-out seam; host tests inject a FakeSolenoid.
  *
  * Like the Valve / Ematch seams, hardware/bring-up init() is NOT part of the contract
  * (the board configures the pins); the logic safes the solenoid through close().
@@ -31,16 +31,13 @@ namespace logic::actuation {
  *                      closed->open edge. Idempotent (no-op stamp if already open).
  *   - close(now_ms)  — drive the solenoid closed (also the boot-safe state); stamp now_ms
  *                      on the open->closed edge. Idempotent.
- *   - poll()         — sample the solenoid-present input, mirror it onto the continuity
- *                      indicator, and return whether the solenoid is detected.
- *   - info()         — the solenoid's own SolenoidInfo record (presence + open/closed
- *                      state + last open/close ticks), kept current; telemetry reads it.
+ *   - info()         — the solenoid's own SolenoidInfo record (open/closed state + last
+ *                      open/close ticks), kept current; telemetry reads it.
  */
 template <typename T>
 concept Solenoid = requires(T solenoid, uint32_t now_ms) {
     { solenoid.open(now_ms) }  -> std::same_as<void>;
     { solenoid.close(now_ms) } -> std::same_as<void>;
-    { solenoid.poll() }        -> std::same_as<bool>;
     { solenoid.info() }        -> std::same_as<::SolenoidInfo>;
 };
 

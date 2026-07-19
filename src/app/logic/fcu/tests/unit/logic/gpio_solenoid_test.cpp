@@ -1,35 +1,31 @@
 /* ------------------------------------------------------------------------- *
  * Unit tests for logic::fcu::GpioSolenoid — the concrete solenoid valve composed
- * over the digital-in/out seams. Exercised over fake GPIO lines: open/close drive the
+ * over the digital-out seam. Exercised over a fake GPIO line: open/close drive the
  * coil output and stamp the edge ticks (only on an actual transition, since the FCU
- * drives them every tick); poll() mirrors the detect input onto the continuity LED;
- * info() reports the lot for the extended telemetry record.
+ * drives them every tick); info() reports the lot for the extended telemetry record.
  * ------------------------------------------------------------------------- */
 
 #include "gpio_solenoid.hpp"
 
 #include "support/fake_digital_out.hpp"
-#include "support/fake_digital_in.hpp"
 
 #include <gtest/gtest.h>
 
 namespace {
 
-using Solenoid = logic::fcu::GpioSolenoid<FakeDigitalOut, FakeDigitalIn, FakeDigitalOut>;
+using Solenoid = logic::fcu::GpioSolenoid<FakeDigitalOut>;
 
 class GpioSolenoidTest : public ::testing::Test {
 protected:
-    FakeDigitalOut drive_;    // SOL_VALVE_STATE
-    FakeDigitalIn  detect_;   // SOL_VALVE_DET
-    FakeDigitalOut cont_;     // SOL_VALVE_CONT
-    Solenoid       solenoid_{drive_, detect_, cont_};
+    FakeDigitalOut drive_;    // SOLENOID_VALVE_STATE
+    Solenoid       solenoid_{drive_};
 };
 
 TEST_F(GpioSolenoidTest, DefaultsAreSafe)
 {
     const auto info = solenoid_.info();
     EXPECT_FALSE(info.status.open);
-    EXPECT_FALSE(info.status.detected);
+    EXPECT_FALSE(drive_.state);          // coil de-energised before any call
     EXPECT_EQ(info.last_opened_ms, 0u);
     EXPECT_EQ(info.last_closed_ms, 0u);
 }
@@ -57,21 +53,6 @@ TEST_F(GpioSolenoidTest, CloseDrivesCoilLowAndStampsTheEdgeOnce)
 
     solenoid_.close(3000);                            // already closed: idempotent, no re-stamp
     EXPECT_EQ(solenoid_.info().last_closed_ms, 2000u);
-}
-
-TEST_F(GpioSolenoidTest, PollMirrorsDetectOntoContinuityAndInfo)
-{
-    detect_.level = true;                      // solenoid wired up
-    EXPECT_TRUE(solenoid_.poll());
-    EXPECT_TRUE(cont_.state);                  // continuity LED lit
-    EXPECT_TRUE(solenoid_.info().status.detected);
-    EXPECT_TRUE(solenoid_.info().status.continuity);   // continuity-line state surfaced in telemetry
-
-    detect_.level = false;                     // disconnected
-    EXPECT_FALSE(solenoid_.poll());
-    EXPECT_FALSE(cont_.state);                 // continuity LED off
-    EXPECT_FALSE(solenoid_.info().status.detected);
-    EXPECT_FALSE(solenoid_.info().status.continuity);
 }
 
 } // namespace

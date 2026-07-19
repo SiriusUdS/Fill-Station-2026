@@ -81,6 +81,10 @@ constexpr uint16_t SOLENOID_FLAG_ID =
 constexpr uint16_t HEATER_FLAG_ID =
     CONTROL_FLAG_BOARD_OFFSET + static_cast<uint16_t>(FcuControlFlag::Heater);
 
+/* The 16-bit global flag id of the FCU tank heater. */
+constexpr uint16_t HEATER_TANK_FLAG_ID =
+    CONTROL_FLAG_BOARD_OFFSET + static_cast<uint16_t>(FcuControlFlag::HeaterTank);
+
 /* Build a CommandType::SetControlFlag datagram addressed to `device`: a 12-byte
    EthernetHeader followed by the SetControlFlagFrame {16-bit flag id, value}. */
 std::vector<uint8_t> makeControlFlagRequest(BoardId device, uint16_t flag, uint8_t value)
@@ -166,10 +170,11 @@ protected:
     FakeEmatch           ematch_;
     FakeSolenoid         solenoid_;
     FakeHeater           heater_;
+    FakeHeater           heater_tank_;
     logic::fcu::Controller<FakeStorage, FakeValve, FakeStreamingAdc, FakeEthernet, FakeCan,
                            FakeThermocoupleBank, FakePowerMonitor, FakeEmatch, FakeSolenoid, FakeHeater>
                      controller_{storage_fast_, storage_slow_, storage_ext_,
-                                 fill_valve_, dump_valve_, adc_, eth_, can_, tc_, pm_, ematch_, solenoid_, heater_};
+                                 fill_valve_, dump_valve_, adc_, eth_, can_, tc_, pm_, ematch_, solenoid_, heater_, heater_tank_};
     uint32_t         now_ms_ = 0;
 
     void SetUp() override
@@ -448,7 +453,7 @@ TEST_F(FcuControllerTest, OverflowingTheRingFlagsOverrun)
     EXPECT_TRUE(saw_overrun) << "overflowing the ring did not flag an overrun in any record";
 }
 
-/* The 4 thermocouples ride the low-rate ExtendedSystemState (data_ext / 10 Hz), NOT
+/* The 2 thermocouples ride the low-rate ExtendedSystemState (data_ext / 10 Hz), NOT
    the 2 kHz SystemState. Set a distinctive reading, cross the extended interval, and
    read it back out of the ExtendedSystemState datagram. */
 TEST_F(FcuControllerTest, ThermocouplesDownlinkInTheLowRateExtendedRecord)
@@ -1280,12 +1285,11 @@ TEST_F(FcuControllerTest, SolenoidClosesOnLeavingUnsafe)
     EXPECT_NE(solenoid_.last_closed_ms, 0u);
 }
 
-/* The solenoid presence + open state ride the extended record. */
+/* The solenoid open state rides the extended record. */
 TEST_F(FcuControllerTest, SolenoidStateRidesTheExtendedRecord)
 {
     reachSafe();
     logic::control::fcu_control_flags.set(FcuControlFlag::SolenoidValve, true);
-    solenoid_.detect_present = true;               // wired up
     requestState(logic::control::State::Unsafe);   // opens
     ASSERT_TRUE(solenoid_.is_open);
 
@@ -1302,7 +1306,6 @@ TEST_F(FcuControllerTest, SolenoidStateRidesTheExtendedRecord)
         FcuExtendedSystemState ext;
         std::memcpy(&ext, d.payload.data() + sizeof(EthernetHeader), sizeof(ext));
         EXPECT_EQ(ext.solenoid_info.status.open, 1u);
-        EXPECT_EQ(ext.solenoid_info.status.detected, 1u);
         found = true;
     }
     EXPECT_TRUE(found) << "no ExtendedSystemState was downlinked";
@@ -1376,6 +1379,77 @@ TEST_F(FcuControllerTest, HeaterTurnsOffWhenFlagCleared)
     EXPECT_NE(heater_.last_off_ms, 0u);
 }
 
+/* Each heater follows ONLY its own flag: setting Heater leaves the tank heater off, and
+   setting HeaterTank leaves the main heater off. The regression this guards is the two
+   heaters being wired to the same flag. */
+TEST_F(FcuControllerTest, EachHeaterFollowsOnlyItsOwnFlag)
+{
+    reachSafe();
+
+    logic::control::fcu_control_flags.set(FcuControlFlag::Heater, true);
+    step();
+    EXPECT_TRUE(heater_.is_on);
+    EXPECT_FALSE(heater_tank_.is_on);      // the tank heater's flag is still clear
+
+    logic::control::fcu_control_flags.set(FcuControlFlag::Heater, false);
+    logic::control::fcu_control_flags.set(FcuControlFlag::HeaterTank, true);
+    step();
+    EXPECT_FALSE(heater_.is_on);
+    EXPECT_TRUE(heater_tank_.is_on);
+}
+
+/* Both heaters can be on at once — they are independent, not mutually exclusive. */
+TEST_F(FcuControllerTest, BothHeatersCanBeOnTogether)
+{
+    reachSafe();
+    logic::control::fcu_control_flags.set(FcuControlFlag::Heater, true);
+    logic::control::fcu_control_flags.set(FcuControlFlag::HeaterTank, true);
+
+    step();
+    EXPECT_TRUE(heater_.is_on);
+    EXPECT_TRUE(heater_tank_.is_on);
+}
+
+/* The tank heater is not state-gated either, and its SetControlFlag command is honoured
+   outside Unsafe on its own wire id. */
+TEST_F(FcuControllerTest, HeaterTankFlagCommandAcceptedOutsideUnsafe)
+{
+    reachSafe();   // Safe, not Unsafe
+    requestControlFlag(HEATER_TANK_FLAG_ID, 1);
+
+    EXPECT_TRUE(logic::control::fcu_control_flags.get(FcuControlFlag::HeaterTank));
+    EXPECT_TRUE(heater_tank_.is_on);
+    EXPECT_FALSE(heater_.is_on);           // addressed by id, so the main heater is untouched
+}
+
+/* Both heaters ride the extended record, each at its own HeaterId index. */
+TEST_F(FcuControllerTest, BothHeatersRideTheExtendedRecord)
+{
+    reachSafe();
+    logic::control::fcu_control_flags.set(FcuControlFlag::HeaterTank, true);
+    step();
+    ASSERT_TRUE(heater_tank_.is_on);
+    ASSERT_FALSE(heater_.is_on);
+
+    bus().udp_tx.clear();
+    controller_.tick(now_ms_ += 150);   // cross the extended interval
+
+    bool found = false;
+    for (const auto& d : bus().udp_tx) {
+        EthernetHeader h;
+        std::memcpy(&h, d.payload.data(), sizeof(h));
+        if (static_cast<TelemetryType>(h.payload_id) != TelemetryType::ExtendedSystemState) {
+            continue;
+        }
+        FcuExtendedSystemState ext;
+        std::memcpy(&ext, d.payload.data() + sizeof(EthernetHeader), sizeof(ext));
+        EXPECT_EQ(ext.heater_info[static_cast<std::size_t>(HeaterId::Main)].status.on, 0u);
+        EXPECT_EQ(ext.heater_info[static_cast<std::size_t>(HeaterId::Tank)].status.on, 1u);
+        found = true;
+    }
+    EXPECT_TRUE(found) << "no ExtendedSystemState was downlinked";
+}
+
 /* A SetControlFlag(Heater) command is honoured in any state (here Safe): no state gate,
    so the flag is applied and the heater turns on. */
 TEST_F(FcuControllerTest, HeaterFlagCommandAcceptedOutsideUnsafe)
@@ -1401,7 +1475,7 @@ TEST_F(FcuControllerTest, LeavingUnsafeKeepsHeaterFlag)
     EXPECT_TRUE(heater_.is_on);                                                  // still on
 }
 
-/* The heater on/off state rides the extended record. */
+/* The main heater's on/off state rides the extended record at its HeaterId index. */
 TEST_F(FcuControllerTest, HeaterStateRidesTheExtendedRecord)
 {
     reachSafe();
@@ -1421,7 +1495,7 @@ TEST_F(FcuControllerTest, HeaterStateRidesTheExtendedRecord)
         }
         FcuExtendedSystemState ext;
         std::memcpy(&ext, d.payload.data() + sizeof(EthernetHeader), sizeof(ext));
-        EXPECT_EQ(ext.heater_info.status.on, 1u);
+        EXPECT_EQ(ext.heater_info[static_cast<std::size_t>(HeaterId::Main)].status.on, 1u);
         found = true;
     }
     EXPECT_TRUE(found) << "no ExtendedSystemState was downlinked";
